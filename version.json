@@ -1,0 +1,36 @@
+{
+  "version": "11.0.2",
+  "releaseName": "Armi Docente 11.0.2",
+  "publishedAt": "2026-03-29",
+  "assetName": "ARMI_DOCENTE_Setup.exe",
+  "downloadUrl": "https://github.com/Timer93/Armi-Docente/releases/download/Paquete_Instalador/ARMI_DOCENTE_Setup.exe",
+  "changelog": [
+    "Nueva versión de Armi Docente en aplicación web y escritorio.",
+    "Actializaciones detectables.",
+    "Apartado para asistencias faciales.",
+  ],
+  "history": [
+    {
+      "version": "11.0.2",
+      "releaseName": "Armi Docente 11.0.2",
+      "publishedAt": "2026-03-29",
+      "changelog": [
+        "Migración funcional consolidada hacia aplicación web y escritorio.",
+        "Nuevos apartados Metas y Reporte Docente.",
+        "Mejoras amplias en Archivos, Diagnóstica, Consolidado y sistema de impresión.",
+        "Nuevo sistema de actualización por version.json y descarga desde GitHub."
+      ]
+    },
+    {
+      "version": "6.2.6",
+      "releaseName": "Armi Docente 6.2.6",
+      "publishedAt": "2025-05-17",
+      "changelog": [
+        "Se mejoró la estabilidad de las actualizaciones detectadas.",
+        "Optimización de registro de consolidados bimestral en Primaria.",
+        "Corrección del error al autenticarse sin conexión.",
+        "Se agregó soporte para validación avanzada de usuarios."
+      ]
+    }
+  ]
+}
