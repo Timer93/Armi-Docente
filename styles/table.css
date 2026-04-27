@@ -1,0 +1,13 @@
+/* Texto vertical para MOTIVACIÓN */
+.writing-vertical {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  text-orientation: mixed;
+  letter-spacing: 2px;
+}
+
+/* Opcional: mejora visual de bordes */
+.table-border td,
+.table-border th {
+  border: 1px solid rgba(0,0,0,0.15);
+}

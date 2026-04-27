@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "provider": "manifest",
+  "owner": "Timer93",
+  "repo": "Armi-Docente",
+  "releaseType": "release",
+  "channel": "latest",
+  "manifestUrl": "https://raw.githubusercontent.com/Timer93/Armi-Docente/main/version.json"
+}

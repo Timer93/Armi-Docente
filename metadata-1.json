@@ -1,0 +1,5 @@
+{
+  "name": "ARMI Docente Web",
+  "description": "Aplicación pedagógica para la gestión de programaciones curriculares, migrada a web moderna con React y offline-first architecture.",
+  "requestFramePermissions": []
+}

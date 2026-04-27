@@ -1,0 +1,141 @@
+{
+  "name": "armi-docente-web",
+  "private": true,
+  "version": "11.0.4",
+  "description": "ARMI Docente",
+  "author": "ARMI",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev:backend": "node backend/server.js",
+    "dev:frontend": "vite",
+    "dev": "node scripts/dev.mjs",
+    "rebuild:native:node": "node scripts/rebuild-better-sqlite3.mjs node",
+    "rebuild:native:electron": "node scripts/rebuild-better-sqlite3.mjs electron",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron": "electron .",
+    "dist:win": "node scripts/build-installer.mjs",
+    "release:github": "node scripts/publish-github-release.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^1.35.0",
+    "@vitejs/plugin-react": "^5.1.2",
+    "@vladmandic/human": "^3.3.6",
+    "better-sqlite3": "^12.5.0",
+    "body-parser": "^2.2.1",
+    "child_process": "^1.0.2",
+    "cors": "^2.8.5",
+    "docxtemplater": "^3.54.1",
+    "docxtemplater-image-module": "^3.1.0",
+    "docxtemplater-image-module-free": "^1.1.1",
+    "electron-updater": "^6.6.2",
+    "express": "^5.2.1",
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7",
+    "pizzip": "^3.1.7",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-quill-new": "^3.8.3",
+    "recharts": "^3.6.0",
+    "url": "^0.11.4",
+    "vite": "^7.3.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.27",
+    "concurrently": "^9.2.1",
+    "electron": "^37.2.3",
+    "electron-builder": "^26.0.12",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.1",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  },
+  "build": {
+    "appId": "com.armi.docente",
+    "productName": "ARMI Docente",
+    "executableName": "ARMI Docente",
+    "icon": "src/Logo_bar.ico",
+    "artifactName": "ARMI_DOCENTE_Setup.${ext}",
+
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "buildDependenciesFromSource": true,
+    "npmRebuild": true,
+    "nodeGypRebuild": false,
+
+    "directories": {
+      "output": "dist_electron"
+    },
+
+    "files": [
+      "dist/**/*",
+      "backend/**/*",
+      "database/**/*",
+      "electron/**/*",
+      "node_modules/**/*",
+      "components/**/*",
+      "services/**/*",
+      "styles/**/*",
+      "src/**/*",
+      "sync-runtime/auth-settings.json",
+      "constants.ts",
+      "types.ts",
+      "package.json"
+    ],
+
+    "extraResources": [
+      {
+        "from": "backend/templates",
+        "to": "backend/templates"
+      },
+      
+      {
+        "from": "database",
+        "to": "database"
+      },
+      {
+        "from": "electron/release-config.json",
+        "to": "electron/release-config.json"
+      },
+      {
+        "from": "src/Logo_bar.ico",
+        "to": "icon.ico"
+      }
+    ],
+
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "src/Logo_bar.ico"
+    },
+
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "perMachine": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "ARMI Docente",
+      "installerIcon": "src/Logo_bar.ico",
+      "uninstallerIcon": "src/Logo_bar.ico",
+      "installerHeaderIcon": "src/Logo_bar.ico",
+
+      "runAfterFinish": true
+    }
+  }
+}

@@ -1,0 +1,42 @@
+/* Letras cayendo del cielo + typing rápido */
+.streaming-text {
+  white-space: pre-wrap;
+  overflow: hidden;
+  animation: 
+    fallIn 0.6s ease-out forwards,
+    typing 4s steps(60, end) forwards;
+  opacity: 0;
+  transform: translateY(-30px);
+}
+
+@keyframes fallIn {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes typing {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+/* Para que el textarea se vea "vivo" mientras escribe */
+.streaming-container {
+  position: relative;
+}
+
+.streaming-container textarea {
+  min-height: 120px;
+  transition: all 0.3s ease;
+}
+
+.streaming-active {
+  box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.5); /* morado brillante */
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(168, 85, 247, 0.4); }
+  70% { box-shadow: 0 0 0 10px rgba(168, 85, 247, 0); }
+}

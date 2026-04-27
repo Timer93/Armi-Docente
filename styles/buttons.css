@@ -1,0 +1,107 @@
+.btn-water {
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-water::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -150%;
+  width: 300%;
+  height: 100%;
+  background: radial-gradient(circle at center, rgba(255,255,255,0.35), transparent 60%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.btn-water:hover::before {
+  opacity: 1;
+  animation: water-move 1.8s linear infinite;
+}
+
+@keyframes water-move {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(50%);
+  }
+}
+
+/* Variantes */
+.water-blue {
+  background: linear-gradient(135deg, #2563eb, #1e40af);
+}
+
+.water-red {
+  background: linear-gradient(135deg, #dc2626, #7f1d1d);
+}
+
+.water-white {
+  background: #ffffff;
+}
+.btn-water::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 20% 50%, rgba(255,255,255,.4) 0 2px, transparent 3px),
+    radial-gradient(circle at 40% 30%, rgba(255,255,255,.3) 0 2px, transparent 3px),
+    radial-gradient(circle at 60% 60%, rgba(255,255,255,.35) 0 2px, transparent 3px),
+    radial-gradient(circle at 80% 40%, rgba(255,255,255,.25) 0 2px, transparent 3px);
+  opacity: 0;
+  animation: none;
+}
+
+.btn-water:hover::after {
+  opacity: 1;
+  animation: bubbles 1.2s ease-out infinite;
+}
+
+@keyframes bubbles {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-20px);
+  }
+}
+.success-burst {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 30% 50%, rgba(255,255,255,.6) 0 4px, transparent 6px),
+    radial-gradient(circle at 60% 40%, rgba(255,255,255,.5) 0 4px, transparent 6px),
+    radial-gradient(circle at 50% 70%, rgba(255,255,255,.4) 0 4px, transparent 6px);
+  animation: burst 0.6s ease-out;
+  pointer-events: none;
+}
+
+@keyframes burst {
+  from {
+    opacity: 1;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.4);
+  }
+}
+
+.check-anim {
+  font-size: 18px;
+  font-weight: 900;
+  animation: pop 0.4s ease-out;
+}
+
+@keyframes pop {
+  from {
+    transform: scale(0);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

@@ -1,0 +1,2241 @@
+﻿
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import ReactQuill from 'react-quill-new';
+import 'react-quill-new/dist/quill.bubble.css';
+import { TeachingAssignment, ScheduleEntry, ScheduleConfig, GeneralData } from '../types';
+import { getCompetencias, getUnidadDidactica, saveSesion, getSesion, getAllSesiones, deleteSesion, getDatosGenerales, getProgramacionesAnuales, saveDatosGenerales } from '../services/apiService';
+import { Select } from './Select';
+import { SessionTemplateMergeView } from './SessionTemplateMergeView';
+import { GoogleGenAI } from "@google/genai";
+
+interface Props {
+  activeSection: string;
+  onSuccess: () => void;
+}
+
+const ENFOQUE_DETAILS: Record<string, any> = {
+    "Enfoque de derechos": {
+        valores: "Conciencia de derechos, Libertad y responsabilidad, Diálogo y concertación",
+        actitudes: "> Disposición a conocer, comprender y valorar los derechos individuales y colectivos.\n> Disposición a elegir de manera voluntaria y responsable la propia forma de actuar dentro de una sociedad.",
+        demuestra: "Los docentes promueven el conocimiento de los Derechos Humanos y la Convención sobre los Derechos del Niño para empoderar a los estudiantes en su ejercicio democrático."
+    },
+    "Enfoque Inclusivo o de Atención a la diversidad": {
+        valores: "Respeto por las diferencias, Equidad en la enseñanza, Confianza en la persona",
+        actitudes: "> Reconocimiento al valor inherente de cada persona y de sus derechos, por encima de cualquier diferencia.\n> Disposición a enseñar ofreciendo a los estudiantes las condiciones y oportunidades que cada uno necesita.",
+        demuestra: "Docentes y estudiantes demuestran altas expectativas sobre todos los estudiantes, sin distinguir habilidades o procedencia."
+    },
+    "Enfoque Intercultural": {
+        valores: "Respeto a la identidad cultural, Justicia, Diálogo intercultural",
+        actitudes: "> Reconocimiento al valor de las diversas identidades culturales y relaciones de pertenencia de los estudiantes.\n> Disposición a actuar de manera justa, respetando el derecho de todos.",
+        demuestra: "Los docentes y estudiantes acogen con respeto a todos, sin menospreciar ni excluir a nadie en razón de su lengua, su manera de hablar, su forma de vestir, sus costumbres o sus creencias."
+    },
+    "Enfoque Igualdad de Género": {
+        valores: "Igualdad y Dignidad, Justicia, Empatía",
+        actitudes: "> Reconocimiento al valor inherente de cada persona, más allá de su género.\n> Disposición a actuar de modo que se dé a cada quien lo que le corresponde, en especial a quienes se ven perjudicados por la desigualdad de género.",
+        demuestra: "Docentes y estudiantes no hacen distinciones discriminatorias entre varones y mujeres."
+    },
+    "Enfoque ambiental": {
+        valores: "Solidaridad planetaria y equidad intergeneracional, Justicia y solidaridad, Respeto a toda forma de vida",
+        actitudes: "> Disposición para colaborar con el bienestar y la calidad de vida de las generaciones presentes y futuras.\n> Disposición a evaluar los impactos y costos ambientales de las acciones cotidianas.",
+        demuestra: "Docentes y estudiantes promueven la preservación de entornos saludables, a favor del cuidado del medio ambiente."
+    },
+    "Enfoque orientación al bien común": {
+        valores: "Equidad y justicia, Solidaridad, Empatía, Responsabilidad",
+        actitudes: "> Disposición a reconocer a que ante situaciones de inicio diferentes, se requieren compensaciones.\n> Disposición a apoyar incondicionalmente a personas en situaciones comprometidas o difíciles.",
+        demuestra: "Los estudiantes comparten siempre los bienes disponibles para ellos en los espacios educativos con sentido de equidad y justicia."
+    },
+    "Enfoque búsqueda de la Excelencia": {
+        valores: "Flexibilidad y apertura, Superación personal",
+        actitudes: "> Disposición para adaptarse a los cambios, modificando si fuera necesario la propia conducta.\n> Disposición a adquirir cualidades que mejorarán el propio desempeño.",
+        demuestra: "Docentes y estudiantes comparan, adquieren y emplean estrategias útiles para aumentar la eficacia de sus esfuerzos en el logro de los objetivos que se proponen."
+    }
+};
+
+const TRANSVERSAL_NAMES = [
+    "Se desenvuelve en los entornos virtuales generados por las TIC",
+    "Gestiona su aprendizaje de manera autónoma"
+];
+
+const TRANSVERSAL_CAPACITY_MAP: Record<string, string[]> = {
+    [TRANSVERSAL_NAMES[0]]: [
+        "Personaliza entornos virtuales",
+        "Gestiona información del entorno virtual",
+        "Interactúa en entornos virtuales",
+        "Crea objetos virtuales en diversos formatos"
+    ],
+    [TRANSVERSAL_NAMES[1]]: [
+        "Define metas de aprendizaje",
+        "Organiza acciones estratégicas para alcanzar sus metas de aprendizaje",
+        "Monitorea y ajusta su desempeño durante el proceso de aprendizaje"
+    ]
+};
+
+// Al inicio del archivo o en un util
+const multiline = (strings: TemplateStringsArray, ...values: any[]) => 
+  String.raw({ raw: strings }, ...values).trim();
+
+        const DEFAULT_SEQUENCE_TEMPLATE = {
+            saberes: '<p><span style="color: black/20;">El docente ingresa al aula saludando cordialmente a los estudiantes y posteriormente toma asistencia. Luego pide a los estudiantes que recuerden los contenidos que aprendieron en la sesión anterior, así como los elementos que fueron necesarios para realizarla.</span><br><span style="color: green;">A) [Pregunta saberes 1]</span><br><span style="color: green;">B) [Pregunta saberes 2]</span><br><span style="color: black/20;">El docente les muestra el recurso contenido en el <strong>Anexo N° 1</strong>, que hace referencia al campo temático de la presente sesión.</span></p>',
+            saberes_recursos: '<ul><li>Proyector</li><li>Expresión Oral</li><li>Pizarra</li><li>Plumones</li></ul>',
+            conflicto: '<p><span style="color: black/20;">Mediante la técnica de </span><span style="color: green;">lluvia de ideas</span><span style="color: black/20;"> el docente interactúa con los estudiantes realizando preguntas para generar interés en el aprendizaje:</span><br><span style="color: green;">A) [Pregunta conflicto 1]</span><br><span style="color: green;">B) [Pregunta conflicto 2]</span><br><span style="color: black/20;">Luego el docente presenta el <strong>título</strong> de la sesión de aprendizaje, explica el <strong>propósito</strong> e indica cuál será el <strong>producto</strong> a desarrollar.</span></p>',
+            conflicto_recursos: '<ul><li>Expresión oral</li><li>Expresión corporal</li><li>Plumones</li></ul>',
+            construccion: multiline`
+            <p>
+                <span style="color: black/20;">El docente presenta la situación problemática, resaltando que </span>
+                <span style="color: green;">[<em>resaltar la importancia de lo que se aprende</em>].</span>
+                <span style="color: black/20;">Luego proyecta el <strong>Instructivo N° 1</strong>.</span>
+                <br>
+                <br><strong>PRIMERO:</strong></br>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+                <br><strong>SEGUNDO:</strong></br>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+                <br><strong>TERCERO:</strong></br>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+                    <p><span style="color: green;">  - [Introducir texto aquí.]</spam></p>
+            </p>`,
+            construccion_recursos: '<ul><li>PC/Laptops</li><li>Plumones</li><li>Pizarra</li><li>Proyector</li></ul>',
+            aplicacion: multiline`
+                        <p><span style="color: rgba(0,0,0,0.73);">Posteriormente el docente reparte el <strong>Anexo N° 2</strong> a cada estudiante para que puedan demostrar los aprendizajes adquiridos, realizando el producto propuesto para la sesión en su <span style="color: green;"><em>[cuaderno/laptop/PC/celular]</em></span>, según las indicaciones proporcionadas.</span></p>
+                        <p><span style="color: rgba(0,0,0,0.73);">El docente apoya y orienta en todo momento de acuerdo a las diversas dificultades que se presenten durante el desarrollo del tema, realimentando y reflexionando sobre el proceso de enseñanza-aprendizaje del tema tratado.</span></p>
+                        <br>
+                        <p><span style="color: rgba(0,0,0,0.6);">Luego el docente indica que guarden su trabajo en el dispositivo que hayan usado en clase, usando la siguiente ruta:</span></p>
+                        <p><span style="color: rgba(0,0,0,0.6);"><strong><em>• //SERVIDOR/2.- EVIDENCIAS/[GRADO_SECCION]</em></strong></span></p>
+                        <p><span style="color: rgba(0,0,0,0.6);">El nombre del archivo debe tener la siguiente estructura:</span></p>
+                        <p><span style="color: rgba(0,0,0,0.6);"><strong><em>• [BIMESTRE] - Unidad N° [UNIDAD] - Sesión N° [SESION] - APELLIDOS Nombres</em></strong></span></p>
+                        <br>
+                        <p><span style="color: rgba(0,0,0,0.6);">El docente evaluará la sesión durante todo el proceso de aprendizaje a través de una 
+                            <strong>[INSTRUMENTO]</strong>. Una vez terminado su producto el docente solicita a 2 estudiantes voluntarios (o seleccionados/as), para que expongan sus trabajos.</span></p>`,
+            aplicacion_recursos: '<ul><li>Observación</li></ul>',
+            metacognicion: '<p><span style="color: black/20;">El docente finaliza la  sesión aplicando la metacognición y mediante las respuestas a las interrogantes planteadas como por ejemplo: </span></p><p><span style="color: black/20;">• ¿Qué dificultades tuvieron al elaborar su producto para ésta sesión?</span></p><p><span style="color: black/20;">• ¿Qué aprendizajes obtuvieron?</span></p>',
+            metacognicion_recursos: '<ul><li>Cuadernos</li><li>Expresión Oral</li><li>Expresión Corporal</li></ul>',
+            evaluacion: multiline`
+                        <p>
+                            <span style="color: rgba(0, 0, 0, 0.73);">El docente evalúa todo el proceso de aprendizaje a través de una 
+                                    <strong>[INSTRUMENTO]</strong>,
+                                     verifica si los estudiantes han logrado el propósito de la sesión, y realiza un reforzamiento en caso de ser necesario.
+                            </span>
+                        </p>`,
+            evaluacion_recursos: '<ul><li>Expresión Oral</li></ul>',
+        };
+
+const INITIAL_SESSION_DATA = {
+    title: '', purpose: '', situation: '',
+    dateChangeMotive: '',
+    competenciaPrio: { comp: '', cap: '', des: '', field: '', evidence: '', inst: '' },
+    competenciasTrans: [
+        { comp: TRANSVERSAL_NAMES[0], cap: '', des: '', field: '', evidence: '', inst: '' },
+        { comp: TRANSVERSAL_NAMES[1], cap: '', des: '', field: '', evidence: '', inst: '' }
+    ],
+    enfoqueTrans: { enfoque: '', valor: '', acciones: '', demuestra: '' },
+    secuencia: {
+        inicio: { 
+            saberes: '', saberes_recursos: DEFAULT_SEQUENCE_TEMPLATE.saberes_recursos,
+            conflicto: '', conflicto_recursos: DEFAULT_SEQUENCE_TEMPLATE.conflicto_recursos,
+            tiempo: "5'" 
+        },
+        proceso: { 
+            construccion: '', construccion_recursos: DEFAULT_SEQUENCE_TEMPLATE.construccion_recursos,
+            aplicacion: '', aplicacion_recursos: DEFAULT_SEQUENCE_TEMPLATE.aplicacion_recursos,
+            metacognicion: '', metacognicion_recursos: DEFAULT_SEQUENCE_TEMPLATE.metacognicion_recursos,
+            tiempo: "15'" 
+        },
+        salida: { 
+            evaluacion: '', evaluacion_recursos: DEFAULT_SEQUENCE_TEMPLATE.evaluacion_recursos,
+            tiempo: "5'" 
+        }
+    },
+    extension: '',
+    recursos: { rec: '', med: '', mat: '', soft: '', esp: '' },
+    bibliografia: { bib: '', link: '' },
+    instrumento: Array.from({ length: 4 }, (_, i) => ({ id: i + 1, criterio: '', c: '', b: '', a: '', ad: '' }))
+};
+
+const QUILL_COLORS = [
+    "#000000", "#e60000", "#ff9900", "#ffff00", "#008a00", "#0066cc", "#9933ff",
+    "#ffffff", "#facccc", "#ffebcc", "#ffffcc", "#cce8cc", "#cce0f5", "#ebd6ff",
+    "#bbbbbb", "#f06666", "#ffc266", "#ffff66", "#66b966", "#66a3e0", "#c285ff",
+    "#888888", "#a10000", "#b26b00", "#b2b200", "#006100", "#0047b2", "#6b24b2",
+    "#444444", "#5c0000", "#663d00", "#666600", "#003700", "#002966", "#3d1466",
+    "#005c5c", "#00a2ff", "#15803d", "#d35400", "#6b21a8", "#007c59", "#00b28c"
+];
+
+const QUILL_MODULES = {
+  toolbar: [
+    ['bold', 'italic', 'underline'],
+    [{ 'color': QUILL_COLORS }],
+  ],
+};
+
+const AI_ACTIVITY_RESOURCE_PAIRS = [
+    ['secuencia.inicio.saberes', 'secuencia.inicio.saberes_recursos'],
+    ['secuencia.inicio.conflicto', 'secuencia.inicio.conflicto_recursos'],
+    ['secuencia.proceso.construccion', 'secuencia.proceso.construccion_recursos'],
+    ['secuencia.proceso.aplicacion', 'secuencia.proceso.aplicacion_recursos'],
+    ['secuencia.proceso.metacognicion', 'secuencia.proceso.metacognicion_recursos'],
+    ['secuencia.salida.evaluacion', 'secuencia.salida.evaluacion_recursos']
+] as const;
+
+const AI_RICH_TEXT_PATHS = [
+    'competenciaPrio.des',
+    'competenciaPrio.evidence',
+    'secuencia.inicio.saberes',
+    'secuencia.inicio.conflicto',
+    'secuencia.proceso.construccion',
+    'secuencia.proceso.aplicacion',
+    'secuencia.proceso.metacognicion',
+    'secuencia.salida.evaluacion'
+];
+
+const getPathByString = (obj: any, path: string) =>
+    String(path || '')
+        .split('.')
+        .reduce((acc: any, key: string) => acc?.[key], obj);
+
+const setPathByString = (obj: any, path: string, value: any) => {
+    const keys = String(path || '').split('.');
+    let ptr = obj;
+    for (let i = 0; i < keys.length - 1; i++) ptr = ptr[keys[i]];
+    ptr[keys[keys.length - 1]] = value;
+};
+
+const extractBracketTokens = (value: string) => {
+    const out = new Set<string>();
+    const re = /\[([^\[\]]{2,120})\]/g;
+    let m: RegExpExecArray | null = null;
+    while ((m = re.exec(String(value || ''))) !== null) {
+        const token = String(m[1] || '').trim();
+        if (token) out.add(token);
+    }
+    return Array.from(out);
+};
+
+const replaceBracketTokens = (value: string, replacements: Record<string, string>) =>
+    String(value || '').replace(/\[([^\[\]]{2,120})\]/g, (_full, rawToken) => {
+        const token = String(rawToken || '').trim();
+        const direct = replacements[token];
+        if (direct && String(direct).trim()) return String(direct).trim();
+        const normalizedKey = Object.keys(replacements).find(k => normalizeLoose(k) === normalizeLoose(token));
+        return normalizedKey ? String(replacements[normalizedKey]).trim() : `[${token}]`;
+    });
+
+const hasPendingTemplateHints = (value: string) => {
+    const norm = normalizeLoose(stripHtml(String(value || '')));
+    if (!norm) return true;
+    return norm.includes('introducir texto aqui')
+        || norm.includes('pregunta saberes')
+        || norm.includes('pregunta conflicto')
+        || norm.includes('resaltar la importancia')
+        || norm.includes('instrumento');
+};
+
+const superNormalize = (str: string) => {
+  if (!str) return "";
+  return String(str)
+    .toLowerCase()
+    .replace(/[^a-z0-9 áéíóúñ]/gi, "")
+    .trim();
+};
+
+const stripHtml = (value: string) => String(value || '').replace(/<[^>]*>/g, ' ');
+
+const normalizeLoose = (value: string) =>
+    String(value || '')
+        .replace(/&nbsp;|&#160;|&amp;nbsp;/gi, ' ')
+        .replace(/&[a-z0-9#]+;/gi, ' ')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const AUTOCOMPLETE_LAST_WORD_MIN_LEN = 5;
+
+const escapeHtml = (value: string) =>
+    String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+const colorTokenToCss = (token: string) => {
+    const raw = String(token || '').trim().toLowerCase();
+    if (!raw) return '#000000';
+    if (/^#[0-9a-f]{3}$|^#[0-9a-f]{6}$|^#[0-9a-f]{8}$/i.test(raw)) return raw;
+    const bracketHex = raw.match(/text-\[#([0-9a-f]{3,8})\]/i);
+    if (bracketHex?.[1]) return `#${bracketHex[1]}`;
+    if (raw === 'text-black' || raw === 'black') return '#000000';
+    if (raw === 'text-white' || raw === 'white') return '#ffffff';
+    return '#000000';
+};
+
+const hexToRgba = (hex: string, alpha: number) => {
+    const clean = String(hex || '').replace('#', '').trim();
+    const normalized = clean.length === 3
+        ? clean.split('').map(ch => ch + ch).join('')
+        : clean;
+    if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return `rgba(0,0,0,${alpha})`;
+    const r = parseInt(normalized.slice(0, 2), 16);
+    const g = parseInt(normalized.slice(2, 4), 16);
+    const b = parseInt(normalized.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
+const isBlackColorToken = (token: string) => {
+    const css = colorTokenToCss(token);
+    return css.toLowerCase() === '#000000';
+};
+
+const itemsToHtml = (items: Array<{ text?: string; color?: string }>, fallback: string) => {
+    if (!Array.isArray(items) || items.length === 0) {
+        return String(fallback || '')
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map(line => `<p>${escapeHtml(line)}</p>`)
+            .join('') || '<p></p>';
+    }
+    const lines = items
+        .map(item => {
+            const text = String(item?.text || '').trim();
+            if (!text) return '';
+            const color = colorTokenToCss(String(item?.color || 'text-black'));
+            return `<p><span style="color: ${color};">${escapeHtml(text)}</span></p>`;
+        })
+        .filter(Boolean)
+        .join('');
+    return lines || '<p></p>';
+};
+
+const detectTransversalByCapacity = (capacity: string) => {
+    const capNorm = normalizeLoose(capacity);
+    if (!capNorm) return '';
+    const found = TRANSVERSAL_NAMES.find(name =>
+        (TRANSVERSAL_CAPACITY_MAP[name] || []).some(ref => normalizeLoose(ref) === capNorm)
+    );
+    return found || '';
+};
+
+const isMeaningfulRichText = (value: string) => normalizeLoose(stripHtml(String(value || ''))).length > 0;
+
+const TIME_DISTRIBUTIONS: Record<number, number[]> = {
+    90: [5, 5, 30, 40, 5, 5],
+    45: [3, 2, 12, 22, 3, 3]
+};
+
+const syncResourcesFromActivity = (activityContent: string, currentResourceHtml: string, customInstrumentRaw: string) => {
+    const mentionsFound = new Map<string, string>();
+    const pushMention = (label: string) => {
+        const key = normalizeLoose(label);
+        if (!key) return;
+        if (!mentionsFound.has(key)) mentionsFound.set(key, label);
+    };
+
+    const activityTextNorm = normalizeLoose(stripHtml(String(activityContent || '')));
+
+    const matchPhraseOrPrefix = (source: string, normalizedPhrase: string) => {
+        if (!normalizedPhrase) return false;
+        if (source.includes(normalizedPhrase)) return true;
+        const targetWords = normalizedPhrase.split(' ').filter(Boolean);
+        const sourceWords = source.split(' ').filter(Boolean);
+        if (targetWords.length === 0 || sourceWords.length === 0) return false;
+        if (targetWords.length === 1) {
+            return sourceWords.some(sw =>
+                sw.length >= AUTOCOMPLETE_LAST_WORD_MIN_LEN && targetWords[0].startsWith(sw)
+            );
+        }
+
+        const lastTarget = targetWords[targetWords.length - 1];
+        const fixedTarget = targetWords.slice(0, -1);
+
+        for (let i = 0; i <= sourceWords.length - targetWords.length; i++) {
+            let fixedOk = true;
+            for (let j = 0; j < fixedTarget.length; j++) {
+                if (sourceWords[i + j] !== fixedTarget[j]) {
+                    fixedOk = false;
+                    break;
+                }
+            }
+            if (!fixedOk) continue;
+
+            const typedLast = sourceWords[i + fixedTarget.length] || '';
+            if (typedLast.length < AUTOCOMPLETE_LAST_WORD_MIN_LEN) continue;
+            if (lastTarget.startsWith(typedLast)) return true;
+        }
+
+        return false;
+    };
+
+    const collectNumberedMentions = (source: string, regex: RegExp, labelPrefix: string) => {
+        const matches = source.matchAll(regex);
+        for (const match of matches) {
+            const num = match?.[1];
+            if (!num) continue;
+            pushMention(`${labelPrefix} ${num}`);
+        }
+    };
+
+    // Detecta en cuanto se escribe el número (1-9), sin requerir espacio posterior.
+    collectNumberedMentions(activityTextNorm, /\banexo\s*(?:n|nro|numero)?\s*([1-9])(?:\b|$)/g, 'Anexo N°');
+    collectNumberedMentions(activityTextNorm, /\binstructivo\s*(?:n|nro|numero)?\s*([1-9])(?:\b|$)/g, 'Instructivo N°');
+
+    const instrumentMatchers: Array<{ patterns: string[]; label: string }> = [
+        { patterns: ['rubrica', 'rubricas'], label: 'Rúbrica' },
+        { patterns: ['lista de cotejo', 'listas de cotejo'], label: 'Listas de Cotejo' },
+        { patterns: ['ficha informativa', 'fichas informativas'], label: 'Ficha Informativa' },
+        { patterns: ['escala de estimacion', 'escalas de estimacion'], label: 'Escala de Estimación' },
+        { patterns: ['guia de observacion', 'guias de observacion'], label: 'Guía de Observación' },
+        { patterns: ['cuaderno de los alumno', 'cuadernos de los alumno', 'cuaderno de los alumnos', 'cuadernos de los alumnos'], label: 'Cuaderno de los alumno' },
+        { patterns: ['nota de campo', 'notas de campo'], label: 'Notas de campo' },
+        { patterns: ['examen', 'examenes'], label: 'Examen' },
+        { patterns: ['cuestionario', 'cuestionarios'], label: 'Cuestionario' },
+        { patterns: ['portafolio de evidencia', 'portafolio de evidencias', 'portafolios de evidencia', 'portafolios de evidencias'], label: 'Portafolio de Evidencias' },
+        { patterns: ['mapa conceptual', 'mapas conceptuales'], label: 'Mapa Conceptual' },
+        { patterns: ['mapa mental', 'mapas mentales'], label: 'Mapa Mental' },
+        { patterns: ['ensayo', 'ensayos'], label: 'Ensayo' },
+        { patterns: ['proyecto', 'proyectos'], label: 'Proyecto' },
+        { patterns: ['registro anecdotico', 'registros anecdoticos'], label: 'Registro Anecdótico' },
+        { patterns: ['diario de clase', 'diarios de clase'], label: 'Diario de Clase' },
+        { patterns: ['debate', 'debates'], label: 'Debate' },
+        { patterns: ['exposicion oral', 'exposiciones orales'], label: 'Exposición Oral' },
+        { patterns: ['ficha de autoevaluacion', 'fichas de autoevaluacion'], label: 'Ficha de Autoevaluación' },
+        { patterns: ['ficha de coevaluacion', 'fichas de coevaluacion'], label: 'Ficha de Coevaluación' },
+        { patterns: ['prueba de desempeno', 'pruebas de desempeno'], label: 'Prueba de Desempeño' },
+        { patterns: ['prueba de ejecucion', 'pruebas de ejecucion'], label: 'Prueba de Ejecución' }
+    ];
+
+    instrumentMatchers.forEach(({ patterns, label }) => {
+        if (patterns.some(p => matchPhraseOrPrefix(activityTextNorm, p))) {
+            pushMention(label);
+        }
+    });
+
+    const customInstrument = String(customInstrumentRaw || '').trim();
+    const customInstrumentNorm = normalizeLoose(customInstrument);
+    if (customInstrumentNorm.length > 2 && matchPhraseOrPrefix(activityTextNorm, customInstrumentNorm)) {
+        pushMention(customInstrument);
+    }
+
+    let normalizedResourcesHtml = String(currentResourceHtml || '').trim();
+    if (!normalizedResourcesHtml) normalizedResourcesHtml = '<ul></ul>';
+    if (!/<ul[\s>]/i.test(normalizedResourcesHtml)) normalizedResourcesHtml = `<ul><li>${normalizedResourcesHtml}</li></ul>`;
+
+    const liRegex = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+    const originalItems: Array<{ raw: string; textNorm: string }> = [];
+    let match: RegExpExecArray | null = null;
+    while ((match = liRegex.exec(normalizedResourcesHtml)) !== null) {
+        const raw = match[0];
+        const textNorm = normalizeLoose(stripHtml(match[1] || ''));
+        originalItems.push({ raw, textNorm });
+    }
+
+    const detectedKeys = new Set(mentionsFound.keys());
+    const instrumentKeys = new Set(instrumentMatchers.map(item => normalizeLoose(item.label)));
+    const isManagedMention = (key: string) => {
+        if (!key) return false;
+        if (/^anexo n \d+$/.test(key)) return true;
+        if (/^instructivo n \d+$/.test(key)) return true;
+        if (instrumentKeys.has(key)) return true;
+        if (customInstrumentNorm && key === customInstrumentNorm) return true;
+        return false;
+    };
+
+    const keptItems: string[] = [];
+    const presentDetected = new Set<string>();
+    originalItems.forEach(item => {
+        if (detectedKeys.has(item.textNorm)) {
+            keptItems.push(item.raw);
+            presentDetected.add(item.textNorm);
+            return;
+        }
+        if (isManagedMention(item.textNorm)) {
+            return;
+        }
+        keptItems.push(item.raw);
+    });
+
+    mentionsFound.forEach((mention, key) => {
+        if (!presentDetected.has(key)) {
+            keptItems.push(`<li><strong>${mention}</strong></li>`);
+        }
+    });
+
+    const updatedResources = `<ul>${keptItems.join('')}</ul>`;
+    const changed = normalizeLoose(stripHtml(updatedResources)) !== normalizeLoose(stripHtml(normalizedResourcesHtml));
+    return { updatedResources, changed };
+};
+const getFlexValue = (obj: any, searchKey: string) => {
+    if (!obj) return '';
+    const normSearch = superNormalize(searchKey);
+    const actualKey = Object.keys(obj).find(k => superNormalize(k) === normSearch);
+    return actualKey ? obj[actualKey] : '';
+};
+
+const autoResizeTextarea = (el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.overflowY = 'hidden';
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+};
+
+const CustomDatePicker: React.FC<{
+    value: string;
+    onChange: (value: string) => void;
+    onClose: () => void;
+    isOpen: boolean;
+}> = ({ value, onChange, onClose, isOpen }) => {
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [viewDate, setViewDate] = useState(() => {
+        if (value) {
+            const [y, m, d] = value.split('-').map(Number);
+            return new Date(y, m - 1, 1);
+        }
+        return new Date();
+    });
+
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+                onClose();
+            }
+        };
+        if (isOpen) document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [isOpen, onClose]);
+
+    if (!isOpen) return null;
+
+    const monthNames = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+    const currentMonth = viewDate.getMonth();
+    const currentYear = viewDate.getFullYear();
+    
+    const days = [];
+    const firstDay = new Date(currentYear, currentMonth, 1).getDay();
+    const prevDaysCount = firstDay === 0 ? 6 : firstDay - 1;
+    const totalDays = new Date(currentYear, currentMonth + 1, 0).getDate();
+
+    for (let i = 0; i < prevDaysCount; i++) days.push(null);
+    for (let d = 1; d <= totalDays; d++) days.push(new Date(currentYear, currentMonth, d));
+
+    return (
+        <div className="absolute z-[1000] bg-white border border-slate-200 shadow-2xl rounded-[2rem] p-5 w-72 animate-scale-in right-0 top-full mt-2 ring-8 ring-black/5" ref={containerRef}>
+            <div className="flex justify-between items-center mb-4">
+                <button type="button" onClick={() => setViewDate(new Date(currentYear, currentMonth - 1, 1))} className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 text-xl font-bold transition-all">•</button>
+                <span className="text-[11px] font-black uppercase text-slate-800 tracking-widest">{monthNames[currentMonth]} {currentYear}</span>
+                <button type="button" onClick={() => setViewDate(new Date(currentYear, currentMonth + 1, 1))} className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 text-xl font-bold transition-all">•</button>
+            </div>
+            <div className="grid grid-cols-7 gap-1 text-[9px] text-center mb-2 font-black text-slate-400 uppercase tracking-[0.2em]">
+                {['L','M','M','J','V','S','D'].map((d, i) => <div key={i} className={i >= 5 ? 'text-red-400' : ''}>{d}</div>)}
+            </div>
+            <div className="grid grid-cols-7 gap-1.5">
+                {days.map((date, i) => {
+                    if (!date) return <div key={i}></div>;
+                    const iso = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+                    const isSelected = value === iso;
+                    const isToday = new Date().toISOString().split('T')[0] === iso;
+                    return (
+                        <button 
+                            key={i} 
+                            type="button" 
+                            onClick={() => { onChange(iso); }}
+                            className={`h-8 rounded-xl flex items-center justify-center text-[11px] transition-all font-bold ${isSelected ? 'bg-blue-600 text-white shadow-lg scale-110' : 'hover:bg-blue-50 text-slate-600'} ${isToday && !isSelected ? 'ring-2 ring-inset ring-blue-100' : ''} ${date.getDay() === 0 || date.getDay() === 6 ? 'text-red-500' : ''}`}
+                        >
+                            {date.getDate()}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
+
+const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'warning'; onClose: () => void }> = ({ message, type, onClose }) => {
+    useEffect(() => {
+        const timer = setTimeout(onClose, 5000);
+        return () => clearTimeout(timer);
+    }, [onClose]);
+
+    const bgClass = type === 'success' ? 'bg-emerald-600' : type === 'error' ? 'bg-rose-600' : 'bg-amber-500';
+    const icon = type === 'success' ? '✔️' : type === 'error' ? '✖️' : '!';
+
+    return (
+        <div className="fixed top-10 right-10 z-[10000000] animate-fly-in-right w-full max-w-md pointer-events-none">
+            <div className={`${bgClass} px-8 py-5 rounded-[2.5rem] shadow-[0_30px_90px_rgba(0,0,0,0.4)] border border-white/30 flex items-center gap-6 backdrop-blur-2xl transition-all text-white pointer-events-auto`}>
+                <div className="w-12 h-12 rounded-2xl bg-white/20 flex items-center justify-center text-2xl shrink-0 shadow-inner">
+                    {icon}
+                </div>
+                <div className="flex flex-col flex-1 min-w-0">
+                    <span className="text-[10px] font-black uppercase tracking-[0.3em] opacity-70 mb-1">Sistema de Sesiones</span>
+                    <p className="text-xs font-bold leading-tight uppercase tracking-tight break-words">{message}</p>
+                </div>
+                <button onClick={onClose} className="w-8 h-8 rounded-full hover:bg-black/10 flex items-center justify-center transition-colors text-lg shrink-0">x</button>
+            </div>
+        </div>
+    );
+};
+
+const AuthOverlay: React.FC<{
+    onSave: (key: string) => void;
+    onClose: () => void;
+    isSaving: boolean;
+}> = ({ onSave, onClose, isSaving }) => {
+    const [inputKey, setInputKey] = useState('');
+
+    return (
+        <div className="fixed inset-0 z-[5000] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
+            <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col md:flex-row">
+                <div className="bg-blue-600 w-full md:w-72 p-8 text-white flex flex-col justify-between">
+                    <div>
+                        <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center text-3xl mb-6 shadow-inner">🤖</div>
+                        <h3 className="text-xl font-black uppercase tracking-tight leading-tight mb-4">Asistente IA Armi</h3>
+                        <p className="text-[10px] font-bold text-blue-100 leading-relaxed uppercase tracking-wider">Configura tu API key para completar sesiones automáticamente.</p>
+                    </div>
+                    <div className="mt-8 space-y-4">
+                        <div className="flex gap-3 items-start">
+                            <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-[10px] font-black shrink-0">1</span>
+                            <p className="text-[9px] font-bold leading-tight uppercase">Entra a <a href="https://aistudio.google.com/app/apikey" target="_blank" className="underline decoration-2 underline-offset-2">Google AI Studio</a>.</p>
+                        </div>
+                        <div className="flex gap-3 items-start">
+                            <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-[10px] font-black shrink-0">2</span>
+                            <p className="text-[9px] font-bold leading-tight uppercase">Pulsa "Create API Key".</p>
+                        </div>
+                        <div className="flex gap-3 items-start">
+                            <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-[10px] font-black shrink-0">3</span>
+                            <p className="text-[9px] font-bold leading-tight uppercase">Pégala aquí y guarda.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="flex-1 p-10 flex flex-col">
+                    <div className="flex justify-between items-start mb-8">
+                        <div>
+                            <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">Paso Final</h4>
+                            <h2 className="text-2xl font-black text-slate-800 uppercase tracking-tighter">Vincular LLave IA</h2>
+                        </div>
+                        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">x</button>
+                    </div>
+
+                    <div className="space-y-6 flex-1">
+                        <div className="group">
+                            <label className="block text-[10px] font-black text-slate-500 mb-3 ml-1 uppercase tracking-widest">API KEY:</label>
+                            <div className="relative">
+                                <input
+                                    type="password"
+                                    value={inputKey}
+                                    onChange={(e) => setInputKey(e.target.value)}
+                                    placeholder="AIzaSy..."
+                                    className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-5 py-4 text-sm font-mono focus:border-blue-500 focus:bg-white transition-all outline-none shadow-inner"
+                                />
+                                <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300">🔑</div>
+                            </div>
+                        </div>
+                        <div className="bg-amber-50 p-5 rounded-2xl border border-amber-100 flex gap-4">
+                            <span className="text-xl shrink-0">🛡️</span>
+                            <p className="text-[10px] text-amber-700 font-bold leading-relaxed uppercase">La llave se guarda en tu configuración de datos generales.</p>
+                        </div>
+                    </div>
+
+                    <button
+                        onClick={() => onSave(inputKey.trim())}
+                        disabled={isSaving || inputKey.trim().length < 10}
+                        className="mt-8 w-full py-4 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-black uppercase tracking-widest text-[10px] disabled:opacity-50"
+                    >
+                        {isSaving ? 'Guardando...' : 'Activar Motor Pedagógico'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
+    const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
+    const [competenciasBase, setCompetenciasBase] = useState<any[]>([]);
+    
+    const [selArea, setSelArea] = useState('');
+    const [selGrade, setSelGrade] = useState('');
+    const [selSection, setSelSection] = useState('');
+
+    const [unitNumber, setUnitNumber] = useState('1');
+    const [sessionNumber, setSessionNumber] = useState('1');
+    const [maxSessionsInUnit, setMaxSessionsInUnit] = useState(15);
+    const [sessionDate, setSessionDate] = useState('');
+    const [dateOptions, setDateOptions] = useState<{value: string, label: string}[]>([]);
+    const [year, setYear] = useState(new Date().getFullYear().toString());
+    const [themeColor, setThemeColor] = useState(localStorage.getItem('armi_sessions_theme') || '#6b21a8');
+    const [toast, setToast] = useState<{ msg: string, type: 'success' | 'error' | 'warning' } | null>(null);
+    const [allSavedPrograms, setAllSavedPrograms] = useState<Record<string, any>>({});
+    const [generalData, setGeneralData] = useState<GeneralData | null>(null);
+    const [isGeneratingIA, setIsGeneratingIA] = useState(false);
+    const [showAuthScreen, setShowAuthScreen] = useState(false);
+    const [savingKey, setSavingKey] = useState(false);
+    
+    const [isManageModalOpen, setIsManageModalOpen] = useState(false);
+    const [allSavedSessionsList, setAllSavedSessionsList] = useState<any[]>([]);
+    const [showTemplateMode, setShowTemplateMode] = useState(false);
+
+    const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+    const [pendingDate, setPendingDate] = useState('');
+    const [showMotiveModal, setShowMotiveModal] = useState(false);
+    const [motiveInput, setMotiveInput] = useState('');
+
+    const bimesterLabel = useMemo(() => {
+        const u = parseInt(unitNumber);
+        if (u <= 2) return 'I';
+        if (u <= 4) return 'II';
+        if (u <= 6) return 'III';
+        return 'IV';
+    }, [unitNumber]);
+
+    const headerFilled = useMemo(() => {
+        return !!(selArea && selGrade && selSection && unitNumber && sessionNumber);
+    }, [selArea, selGrade, selSection, unitNumber, sessionNumber]);
+
+    const [sessionData, setSessionData] = useState<any>(INITIAL_SESSION_DATA);
+
+    useEffect(() => {
+        const runResize = () => {
+            const els = document.querySelectorAll<HTMLTextAreaElement>('textarea[data-comp-table="1"]');
+            els.forEach(el => autoResizeTextarea(el));
+        };
+        runResize();
+        requestAnimationFrame(runResize);
+    }, [sessionData]);
+
+    useEffect(() => {
+        const load = async () => {
+            const saved = localStorage.getItem('armi_assignments');
+            if (saved) setAssignments(JSON.parse(saved));
+            const gd = await getDatosGenerales();
+            setGeneralData(gd);
+            if (gd.year) setYear(gd.year);
+            const progs = await getProgramacionesAnuales();
+            setAllSavedPrograms(progs);
+        };
+        load();
+    }, []);
+
+    const uniqueAreas = useMemo(() => Array.from(new Set(assignments.map(a => a.areaName))).sort(), [assignments]);
+    
+    const availableGrades = useMemo(() => 
+        Array.from(new Set(assignments.filter(a => a.areaName === selArea).map(a => a.grade))).sort(), 
+    [assignments, selArea]);
+    
+    const availableSections = useMemo(() => {
+        const baseSections = Array.from(new Set(assignments.filter(a => a.areaName === selArea && a.grade === selGrade).map(a => a.section))).sort();
+        let options = baseSections.map(s => ({ value: s, label: s }));
+        
+        if (baseSections.length > 1) {
+            const joinedLabel = baseSections.join(', ').replace(/, ([^,]*)$/, ' y $1');
+            options.push({ value: joinedLabel, label: joinedLabel });
+        }
+        return options;
+    }, [assignments, selArea, selGrade]);
+
+    const handleInputChange = (path: string, value: any) => {
+        const keys = path.split('.');
+        setSessionData((prev: any) => {
+            const newData = { ...prev };
+            let current = newData;
+            for (let i = 0; i < keys.length - 1; i++) {
+                current = current[keys[i]];
+            }
+            current[keys[keys.length - 1]] = value;
+            return newData;
+        });
+    };
+
+    /**
+     * Sincroniza anexos, instructivos e instrumentos detectados en actividades hacia recursos.
+     * Soporta variaciones comunes de escritura (acentos, mayúsculas/minúsculas, N°, nro, etc.).
+     */
+    const syncResourcesRealtime = useCallback((activityContent: string, _activityPath: string, resourcePath: string) => {
+        if (!activityContent) return;
+
+        setSessionData((prev: any) => {
+            const resourceKeys = resourcePath.split('.');
+
+            let currentResourceHtml = prev;
+            for (const k of resourceKeys) currentResourceHtml = currentResourceHtml?.[k];
+
+            const customInstrument = String(prev.competenciaPrio?.inst || '');
+            const { updatedResources, changed } = syncResourcesFromActivity(activityContent, String(currentResourceHtml || ''), customInstrument);
+            if (!changed) return prev;
+
+            const newData = { ...prev };
+            let resPtr = newData;
+            for (let i = 0; i < resourceKeys.length - 1; i++) resPtr = resPtr[resourceKeys[i]];
+            resPtr[resourceKeys[resourceKeys.length - 1]] = updatedResources;
+
+            return newData;
+        });
+    }, []);
+    const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const sessionLoadRequestRef = useRef(0);
+
+    const debouncedSync = (val: string, actPath: string, resPath: string) => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        const norm = normalizeLoose(stripHtml(String(val || '')));
+        const hasImmediateNumberedMention = /\b(?:anexo|instructivo)\s*(?:n|nro|numero)?\s*[1-9](?:\b|$)/.test(norm);
+        if (hasImmediateNumberedMention) {
+            syncResourcesRealtime(val, actPath, resPath);
+            return;
+        }
+        timeoutRef.current = setTimeout(() => {
+            syncResourcesRealtime(val, actPath, resPath);
+        }, 120);
+    };
+
+    const triggerDateChange = (newDate: string) => {
+        if (newDate === sessionDate) return;
+        setPendingDate(newDate);
+        setMotiveInput('');
+        setShowMotiveModal(true);
+    };
+
+    const confirmDateChange = () => {
+        if (!motiveInput.trim()) return;
+        setSessionDate(pendingDate);
+        handleInputChange('dateChangeMotive', motiveInput);
+        setShowMotiveModal(false);
+        setIsDatePickerOpen(false);
+    };
+
+    const handleSaveIAKey = async (key: string) => {
+        if (!generalData || !key) return;
+        setSavingKey(true);
+        try {
+            const updated = { ...generalData, gemini_api_key: key };
+            const res = await saveDatosGenerales(updated);
+            if (res.success) {
+                setGeneralData(updated);
+                setShowAuthScreen(false);
+                setToast({ msg: "✅ Llave IA guardada correctamente.", type: 'success' });
+            } else {
+                setToast({ msg: "❌ No se pudo guardar la llave IA.", type: 'error' });
+            }
+        } catch {
+            setToast({ msg: "❌ Error al guardar llave IA.", type: 'error' });
+        } finally {
+            setSavingKey(false);
+        }
+    };
+
+    const handleGenerateAI = async () => {
+        if (!headerFilled) {
+            setToast({ msg: "⚠️ Completa Área, Grado, Sección, Unidad y Sesión.", type: 'warning' });
+            return;
+        }
+
+        const apiKey = (generalData?.gemini_api_key || process.env.API_KEY || '').trim();
+        if (!apiKey || apiKey === 'undefined' || apiKey === 'null' || apiKey.length < 10) {
+            setShowAuthScreen(true);
+            return;
+        }
+
+        setIsGeneratingIA(true);
+        try {
+            const areaId = assignments.find(a => a.areaName === selArea)?.areaId || selArea;
+            const ai = new GoogleGenAI({ apiKey });
+
+            const placeholderSet = new Set<string>();
+            AI_RICH_TEXT_PATHS.forEach(path => {
+                extractBracketTokens(String(getPathByString(sessionData, path) || '')).forEach(t => placeholderSet.add(t));
+            });
+            (sessionData?.competenciasTrans || []).forEach((ct: any) => {
+                extractBracketTokens(String(ct?.des || '')).forEach(t => placeholderSet.add(t));
+                extractBracketTokens(String(ct?.evidence || '')).forEach(t => placeholderSet.add(t));
+            });
+
+            const contextForAI = {
+                year,
+                areaId,
+                areaName: selArea,
+                grade: selGrade,
+                section: selSection,
+                unitNumber,
+                sessionNumber,
+                date: sessionDate || '',
+                title: sessionData?.title || '',
+                purpose: sessionData?.purpose || '',
+                situation: sessionData?.situation || '',
+                competenciaPrio: sessionData?.competenciaPrio || {},
+                competenciasTrans: sessionData?.competenciasTrans || [],
+                enfoqueTrans: sessionData?.enfoqueTrans || {},
+                secuencia: sessionData?.secuencia || {},
+                currentInstrumentoRows: sessionData?.instrumento || []
+            };
+
+            const prompt = `
+Eres un experto pedagógico del MINEDU Perú.
+Completa la sesión de aprendizaje con lenguaje profesional, concreto y aplicable.
+Debes respetar y completar la plantilla aunque el usuario haya editado partes.
+
+REGLAS:
+1) Devuelve SOLO JSON válido (sin markdown).
+2) Si ves placeholders tipo [ ... ], genera reemplazos concretos en "placeholderMap".
+3) Para campos HTML devuelve contenido en formato HTML simple (<p>, <ul>, <li>, <strong>, <em>, <span style="color: green;">).
+4) Completa instrumento como "Rúbrica" salvo que el contexto obligue otro.
+5) "rubrica" debe devolver exactamente 4 filas con: criterio, c, b, a, ad.
+6) Redacta pensando en estudiantes de ${selGrade}, área ${selArea}.
+
+PLACEHOLDERS DETECTADOS:
+${JSON.stringify(Array.from(placeholderSet), null, 2)}
+
+CONTEXTO ACTUAL:
+${JSON.stringify(contextForAI, null, 2)}
+
+FORMATO DE RESPUESTA:
+{
+  "title": "string",
+  "purpose": "string",
+  "situation": "string",
+  "placeholderMap": { "placeholder original": "reemplazo" },
+  "competenciaPrio": {
+    "field": "string",
+    "inst": "string",
+    "des": "html",
+    "evidence": "html"
+  },
+  "competenciasTrans": [
+    { "cap": "string", "inst": "string", "des": "html", "evidence": "html" }
+  ],
+  "secuencia": {
+    "inicio": { "saberes": "html", "conflicto": "html" },
+    "proceso": { "construccion": "html", "aplicacion": "html", "metacognicion": "html" },
+    "salida": { "evaluacion": "html" }
+  },
+  "rubrica": [
+    { "criterio": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
+  ]
+}
+`;
+
+            const response = await ai.models.generateContent({
+                model: 'gemini-3-flash-preview',
+                contents: [{ parts: [{ text: prompt }] }],
+                config: { responseMimeType: "application/json", temperature: 0.4 }
+            });
+
+            const raw = String(response.text || '').trim();
+            if (!raw) throw new Error("EMPTY_RESPONSE");
+            const firstBrace = raw.indexOf('{');
+            const lastBrace = raw.lastIndexOf('}');
+            const jsonText = firstBrace >= 0 && lastBrace > firstBrace ? raw.slice(firstBrace, lastBrace + 1) : raw;
+            const aiData = JSON.parse(jsonText);
+
+            const placeholderMapRaw = aiData?.placeholderMap && typeof aiData.placeholderMap === 'object' ? aiData.placeholderMap : {};
+            const placeholderMap: Record<string, string> = {};
+            Object.keys(placeholderMapRaw).forEach((k) => {
+                const key = String(k || '').trim();
+                const val = String(placeholderMapRaw[k] || '').trim();
+                if (key && val) placeholderMap[key] = val;
+            });
+
+            const fillHtmlField = (current: string, generated: string) => {
+                const curr = String(current || '');
+                const gen = String(generated || '');
+                const replacedCurrent = replaceBracketTokens(curr, placeholderMap);
+                const replacedGenerated = replaceBracketTokens(gen, placeholderMap);
+                if (hasPendingTemplateHints(replacedCurrent) || !isMeaningfulRichText(replacedCurrent)) {
+                    return replacedGenerated || replacedCurrent;
+                }
+                return replacedCurrent;
+            };
+
+            const nextData = JSON.parse(JSON.stringify(sessionData));
+            const nextTitle = replaceBracketTokens(String(aiData?.title || nextData.title || ''), placeholderMap);
+            const nextPurpose = replaceBracketTokens(String(aiData?.purpose || nextData.purpose || ''), placeholderMap);
+            const nextSituation = replaceBracketTokens(String(aiData?.situation || nextData.situation || ''), placeholderMap);
+            if (nextTitle.trim()) nextData.title = nextTitle;
+            if (nextPurpose.trim()) nextData.purpose = nextPurpose;
+            if (nextSituation.trim()) nextData.situation = nextSituation;
+
+            const aiPrio = aiData?.competenciaPrio || {};
+            nextData.competenciaPrio.des = fillHtmlField(nextData.competenciaPrio.des, aiPrio.des);
+            nextData.competenciaPrio.evidence = fillHtmlField(nextData.competenciaPrio.evidence, aiPrio.evidence);
+            nextData.competenciaPrio.field = replaceBracketTokens(String(aiPrio.field || nextData.competenciaPrio.field || ''), placeholderMap);
+            nextData.competenciaPrio.inst = replaceBracketTokens(String(aiPrio.inst || nextData.competenciaPrio.inst || 'Rúbrica'), placeholderMap);
+
+            const aiTrans = Array.isArray(aiData?.competenciasTrans) ? aiData.competenciasTrans : [];
+            nextData.competenciasTrans = (nextData.competenciasTrans || []).map((ct: any, idx: number) => {
+                const row = aiTrans[idx] || {};
+                return {
+                    ...ct,
+                    cap: replaceBracketTokens(String(row.cap || ct.cap || ''), placeholderMap),
+                    inst: replaceBracketTokens(String(row.inst || ct.inst || ''), placeholderMap),
+                    des: fillHtmlField(String(ct.des || ''), String(row.des || '')),
+                    evidence: fillHtmlField(String(ct.evidence || ''), String(row.evidence || ''))
+                };
+            });
+
+            const aiSec = aiData?.secuencia || {};
+            nextData.secuencia.inicio.saberes = fillHtmlField(nextData.secuencia.inicio.saberes, aiSec?.inicio?.saberes);
+            nextData.secuencia.inicio.conflicto = fillHtmlField(nextData.secuencia.inicio.conflicto, aiSec?.inicio?.conflicto);
+            nextData.secuencia.proceso.construccion = fillHtmlField(nextData.secuencia.proceso.construccion, aiSec?.proceso?.construccion);
+            nextData.secuencia.proceso.aplicacion = fillHtmlField(nextData.secuencia.proceso.aplicacion, aiSec?.proceso?.aplicacion);
+            nextData.secuencia.proceso.metacognicion = fillHtmlField(nextData.secuencia.proceso.metacognicion, aiSec?.proceso?.metacognicion);
+            nextData.secuencia.salida.evaluacion = fillHtmlField(nextData.secuencia.salida.evaluacion, aiSec?.salida?.evaluacion);
+
+            AI_RICH_TEXT_PATHS.forEach(path => {
+                const currentValue = String(getPathByString(nextData, path) || '');
+                setPathByString(nextData, path, replaceBracketTokens(currentValue, placeholderMap));
+            });
+            (nextData.competenciasTrans || []).forEach((ct: any) => {
+                ct.des = replaceBracketTokens(String(ct.des || ''), placeholderMap);
+                ct.evidence = replaceBracketTokens(String(ct.evidence || ''), placeholderMap);
+            });
+
+            const aiRubrica = Array.isArray(aiData?.rubrica) ? aiData.rubrica : [];
+            nextData.instrumento = Array.from({ length: 4 }, (_, i) => {
+                const curr = nextData.instrumento?.[i] || { id: i + 1, criterio: '', c: '', b: '', a: '', ad: '' };
+                const aiRow = aiRubrica[i] || {};
+                return {
+                    ...curr,
+                    id: i + 1,
+                    criterio: replaceBracketTokens(String(aiRow.criterio || curr.criterio || ''), placeholderMap),
+                    c: replaceBracketTokens(String(aiRow.c || curr.c || ''), placeholderMap),
+                    b: replaceBracketTokens(String(aiRow.b || curr.b || ''), placeholderMap),
+                    a: replaceBracketTokens(String(aiRow.a || curr.a || ''), placeholderMap),
+                    ad: replaceBracketTokens(String(aiRow.ad || curr.ad || ''), placeholderMap)
+                };
+            });
+
+            AI_ACTIVITY_RESOURCE_PAIRS.forEach(([activityPath, resourcePath]) => {
+                const activity = String(getPathByString(nextData, activityPath) || '');
+                const resources = String(getPathByString(nextData, resourcePath) || '');
+                const customInstrument = String(nextData?.competenciaPrio?.inst || '');
+                const { updatedResources, changed } = syncResourcesFromActivity(activity, resources, customInstrument);
+                if (changed) setPathByString(nextData, resourcePath, updatedResources);
+            });
+
+            setSessionData(nextData);
+            setToast({ msg: "✨ IA Armi completó la sesión y la rúbrica.", type: 'success' });
+        } catch (e: any) {
+            const msg = String(e?.message || e || '');
+            if (msg.toLowerCase().includes('api') || msg.toLowerCase().includes('401') || msg.toLowerCase().includes('403')) {
+                setShowAuthScreen(true);
+                setToast({ msg: "⚠️ Revisa tu API Key de IA.", type: 'warning' });
+            } else {
+                setToast({ msg: "❌ Error IA: " + msg, type: 'error' });
+            }
+        } finally {
+            setIsGeneratingIA(false);
+        }
+    };
+
+
+    const handleSaveAsTemplate = async () => {
+        if (!selArea || !selGrade || !selSection) {
+            setToast({ msg: '⚠️ Seleccione Área, Grado y Sección.', type: 'warning' });
+            return;
+        }
+        if (confirm(`¿Desea anclar esta configuración como plantilla permanente para ${selArea} - ${selGrade} "${selSection}" en SQL?`)) {
+            const areaId = assignments.find(a => a.areaName === selArea)?.areaId || selArea;
+            try {
+                const response = await fetch('/api/plantillas-area', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        areaId,
+                        grade: selGrade,
+                        section: selSection,
+                        sessionData
+                    })
+                });
+                const res = await response.json();
+                if (res.success) {
+                    setToast({ msg: '🌟 Plantilla de Área anclada correctamente', type: 'success' });
+                } else {
+                    setToast({ msg: '❌ Error al guardar plantilla: ' + res.message, type: 'error' });
+                }
+            } catch (e: any) {
+                setToast({ msg: '❌ Error de conexión al anclar plantilla', type: 'error' });
+            }
+        }
+    };
+
+    const handleExportJson = () => {
+        if (!selArea) return;
+        const exportObj = {
+            metadata: { area: selArea, grade: selGrade, section: selSection, year, type: 'ARMI_SESSION_TEMPLATE' },
+            sessionData
+        };
+        const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Plantilla_${selArea}_${selGrade}_${selSection}.json`.replace(/\s+/g, '_');
+        a.click();
+        setToast({ msg: '📂 Archivo JSON generado', type: 'success' });
+    };
+
+    const handleImportJson = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+            try {
+                const json = JSON.parse(evt.target?.result as string);
+                if (json.sessionData && json.sessionData.secuencia) {
+                    if (json.metadata?.area !== selArea || json.metadata?.grade !== selGrade) {
+                        if (!confirm("⚠️ Aviso: Esta plantilla pertenece a otra área o grado. ¿Desea cargar los datos de todas formas?")) return;
+                    }
+                    setSessionData(json.sessionData);
+                    setToast({ msg: '📥 Plantilla cargada en el editor', type: 'success' });
+                } else {
+                    setToast({ msg: '❌ El archivo JSON no es una plantilla válida', type: 'error' });
+                }
+            } catch (err) {
+                setToast({ msg: '❌ Error al procesar el archivo JSON', type: 'error' });
+            }
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+    };
+
+    useEffect(() => {
+        if (selArea && selGrade && selSection && unitNumber && sessionNumber) {
+            const areaId = assignments.find(a => a.areaName === selArea)?.areaId || selArea;
+            const requestId = ++sessionLoadRequestRef.current;
+            const isStaleRequest = () => sessionLoadRequestRef.current !== requestId;
+            
+            const loadUnitInfo = async () => {
+                const comps = await getCompetencias(selGrade, selArea);
+                if (isStaleRequest()) return;
+                setCompetenciasBase(comps);
+
+                const unit = await getUnidadDidactica(year, areaId, selGrade, selSection, unitNumber);
+                if (isStaleRequest()) return;
+                if (unit) {
+                    const unitSessions = Array.isArray(unit.sesiones) ? unit.sesiones : [];
+                    const sessionCount = unitSessions.length || 15;
+                    setMaxSessionsInUnit(sessionCount);
+
+                    const targetSessionId = parseInt(sessionNumber, 10);
+                    const unitSession =
+                        unitSessions.find((s: any) => Number(s?.id) === targetSessionId || Number(s?.sessionNumber) === targetSessionId)
+                        || unitSessions[targetSessionId - 1];
+
+                    if (unitSession?.date) {
+                        const isMultipleSections = selSection.includes(' y ');
+                        if (unitSession.date.includes(' --- ')) {
+                            const dates = unitSession.date.split(' --- ').map((d: string) => ({
+                                value: d.includes('/') ? d.split('/').reverse().join('-') : d,
+                                label: d
+                            }));
+                            setDateOptions(dates);
+                            if (!isMultipleSections) {
+                                setSessionDate(dates[0].value);
+                            } else {
+                                setSessionDate(''); 
+                            }
+                        } else {
+                            setDateOptions([]);
+                            setSessionDate(
+                                unitSession.date.includes('/')
+                                    ? unitSession.date.split('/').reverse().join('-')
+                                    : unitSession.date
+                            );
+                        }
+                    } else {
+                        setDateOptions([]);
+                        setSessionDate('');
+                    }
+
+                    let actualCompAreaName = unitSession?.competencia || ('Área: ' + selArea);
+                    if (!unitSession?.competencia && unitSession?.capacidades?.length > 0 && comps.length > 0) {
+                        const targetCap = unitSession.capacidades[0];
+                        const match = comps.find(c => 
+                            String(getFlexValue(c, 'capacidades')).trim().toLowerCase() === String(targetCap).trim().toLowerCase()
+                        );
+                        if (match) actualCompAreaName = getFlexValue(match, 'competencias');
+                    }
+
+                    const criteriaItems = Array.isArray(unitSession?.criteriaItems) ? unitSession.criteriaItems : [];
+                    const evidenceItems = Array.isArray(unitSession?.evidenceItems) ? unitSession.evidenceItems : [];
+                    const sessionCapacidades = Array.isArray(unitSession?.capacidades)
+                        ? unitSession.capacidades.map((c: any) => String(c || '').trim()).filter(Boolean)
+                        : [];
+                    const sessionTransversales = Array.isArray(unitSession?.transversales)
+                        ? unitSession.transversales.map((t: any) => String(t || '').trim()).filter(Boolean)
+                        : [];
+                    const activeTransversalSet = new Set(sessionTransversales.map((t: string) => normalizeLoose(t)));
+
+                    const prioCriteriaItems = criteriaItems.filter((it: any) => isBlackColorToken(String(it?.color || 'text-black')));
+                    const prioEvidenceItems = evidenceItems.filter((it: any) => isBlackColorToken(String(it?.color || 'text-black')));
+                    const transCriteriaItems = criteriaItems.filter((it: any) => !isBlackColorToken(String(it?.color || 'text-black')));
+                    const transEvidenceItems = evidenceItems.filter((it: any) => !isBlackColorToken(String(it?.color || 'text-black')));
+
+                    const transCapsByName: Record<string, string[]> = {
+                        [TRANSVERSAL_NAMES[0]]: [],
+                        [TRANSVERSAL_NAMES[1]]: []
+                    };
+                    const areaCaps: string[] = [];
+
+                    sessionCapacidades.forEach((cap: string) => {
+                        const transName = detectTransversalByCapacity(cap);
+                        if (transName && (activeTransversalSet.size === 0 || activeTransversalSet.has(normalizeLoose(transName)))) {
+                            transCapsByName[transName].push(cap);
+                        } else {
+                            areaCaps.push(cap);
+                        }
+                    });
+
+                    let prioComp = {
+                        comp: actualCompAreaName,
+                        cap: areaCaps.join('\n') || unitSession?.cap || '',
+                        des: itemsToHtml(prioCriteriaItems, unitSession?.des || ''),
+                        field: unitSession?.con || '',
+                        evidence: itemsToHtml(prioEvidenceItems, unitSession?.evi || ''),
+                        inst: unitSession?.eval || ''
+                    };
+
+                    const transEvals = TRANSVERSAL_NAMES.map((name, idx) => {
+                        const isActive = activeTransversalSet.size === 0 || activeTransversalSet.has(normalizeLoose(name));
+                        const criteria = isActive ? (unit.criteriosTrans?.[idx] || '') : '';
+                        const evidence = isActive ? (unit.evidenciasTrans?.[idx] || '') : '';
+                        const inst = isActive ? (unit.instrumentosTrans?.[idx] || '') : '';
+                        return {
+                            comp: name,
+                            cap: transCapsByName[name].join('\n'),
+                            des: criteria ? `<p>${escapeHtml(criteria)}</p>` : '<p></p>',
+                            field: '',
+                            evidence: evidence ? `<p>${escapeHtml(evidence)}</p>` : '<p></p>',
+                            inst: inst,
+                            rowColor: name === TRANSVERSAL_NAMES[0] ? '#007c59' : '#00b28c'
+                        };
+                    });
+
+                    if (transCriteriaItems.length || transEvidenceItems.length) {
+                        const transColorToIndex: Record<string, number> = {
+                            '#007c59': 0,
+                            '#00b28c': 1
+                        };
+
+                        const groupedCriteria: Array<Array<{ text?: string; color?: string }>> = [[], []];
+                        const groupedEvidence: Array<Array<{ text?: string; color?: string }>> = [[], []];
+
+                        transCriteriaItems.forEach((item: any, i: number) => {
+                            const color = colorTokenToCss(String(item?.color || ''));
+                            const idx = transColorToIndex[color.toLowerCase()] ?? (i % TRANSVERSAL_NAMES.length);
+                            groupedCriteria[idx].push(item);
+                        });
+                        transEvidenceItems.forEach((item: any, i: number) => {
+                            const color = colorTokenToCss(String(item?.color || ''));
+                            const idx = transColorToIndex[color.toLowerCase()] ?? (i % TRANSVERSAL_NAMES.length);
+                            groupedEvidence[idx].push(item);
+                        });
+
+                        transEvals.forEach((row, idx) => {
+                            const isActive = activeTransversalSet.size === 0 || activeTransversalSet.has(normalizeLoose(row.comp));
+                            if (!isActive) return;
+                            if (groupedCriteria[idx].length) {
+                                row.des = itemsToHtml(groupedCriteria[idx], '');
+                                const fromCriteriaColor = colorTokenToCss(String(groupedCriteria[idx][0]?.color || ''));
+                                if (!isBlackColorToken(fromCriteriaColor)) row.rowColor = fromCriteriaColor;
+                            }
+                            if (groupedEvidence[idx].length) {
+                                row.evidence = itemsToHtml(groupedEvidence[idx], '');
+                                const fromEvidenceColor = colorTokenToCss(String(groupedEvidence[idx][0]?.color || ''));
+                                if (!isBlackColorToken(fromEvidenceColor)) row.rowColor = fromEvidenceColor;
+                            }
+                        });
+                    }
+
+                    const programKey = `${year}-${areaId}-${selGrade}-${selSection}`;
+                    const program = allSavedPrograms[programKey];
+                    let enfObj = { enfoque: '', valor: '', acciones: '', demuestra: '' };
+                    
+                    if (program?.matrixChecks) {
+                        const enfoqueName = Object.keys(ENFOQUE_DETAILS).find(enf => {
+                            const checkKey = `enfoque-${enf.toLowerCase().replace(/[^a-z0-9]/gi, "")}-${parseInt(unitNumber)-1}`;
+                            return program.matrixChecks[checkKey];
+                        });
+                        if (enfoqueName) {
+                            const details = ENFOQUE_DETAILS[enfoqueName];
+                            enfObj = {
+                                enfoque: enfoqueName,
+                                valor: details.valores,
+                                acciones: details.actitudes,
+                                demuestra: details.demuestra
+                            };
+                        }
+                    }
+
+                    setSessionData(prev => ({
+                        ...prev,
+                        title: unitSession?.title || prev.title,
+                        competenciaPrio: prioComp,
+                        competenciasTrans: transEvals,
+                        enfoqueTrans: enfObj,
+                        situation: unit.situation || prev.situation
+                    }));
+
+                    setToast({ msg: `✨ Datos cargados desde Unidad U${unitNumber}`, type: 'success' });
+                } else {
+                    setToast({ msg: `⚠️ No se halló la Unidad U${unitNumber} para estos filtros en SQL.`, type: 'warning' });
+                    setSessionDate('');
+                    setDateOptions([]);
+                    setMaxSessionsInUnit(15);
+                }
+            };
+
+            const loadSessionDateFromUnit = async () => {
+                const unit = await getUnidadDidactica(year, areaId, selGrade, selSection, unitNumber);
+                if (isStaleRequest()) return;
+
+                if (!unit) {
+                    setSessionDate('');
+                    setDateOptions([]);
+                    return;
+                }
+
+                const unitSessions = Array.isArray(unit.sesiones) ? unit.sesiones : [];
+                const targetSessionId = parseInt(sessionNumber, 10);
+                const unitSession =
+                    unitSessions.find((s: any) => Number(s?.id) === targetSessionId || Number(s?.sessionNumber) === targetSessionId)
+                    || unitSessions[targetSessionId - 1];
+
+                if (unitSession?.date) {
+                    const isMultipleSections = selSection.includes(' y ');
+                    if (unitSession.date.includes(' --- ')) {
+                        const dates = unitSession.date.split(' --- ').map((d: string) => ({
+                            value: d.includes('/') ? d.split('/').reverse().join('-') : d,
+                            label: d
+                        }));
+                        setDateOptions(dates);
+                        if (!isMultipleSections) {
+                            setSessionDate(dates[0].value);
+                        } else {
+                            setSessionDate('');
+                        }
+                    } else {
+                        setDateOptions([]);
+                        setSessionDate(
+                            unitSession.date.includes('/')
+                                ? unitSession.date.split('/').reverse().join('-')
+                                : unitSession.date
+                        );
+                    }
+                } else {
+                    setSessionDate('');
+                    setDateOptions([]);
+                }
+            };
+
+            const checkSavedSession = async () => {
+                const saved = await getSesion(year, areaId, selGrade, selSection, unitNumber, sessionNumber);
+                if (isStaleRequest()) return;
+                if (saved) {
+                    setSessionData(saved);
+                    if (saved.date) {
+                        setSessionDate(saved.date);
+                        setDateOptions([]);
+                    } else {
+                        await loadSessionDateFromUnit();
+                        if (isStaleRequest()) return;
+                    }
+                    setToast({ msg: `✅ Sesión ${sessionNumber} cargada desde SQL`, type: 'success' });
+                } else {
+                    // SE BUSCA PLANTILLA DE ÁREA EN LA NUEVA TABLA
+                    try {
+                        const resp = await fetch(`/api/plantillas-area?areaId=${areaId}&grade=${selGrade}&section=${selSection}`);
+                        const resJson = await resp.json();
+                        if (isStaleRequest()) return;
+                        if (resJson.success && resJson.data) {
+                            setSessionData(resJson.data);
+                            // 👇 ESTO ES LO QUE FALTA
+            loadUnitInfo(); // o función que genere fechas
+                            setToast({ msg: `📋 Aplicando plantilla de área guardada`, type: 'success' });
+                        } else {
+                            loadUnitInfo();
+                        }
+                    } catch (e) {
+                        loadUnitInfo();
+                    }
+                }
+            };
+            
+            checkSavedSession();
+        } else {
+            sessionLoadRequestRef.current += 1;
+            setSessionData(INITIAL_SESSION_DATA);
+            setSessionDate('');
+            setDateOptions([]);
+            setMaxSessionsInUnit(15);
+        }
+    }, [selArea, selGrade, selSection, unitNumber, sessionNumber, year, assignments, allSavedPrograms]);
+
+    const handleSave = async () => {
+        if (!selArea || !selGrade || !selSection) {
+            setToast({ msg: 'Seleccione Area, Grado y Seccion.', type: 'warning' });
+            return;
+        }
+
+        
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+
+        const syncedData = JSON.parse(JSON.stringify(sessionData));
+        const pairs = [
+            ['secuencia.inicio.saberes', 'secuencia.inicio.saberes_recursos'],
+            ['secuencia.inicio.conflicto', 'secuencia.inicio.conflicto_recursos'],
+            ['secuencia.proceso.construccion', 'secuencia.proceso.construccion_recursos'],
+            ['secuencia.proceso.aplicacion', 'secuencia.proceso.aplicacion_recursos'],
+            ['secuencia.proceso.metacognicion', 'secuencia.proceso.metacognicion_recursos'],
+            ['secuencia.salida.evaluacion', 'secuencia.salida.evaluacion_recursos']
+        ] as const;
+
+        const getPath = (obj: any, path: string) => path.split('.').reduce((acc: any, key: string) => acc?.[key], obj);
+        const setPath = (obj: any, path: string, value: string) => {
+            const keys = path.split('.');
+            let ptr = obj;
+            for (let i = 0; i < keys.length - 1; i++) ptr = ptr[keys[i]];
+            ptr[keys[keys.length - 1]] = value;
+        };
+
+        pairs.forEach(([activityPath, resourcePath]) => {
+            const activity = String(getPath(syncedData, activityPath) || '');
+            const resources = String(getPath(syncedData, resourcePath) || '');
+            const customInstrument = String(syncedData?.competenciaPrio?.inst || '');
+            const { updatedResources, changed } = syncResourcesFromActivity(activity, resources, customInstrument);
+            if (changed) setPath(syncedData, resourcePath, updatedResources);
+        });
+
+        setSessionData(syncedData);
+        const areaId = assignments.find(a => a.areaName === selArea)?.areaId || selArea;
+        
+        const payload = {
+            year,
+            areaId,
+            grade: selGrade,
+            section: selSection,
+            unitNumber,
+            sessionNumber,
+            date: sessionDate,
+            sessionData: {
+                ...syncedData,
+                date: sessionDate
+            }
+        };
+
+        const res = await saveSesion(payload);
+        if (res.success) {
+            setToast({ msg: '✅ Sesión sincronizada correctamente en SQL.', type: 'success' });
+            onSuccess();
+        } else {
+            setToast({ msg: '❌ Error al guardar en SQL: ' + res.message, type: 'error' });
+        }
+    };
+
+    const handleRestoreTemplate = () => {
+        if (confirm("¿Estás seguro de restaurar el contenido de la secuencia a la plantilla por defecto? Se sobrescribirá lo actual.")) {
+            let evaluacionFinal = DEFAULT_SEQUENCE_TEMPLATE.evaluacion;
+            const grado = selGrade || "1°";
+            const seccion = selSection || "Única";
+            const gradoSeccion = `${grado}° ${seccion}`.trim();
+            const unidad = unitNumber || "1";
+            const sesion = sessionNumber || "1";
+            const bimestre = bimesterLabel;
+            const instrumento = sessionData?.competenciaPrio?.inst?.trim() || "Guía de observación";
+            
+            evaluacionFinal = evaluacionFinal.replace("[INSTRUMENTO]", instrumento);
+            
+            let aplicacionFinal = DEFAULT_SEQUENCE_TEMPLATE.aplicacion
+            .replace("[GRADO_SECCION]", gradoSeccion)
+            .replace("[BIMESTRE]", `BIM ${bimestre}`)
+            .replace("[UNIDAD]", unidad)
+            .replace("[SESION]", sesion)
+            .replace("[INSTRUMENTO]", instrumento);
+
+            setSessionData((prev: any) => ({
+                ...prev,
+                secuencia: {
+                    ...prev.secuencia,
+                    inicio: {
+                        ...prev.secuencia.inicio,
+                        saberes: DEFAULT_SEQUENCE_TEMPLATE.saberes,
+                        saberes_recursos: DEFAULT_SEQUENCE_TEMPLATE.saberes_recursos,
+                        conflicto: DEFAULT_SEQUENCE_TEMPLATE.conflicto,
+                        conflicto_recursos: DEFAULT_SEQUENCE_TEMPLATE.conflicto_recursos,
+                    },
+                    proceso: {
+                        ...prev.secuencia.proceso,
+                        construccion: DEFAULT_SEQUENCE_TEMPLATE.construccion,
+                        construccion_recursos: DEFAULT_SEQUENCE_TEMPLATE.construccion_recursos,
+                        aplicacion: aplicacionFinal,
+                        aplicacion_recursos: DEFAULT_SEQUENCE_TEMPLATE.aplicacion_recursos,
+                        metacognicion: DEFAULT_SEQUENCE_TEMPLATE.metacognicion,
+                        metacognicion_recursos: DEFAULT_SEQUENCE_TEMPLATE.metacognicion_recursos,
+                    },
+                    salida: {
+                        ...prev.secuencia.salida,
+                        evaluacion: evaluacionFinal,
+                        evaluacion_recursos: DEFAULT_SEQUENCE_TEMPLATE.evaluacion_recursos,
+                    }
+                }
+            }));
+            setToast({ msg: "Plantilla restaurada correctamente", type: "success" });
+        }
+    };
+
+    const handleOpenManager = async () => {
+        const sessions = await getAllSesiones();
+        setAllSavedSessionsList(Object.values(sessions));
+        setIsManageModalOpen(true);
+    };
+
+    const handleLoadSpecific = (s: any) => {
+        setSelArea(assignments.find(a => a.areaId === s.areaId)?.areaName || s.areaId);
+        setSelGrade(s.grade);
+        setSelSection(s.section);
+        setUnitNumber(s.unitNumber);
+        setSessionNumber(s.sessionNumber);
+        setYear(s.year);
+        setIsManageModalOpen(false);
+        if (s.date) {
+            setSessionDate(s.date);
+            setDateOptions([]);
+        }
+    };
+
+    const handleDeleteSession = async (id: string) => {
+        if (confirm("¿Eliminar permanentemente esta sesión de la base de datos?")) {
+            const res = await deleteSesion(id);
+            if (res.success) {
+                setAllSavedSessionsList(prev => prev.filter(s => s.id !== id));
+                setToast({ msg: "Sesión eliminada", type: 'success' });
+            }
+        }
+    };
+
+    const dynamicHoursLabel = useMemo(() => {
+        if (!selArea || !selGrade || !selSection) return "-----";
+        
+        const datesToProcess = dateOptions.length > 0 
+            ? dateOptions.map(d => d.value) 
+            : (sessionDate ? [sessionDate] : []);
+            
+        if (datesToProcess.length === 0) return "-----";
+
+        const savedSchedule = localStorage.getItem('armi_schedule_entries');
+        const savedConfig = localStorage.getItem('armi_schedule_config');
+        if (!savedSchedule) return "-----";
+        
+        try {
+            const scheduleEntries: ScheduleEntry[] = JSON.parse(savedSchedule);
+            const scheduleConfig: ScheduleConfig = savedConfig ? JSON.parse(savedConfig) : { breaks: [] } as any;
+            const breaks = scheduleConfig.breaks || [];
+            const sectionsToCalculate = selSection.split(/, | y /).map(s => s.trim().toUpperCase());
+            const dayNames = ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'];
+            
+            const allBlocks: string[] = [];
+
+            datesToProcess.forEach(dStr => {
+                if (!dStr) return;
+                const dObj = new Date(dStr + 'T00:00:00');
+                if (isNaN(dObj.getTime())) return;
+                
+                const dayText = dayNames[dObj.getDay()];
+                sectionsToCalculate.forEach(sec => {
+                    const sectionEntries = scheduleEntries.filter(e => 
+                        e.day.toUpperCase() === dayText && 
+                        e.grade.toLowerCase() === selGrade.toLowerCase() && 
+                        String(e.section).toUpperCase() === sec && 
+                        (e.areaName.toLowerCase() === selArea.toLowerCase() || e.areaId === selArea)
+                    ).sort((a, b) => a.hourIndex - b.hourIndex);
+
+                    if (sectionEntries.length > 0) {
+                        const sessionBlocks: number[] = [];
+                        let currentSize = 0;
+                        for (let i = 0; i < sectionEntries.length; i++) {
+                            currentSize++;
+                            const current = sectionEntries[i];
+                            const next = sectionEntries[i + 1];
+                            const hasBreakAfter = breaks.some(b => b.afterHour === current.hourIndex);
+                            const isNextConsecutive = next && next.hourIndex === current.hourIndex + 1;
+                            if (!isNextConsecutive || hasBreakAfter) {
+                                sessionBlocks.push(currentSize);
+                                currentSize = 0;
+                            }
+                        }
+                        sessionBlocks.forEach(h => {
+                            allBlocks.push(`${h}h (${h * 45} min)`);
+                        });
+                    }
+                });
+            });
+
+            const uniqueBlocks = Array.from(new Set(allBlocks)).sort();
+            if (uniqueBlocks.length === 0) return "-----";
+            return uniqueBlocks.join(' - ');
+        } catch (e) { return "-----"; }
+    }, [selArea, selGrade, selSection, sessionDate, dateOptions]);
+
+    const visibleTransRows = useMemo(() => {
+        const rows = Array.isArray(sessionData?.competenciasTrans) ? sessionData.competenciasTrans : [];
+        return rows
+        .map((ct: any, originalIdx: number) => ({ ct, originalIdx }))
+        .filter(({ ct }) => {
+            const hasCap = normalizeLoose(String(ct?.cap || '')).length > 0;
+            const hasDes = isMeaningfulRichText(String(ct?.des || ''));
+            const hasEvidence = isMeaningfulRichText(String(ct?.evidence || ''));
+            const hasInst = normalizeLoose(String(ct?.inst || '')).length > 0;
+            return hasCap || hasDes || hasEvidence || hasInst;
+        });
+    }, [sessionData?.competenciasTrans]);
+
+    const tiempoValues = useMemo(() => {
+        const minuteMatches = Array.from(String(dynamicHoursLabel || '').matchAll(/\((\d+)\s*min\)/gi));
+        const mins = minuteMatches
+            .map(m => parseInt(m[1], 10))
+            .filter(n => Number.isFinite(n) && !!TIME_DISTRIBUTIONS[n]);
+
+        const unique = Array.from(new Set(mins));
+        const low = unique.length ? Math.min(...unique) : 90;
+        const high = unique.length ? Math.max(...unique) : 90;
+        const lowDist = TIME_DISTRIBUTIONS[low] || TIME_DISTRIBUTIONS[90];
+        const highDist = TIME_DISTRIBUTIONS[high] || TIME_DISTRIBUTIONS[90];
+
+        if (low === high) return lowDist.map(v => `${v}'`);
+        return lowDist.map((v, idx) => {
+            const h = highDist[idx] ?? v;
+            const min = Math.min(v, h);
+            const max = Math.max(v, h);
+            return `${min}'-${max}'`;
+        });
+    }, [dynamicHoursLabel]);
+
+    if (showTemplateMode) {
+        return <SessionTemplateMergeView onBack={() => setShowTemplateMode(false)} />;
+    }
+
+    return (
+        <div className="animate-fade-in pb-20 space-y-6 relative">
+            {toast && <InternalToast message={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
+            {showAuthScreen && (
+                <AuthOverlay
+                    onSave={handleSaveIAKey}
+                    onClose={() => setShowAuthScreen(false)}
+                    isSaving={savingKey}
+                />
+            )}
+            
+            {showMotiveModal && (
+                <div className="fixed inset-0 z-[10000] flex items-start justify-center p-6 bg-slate-900/60 backdrop-blur-md pt-20">
+                    <div className="bg-white w-full max-w-md rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 animate-scale-in">
+                        <div className="bg-blue-600 text-white p-8">
+                            <h3 className="text-xl font-black uppercase tracking-tight leading-none italic">Motivo de Reprogramación</h3>
+                            <p className="text-[10px] text-blue-100 mt-2 uppercase font-bold tracking-widest">Justifique el cambio de fecha de la sesión</p>
+                        </div>
+                        <div className="p-10 space-y-6">
+                            <div className="space-y-2">
+                                <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Escriba el motivo aquí:</label>
+                                <textarea 
+                                    autoFocus
+                                    className="w-full p-6 h-40 bg-slate-50 border border-slate-200 rounded-[2rem] outline-none focus:border-blue-500 text-[11px] font-bold text-slate-700 shadow-inner resize-none italic"
+                                    value={motiveInput}
+                                    placeholder="Ej: Feriado local no previsto, Suspensión por mantenimiento..."
+                                    onChange={e => setMotiveInput(e.target.value)}
+                                />
+                            </div>
+                            <div className="flex flex-col gap-3">
+                                <button 
+                                    onClick={confirmDateChange}
+                                    disabled={!motiveInput.trim()}
+                                    className="btn-water water-blue w-full py-5 rounded-[2rem] text-white font-black uppercase text-[11px] tracking-[0.2em] shadow-xl disabled:opacity-50"
+                                >
+                                    Confirmar Reprogramación
+                                </button>
+                                <button onClick={() => {setShowMotiveModal(false); setIsDatePickerOpen(false);}} className="w-full py-2 text-slate-400 font-black uppercase text-[10px] tracking-widest hover:text-slate-600 transition-colors">Cancelar</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <div className="absolute top-6 right-12 z-[300]">
+                <div 
+                    className="w-10 h-10 rounded-full border-2 border-white/40 shadow-lg cursor-pointer overflow-hidden transition-transform hover:scale-110 active:scale-95 flex items-center justify-center bg-white/20 backdrop-blur-md"
+                    title="Personalizar color del apartado"
+                >
+                    <span className="text-xl">🎨</span>
+                    <input 
+                        type="color" 
+                        value={themeColor} 
+                        onChange={(e) => {
+                            setThemeColor(e.target.value);
+                            localStorage.setItem('armi_sessions_theme', e.target.value);
+                        }}
+                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                    />
+                </div>
+            </div>
+
+            <div className="p-6 rounded-[2.5rem] shadow-xl relative overflow-visible text-white transition-colors duration-500" style={{ backgroundColor: themeColor }}>
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-white/30 to-transparent"></div>
+                <div className="flex flex-col lg:flex-row justify-between items-center gap-6">
+                    <div className="flex items-center gap-4">
+                        <div className="bg-white/20 p-3 rounded-2xl border border-white/30 shadow-inner">
+                        <span className="text-3xl">📖</span></div>
+                        <div className="flex flex-col">
+                            <h1 className="text-4xl font-black italic font-serif tracking-tight uppercase leading-none">Sesiones de Aprendizaje {year}</h1><span className="text-xs font-bold text-white/70 uppercase tracking-widest mt-1">Planificación de sesiones - {bimesterLabel} Bimestre</span></div>
+                    </div>
+                    
+                    <div className="bg-white/20 p-3 rounded-[3rem] border border-white/30 shadow-inner backdrop-blur-md flex gap-3 ml-auto lg:mr-16">
+                        <button onClick={handleGenerateAI} disabled={!headerFilled || isGeneratingIA} className={`btn-3d-purple scale-90 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`} title="Completar con IA Armi">
+                            {isGeneratingIA ? <span className="text-xl">⌛</span> : <span><i className="fa-solid fa-robot text-lg"></i></span>}
+                        </button>
+                        <button onClick={handleSave} className="btn-3d-plus scale-90" title="Guardar Sesión">
+                            <span>+</span>
+                        </button>
+                        <button onClick={() => setSessionData(INITIAL_SESSION_DATA)} className="btn-3d-clear scale-90" title="Limpiar Formulario">
+                            <span><i className="fa-solid fa-broom"></i></span>
+                        </button>
+                        <button onClick={handleOpenManager} className="btn-3d-purple scale-90" title="Ver Database">
+                            <span><i className="fa-solid fa-database"></i></span>
+                        </button>
+                        <button onClick={() => setShowTemplateMode(true)} className="btn-3d-blue scale-90" title="Ver Plantilla">
+                            <span>📄</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div className="mt-8 grid grid-cols-1 md:grid-cols-12 gap-4 bg-black/10 p-5 rounded-[2.5rem] border border-white/10 backdrop-blur-md relative z-[200] overflow-visible">
+                    <div className="absolute -top-3 right-8 z-30 pointer-events-none">
+                        <div className="bg-slate-900/80 backdrop-blur-xl px-4 py-1.5 rounded-full border border-white/20 shadow-2xl flex items-center gap-2.5 ring-4 ring-black/5">
+                            <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></div>
+                            <span className="text-[8px] font-black text-white/50 uppercase tracking-[0.2em]">Carga Horaria</span>
+                            <span className="text-[11px] font-black text-blue-400 tracking-tighter">{dynamicHoursLabel}</span>
+                        </div>
+                    </div>
+
+                    <div className="md:col-span-4">
+                        <Select 
+                            label="AREA" name="selArea" 
+                            options={uniqueAreas.map(a => ({ value: a, label: a.toUpperCase() }))} 
+                            value={selArea} onChange={e => { setSelArea(e.target.value); setSelGrade(''); setSelSection(''); }}
+                            className="text-slate-900"
+                            labelClassName="text-white"
+                            placeholder="Área..."
+                        />
+                    </div>
+                    <div className="md:col-span-1">
+                        <Select 
+                            label="GRADO" name="selGrade" 
+                            options={availableGrades.map(g => ({ value: g, label: g }))} 
+                            value={selGrade} onChange={e => { setSelGrade(e.target.value); setSelSection(''); }}
+                            className="text-slate-900"
+                            labelClassName="text-white"
+                            placeholder="-"
+                        />
+                    </div>
+                    <div className="md:col-span-2">
+                        <Select 
+                            label="SECC" name="selSection" 
+                            options={availableSections} 
+                            value={selSection} onChange={e => setSelSection(e.target.value)}
+                            className="text-slate-900"
+                            labelClassName="text-white"
+                            placeholder="-"
+                        />
+                    </div>
+                    <div className="md:col-span-1">
+                        <Select 
+                            label="UNID." name="unit" 
+                            options={Array.from({ length: 8 }, (_, i) => ({ value: (i + 1).toString(), label: `U${i + 1}` }))} 
+                            value={unitNumber} onChange={e => setUnitNumber(e.target.value)}
+                            className="text-slate-900"
+                            labelClassName="text-white"
+                        />
+                    </div>
+                    <div className="md:col-span-1">
+                        <Select 
+                            label="N° SESIÓN" name="session" 
+                            options={Array.from({ length: maxSessionsInUnit }, (_, i) => ({ value: (i + 1).toString(), label: `S${i + 1}` }))} 
+                            value={sessionNumber} onChange={e => setSessionNumber(e.target.value)}
+                            className="text-slate-900"
+                            labelClassName="text-white"
+                        />
+                    </div>
+                    <div className="md:col-span-3 relative">
+                        <label className="block text-[10px] font-black text-white mb-2 ml-1 uppercase tracking-[0.15em] leading-none">FECHA</label>
+                        <div className="flex flex-col gap-2">
+                            <div className="flex flex-wrap gap-2">
+                                {(dateOptions.length > 0 ? dateOptions : [{value: sessionDate, label: sessionDate.split('-').reverse().join('/')}]).map(d => (
+                                    <button 
+                                        key={d.value} 
+                                        onClick={() => {
+                                            if (sessionDate === d.value) {
+                                                setIsDatePickerOpen(!isDatePickerOpen);
+                                            } else {
+                                                triggerDateChange(d.value);
+                                            }
+                                        }}
+                                        className={`px-3 py-1 rounded-full text-[9px] font-black uppercase transition-all shadow-sm border flex items-center gap-1.5 ${sessionDate === d.value ? 'bg-white text-blue-700 border-white ring-2 ring-white/20 shadow-md scale-105' : 'bg-white/10 text-white border-white/10 hover:bg-white/20'}`}
+                                    >
+                                        <span>{d.label || 'dd/mm/aa'}</span>
+                                        {sessionDate === d.value && <span className="text-[8px] animate-pulse">✏️</span>}
+                                    </button>
+                                ))}
+                            </div>
+                            
+                            <CustomDatePicker 
+                                value={sessionDate} 
+                                isOpen={isDatePickerOpen}
+                                onChange={triggerDateChange} 
+                                onClose={() => setIsDatePickerOpen(false)}
+                            />
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {headerFilled ? (
+                <>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative z-10">
+                        {[
+                            { id: 'I', label: 'TÍTULO DE SESIÓN', field: 'title' },
+                            { id: 'II', label: 'PROPÓSITO DE SESIÓN', field: 'purpose' },
+                        ].map(sec => (
+                            <div key={sec.id} className="bg-white rounded-[2rem] shadow-lg border overflow-hidden" style={{ borderColor: themeColor }}>
+                                <div className="text-white px-6 py-2.5 text-center text-[11px] font-black uppercase tracking-widest relative" style={{ backgroundColor: themeColor }}>
+                                    {sec.id}. {sec.label}
+                                </div>
+                                <textarea 
+                                    className="w-full p-4 h-24 resize-none outline-none text-slate-700 font-medium italic text-[11px] leading-relaxed text-center focus:bg-slate-50 transition-all"
+                                    placeholder="Escriba aquí..."
+                                    value={sessionData[sec.field as keyof typeof sessionData]}
+                                    onChange={e => handleInputChange(sec.field, e.target.value)}
+                                />
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="bg-white rounded-[2.5rem] shadow-lg border overflow-hidden relative z-10" style={{ borderColor: themeColor }}>
+                        <div className="text-white px-6 py-2.5 text-center text-[11px] font-black uppercase tracking-widest" style={{ backgroundColor: themeColor }}>
+                            III. SITUACIÓN PROBLEMÁTICA
+                        </div>
+                        <textarea 
+                            className="w-full p-6 h-32 resize-none outline-none text-slate-700 font-medium italic text-[11px] leading-relaxed text-justify focus:bg-slate-50 transition-all"
+                            placeholder="Escriba la situación problemática aquí..."
+                            value={sessionData.situation}
+                            onChange={e => handleInputChange('situation', e.target.value)}
+                        />
+                    </div>
+
+                    <div className="bg-white rounded-[2.5rem] shadow-xl border overflow-hidden relative z-10" style={{ borderColor: themeColor }}>
+                        <table className="comp-table w-full border-collapse text-[10px] min-w-[1000px] table-fixed">
+                            <thead>
+                                <tr className="text-white font-black uppercase text-[9px] tracking-wider text-center divide-x divide-white/20" style={{ backgroundColor: themeColor }}>
+                                    <th className="p-3 w-40">COMPETENCIA PRIORIZADA</th>
+                                    <th className="p-3 w-40">CAPACIDAD PRIORIZADA</th>
+                                    <th className="p-3">CRITERIOS</th>
+                                    <th className="p-3 w-40">CAMPOS TEMÁTICOS</th>
+                                    <th className="p-3 w-40">EVIDENCIA DE APRENDIZAJE</th>
+                                    <th className="p-3 w-40">INSTRUMENTO</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-black/20">
+                                <tr className="divide-x divide-black/20">
+                                    <td className="p-4 bg-slate-50/50 font-black text-slate-900 text-center align-middle">{sessionData.competenciaPrio.comp}</td>
+                                    <td className="p-4 bg-slate-50/30 text-slate-800 font-bold italic text-center whitespace-pre-wrap align-middle">{sessionData.competenciaPrio.cap}</td>
+                                    <td className="p-0 align-middle [&_.ql-container]:border-0 [&_.ql-container]:h-full [&_.ql-editor]:min-h-[96px] [&_.ql-editor]:h-full [&_.ql-editor]:w-full [&_.ql-editor]:px-4 [&_.ql-editor]:py-4 [&_.ql-editor]:text-[10px] [&_.ql-editor]:font-bold [&_.ql-editor]:text-slate-700 [&_.ql-editor]:bg-slate-50/40 [&_.ql-editor]:whitespace-pre-wrap">
+                                        <ReactQuill
+                                            theme="bubble"
+                                            modules={QUILL_MODULES}
+                                            value={sessionData.competenciaPrio.des}
+                                            onChange={(val) => handleInputChange('competenciaPrio.des', val)}
+                                        />
+                                    </td>
+                                    <td className="p-0 align-middle" rowSpan={1 + visibleTransRows.length}>
+                                        <textarea data-comp-table="1" className="w-full p-4 border-0 outline-none text-center font-bold text-slate-700 resize-none overflow-y-hidden text-[10px] bg-slate-50/50" onInput={e => autoResizeTextarea(e.currentTarget)} value={sessionData.competenciaPrio.field} onChange={e => handleInputChange('competenciaPrio.field', e.target.value)} placeholder="Campo..." />
+                                    </td>
+                                    <td className="p-0 align-middle [&_.ql-container]:border-0 [&_.ql-container]:h-full [&_.ql-editor]:min-h-[96px] [&_.ql-editor]:h-full [&_.ql-editor]:w-full [&_.ql-editor]:px-4 [&_.ql-editor]:py-4 [&_.ql-editor]:text-[10px] [&_.ql-editor]:font-bold [&_.ql-editor]:text-slate-700 [&_.ql-editor]:bg-slate-50/30 [&_.ql-editor]:whitespace-pre-wrap">
+                                        <ReactQuill
+                                            theme="bubble"
+                                            modules={QUILL_MODULES}
+                                            value={sessionData.competenciaPrio.evidence}
+                                            onChange={(val) => handleInputChange('competenciaPrio.evidence', val)}
+                                        />
+                                    </td>
+                                    <td className="p-0 align-middle">
+                                        <textarea data-comp-table="1" className="w-full p-4 border-0 outline-none text-center font-bold text-slate-500 resize-none overflow-y-hidden text-[10px]" onInput={e => autoResizeTextarea(e.currentTarget)} value={sessionData.competenciaPrio.inst} onChange={e => handleInputChange('competenciaPrio.inst', e.target.value)} placeholder="Instrumento..." /></td>
+                                </tr>
+                                {visibleTransRows.map(({ ct, originalIdx }: any, idx: number) => (
+                                    <tr key={originalIdx} className="divide-x divide-black/20" style={{ backgroundColor: hexToRgba(String(ct?.rowColor || '#00b28c'), 0.08) }}>
+                                        <td className="p-4 font-black text-slate-900 text-center uppercase tracking-tighter align-middle">
+                                            <span className="text-[8px] opacity-60 block mb-1">Competencia Transversal:</span>
+                                            {ct.comp}
+                                        </td>
+                                        <td className="p-0 align-middle">
+                                            <textarea data-comp-table="1" className="bg-transparent w-full p-4 border-0 outline-none text-center font-black italic text-slate-800 resize-none overflow-y-hidden text-[10px]" onInput={e => autoResizeTextarea(e.currentTarget)} value={ct.cap} onChange={e => handleInputChange(`competenciasTrans.${originalIdx}.cap`, e.target.value)} placeholder="Capacidad..." />
+                                        </td>                               
+                                        <td className="p-0 align-middle [&_.ql-container]:!border-0 [&_.ql-container]:h-full [&_.ql-container]:!bg-transparent [&_.ql-editor]:min-h-[96px] [&_.ql-editor]:h-full [&_.ql-editor]:w-full [&_.ql-editor]:px-4 [&_.ql-editor]:py-4 [&_.ql-editor]:text-[10px] [&_.ql-editor]:font-black [&_.ql-editor]:text-slate-800 [&_.ql-editor]:!bg-black [&_.ql-editor]:whitespace-pre-wrap">
+                                            <ReactQuill
+                                                className="trans-quill"
+                                                theme="bubble"
+                                                modules={QUILL_MODULES}
+                                                value={ct.des}
+                                                onChange={(val) => handleInputChange(`competenciasTrans.${originalIdx}.des`, val)}
+                                            />
+                                        </td>
+                                        <td className="p-0 align-middle [&_.ql-container]:!border-0 [&_.ql-container]:h-full [&_.ql-container]:!bg-transparent [&_.ql-editor]:min-h-[96px] [&_.ql-editor]:h-full [&_.ql-editor]:w-full [&_.ql-editor]:px-4 [&_.ql-editor]:py-4 [&_.ql-editor]:text-[10px] [&_.ql-editor]:font-black [&_.ql-editor]:text-slate-800 [&_.ql-editor]:!bg-black [&_.ql-editor]:whitespace-pre-wrap">
+                                            <ReactQuill
+                                                className="trans-quill"
+                                                theme="bubble"
+                                                modules={QUILL_MODULES}
+                                                value={ct.evidence}
+                                                onChange={(val) => handleInputChange(`competenciasTrans.${originalIdx}.evidence`, val)}
+                                            />
+                                        </td>
+                                        <td className="p-0 align-middle">
+                                            <textarea data-comp-table="1" className="bg-transparent w-full p-4 border-0 outline-none text-center font-bold text-slate-500 resize-none overflow-y-hidden text-[10px]" onInput={e => autoResizeTextarea(e.currentTarget)} value={ct.inst} onChange={e => handleInputChange(`competenciasTrans.${originalIdx}.inst`, e.target.value)} placeholder="Instrumento..." /></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div className="bg-white rounded-[2.5rem] shadow-xl border overflow-hidden relative z-10" style={{ borderColor: themeColor }}>
+                        <table className="w-full border-collapse text-[10px]">
+                            <thead className="text-white font-black uppercase text-[9px]" style={{ backgroundColor: themeColor }}>
+                                <tr className="divide-x divide-white/20">
+                                    <th className="p-3 w-40 text-center">ENFOQUE TRANSVERSAL</th>
+                                    <th className="p-3 w-40 text-center">VALORES</th>
+                                    <th className="p-3 w-1/3 text-center">ACCIONES OBSERVABLES</th>
+                                    <th className="p-3 text-center">SE DEMUESTRA CUANDO...</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-black/20">
+                                <tr className="divide-x divide-black/20 align-top">
+                                    <td className="p-4 bg-slate-50/50 font-black text-slate-900 text-center align-middle">{sessionData.enfoqueTrans.enfoque || 'N/A'}</td>
+                                    <td className="p-0 align-middle">
+                                        <textarea className="w-full h-full p-4 border-0 outline-none text-center font-bold text-slate-800 resize-none italic text-[11px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={sessionData.enfoqueTrans.valor} onChange={e => handleInputChange('enfoqueTrans.valor', e.target.value)} placeholder="Valores..." /></td>
+                                    <td className="p-0 align-middle">
+                                        <textarea className="w-full p-4 border-0 outline-none text-slate-700 font-medium italic text-justify resize-none text-[11px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={sessionData.enfoqueTrans.acciones} onChange={e => handleInputChange('enfoqueTrans.acciones', e.target.value)} placeholder="Acciones..." /></td>
+                                    <td className="p-0 align-middle">
+                                        <textarea className="w-full p-4 border-0 outline-none text-slate-600 font-medium italic text-justify resize-none text-[11px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={sessionData.enfoqueTrans.demuestra} onChange={e => handleInputChange('enfoqueTrans.demuestra', e.target.value)} placeholder="Se demuestra cuando..." /></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div className="bg-white rounded-[2.5rem] shadow-xl border overflow-hidden relative z-10" style={{ borderColor: themeColor }}>
+                        <div className="bg-slate-50 px-6 py-2 border-b border-slate-200 flex justify-end gap-3">
+                        <button onClick={handleSaveAsTemplate} className="btn-3d-darkgreen scale-90" title="Anclar como Plantilla de Área (SQL)">
+                            <span><i className="fa-solid fa-anchor"></i></span>
+                        </button>
+                        <button onClick={handleExportJson} className="btn-3d-orange scale-90" title="Exportar Plantilla (.JSON)">
+                            <span><i className="fa-solid fa-download"></i></span>
+                        </button>
+                        <label className="btn-3d-grey scale-90 cursor-pointer" title="Importar Plantilla (.JSON)">
+                            <span><i className="fa-solid fa-upload"></i></span>
+                            <input type="file" className="hidden" accept=".json" onChange={handleImportJson} />
+                        </label>
+                            <button onClick={handleRestoreTemplate} className="btn-3d-clear scale-90" title="Restaurar Plantilla Global">
+                            <span><i className="fa-solid fa-arrows-rotate"></i></span>
+                            </button>
+                        </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full border-collapse text-[10px]">
+                                <thead>
+                                    <tr className="text-white font-black uppercase text-[9px] tracking-widest" style={{ backgroundColor: themeColor }}>
+                                        <th className="border border-white/30 p-3 w-24 text-center">FASES</th>
+                                        <th colSpan={2} className="border border-white/30 p-3 w-64 text-center">PROCESOS PEDAGÓGICOS</th>
+                                        <th className="border border-white/30 p-3 text-center">ESTRATEGIAS / ACTIVIDADES</th>
+                                        <th className="border border-white/30 p-3 w-64 text-center">MEDIOS, MATERIALES Y/O RECURSOS</th>
+                                        <th className="border border-white/30 p-3 w-24 text-center">TIEMPO</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {/* ================= INICIO ================= */}
+                                    <tr>
+                                        <td rowSpan={2} className="border border-black/20 p-4 font-black text-center align-middle bg-slate-50">INICIO</td>
+                                        {/* MOTIVACIÓN TRANSVERSAL TOTAL */}
+                                        <td rowSpan={6} className="border border-black/20 bg-slate-100 align-middle">
+                                            <div className="h-full flex items-center justify-center">
+                                                <span className="font-black tracking-widest text-[9px]" style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}>MOTIVACIÓN</span>
+                                            </div>
+                                        </td>
+                                        <td className="border border-black/20 p-4 font-black text-center bg-slate-50/40">RECUPERACIÓN DE SABERES PREVIOS</td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.inicio.saberes}
+                                                onChange={(val) => {
+                                                    handleInputChange('secuencia.inicio.saberes', val);
+                                                    debouncedSync(val, 'secuencia.inicio.saberes', 'secuencia.inicio.saberes_recursos');
+                                                }}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.inicio.saberes_recursos}
+                                                onChange={(val) => handleInputChange('secuencia.inicio.saberes_recursos', val)}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 text-center font-black bg-slate-50">{tiempoValues[0]}</td>
+                                    </tr>
+                                    <tr>
+                                        <td className="border border-black/20 p-4 font-black text-center bg-slate-50/40">CONFLICTO COGNITIVO</td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.inicio.conflicto}
+                                                onChange={(val) => {
+                                                    handleInputChange('secuencia.inicio.conflicto', val);
+                                                    debouncedSync(val, 'secuencia.inicio.conflicto', 'secuencia.inicio.conflicto_recursos');
+                                                }}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.inicio.conflicto_recursos}
+                                                onChange={(val) => handleInputChange('secuencia.inicio.conflicto_recursos', val)}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 text-center font-black bg-slate-50">{tiempoValues[1]}</td>
+                                    </tr>
+                                    {/* ================= DESARROLLO ================= */}
+                                    <tr>
+                                        <td rowSpan={3} className="border border-black/20 p-4 font-black text-center align-middle bg-slate-50">DESARROLLO</td>
+                                        <td className="border border-black/20 p-4 font-black text-center bg-slate-50/40">CONSTRUCCIÓN DEL CONOCIMIENTO</td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.proceso.construccion}
+                                                onChange={(val) => {
+                                                    handleInputChange('secuencia.proceso.construccion', val);
+                                                    debouncedSync(val, 'secuencia.proceso.construccion', 'secuencia.proceso.construccion_recursos');
+                                                }}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.proceso.construccion_recursos}
+                                                onChange={(val) => handleInputChange('secuencia.proceso.construccion_recursos', val)}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 text-center font-black bg-slate-50">{tiempoValues[2]}</td>
+                                    </tr>
+                                    <tr>
+                                        <td className="border border-black/20 p-4 font-black text-center bg-slate-50/40">APLICACIÓN DE LO APRENDIDO</td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.proceso.aplicacion}
+                                                onChange={(val) => {
+                                                    handleInputChange('secuencia.proceso.aplicacion', val);
+                                                    debouncedSync(val, 'secuencia.proceso.aplicacion', 'secuencia.proceso.aplicacion_recursos');
+                                                }}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.proceso.aplicacion_recursos}
+                                                onChange={(val) => handleInputChange('secuencia.proceso.aplicacion_recursos', val)}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 text-center font-black bg-slate-50">{tiempoValues[3]}</td>
+                                    </tr>
+                                    <tr>
+                                        <td className="border border-black/20 p-4 font-black text-center bg-slate-50/40">METACOGNICIÓN</td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.proceso.metacognicion}
+                                                onChange={(val) => {
+                                                    handleInputChange('secuencia.proceso.metacognicion', val);
+                                                    debouncedSync(val, 'secuencia.proceso.metacognicion', 'secuencia.proceso.metacognicion_recursos');
+                                                }}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.proceso.metacognicion_recursos}
+                                                onChange={(val) => handleInputChange('secuencia.proceso.metacognicion_recursos', val)}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 text-center font-black bg-slate-50">{tiempoValues[4]}</td>
+                                    </tr>
+                                    {/* ================= SALIDA ================= */}
+                                    <tr>
+                                        <td className="border border-black/20 p-4 font-black text-center align-middle bg-slate-50">SALIDA</td>
+                                        <td className="border border-black/20 p-4 font-black text-center bg-slate-50/40">EVALUACIÓN</td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.salida.evaluacion}
+                                                onChange={(val) => {
+                                                    handleInputChange('secuencia.salida.evaluacion', val);
+                                                    debouncedSync(val, 'secuencia.salida.evaluacion', 'secuencia.salida.evaluacion_recursos');
+                                                }}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 p-0 bg-white">
+                                            <ReactQuill 
+                                                theme="bubble" 
+                                                modules={QUILL_MODULES} 
+                                                value={sessionData.secuencia.salida.evaluacion_recursos}
+                                                onChange={(val) => handleInputChange('secuencia.salida.evaluacion_recursos', val)}
+                                            />
+                                        </td>
+                                        <td className="border border-black/20 text-center font-black bg-slate-50">{tiempoValues[5]}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <div className="bg-white rounded-[2.5rem] shadow-xl border overflow-hidden relative z-10" style={{ borderColor: themeColor }}>
+                        <div className="text-white p-4 text-center font-black uppercase text-xs tracking-widest flex items-center justify-center gap-3" style={{ backgroundColor: themeColor }}>
+                            <span className="text-xl"></span> VII. INSTRUMENTO DE EVALUACIÓN: RÚBRICA
+                        </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-[11px] border-collapse min-w-[1000px]">
+                                <thead>
+                                    <tr className="bg-slate-800 text-white font-black uppercase text-[9px] divide-x divide-white/50">
+                                        <th className="p-3 w-12 text-center">N°</th>
+                                        <th className="p-3 w-48 text-center">CRITERIO</th>
+                                        <th className="p-3 w-48 bg-red-600 text-center">C (INICIO)</th>
+                                        <th className="p-3 w-48 bg-orange-500 text-center">B (EN PROCESO)</th>
+                                        <th className="p-3 w-48 bg-cyan-500 text-center">A (LOGRADO)</th>
+                                        <th className="p-3 w-48 bg-emerald-500 text-center">AD (DESTACADO)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {sessionData.instrumento.map((row: any, i: number) => {
+                                        const updateRow = (field: string, val: string) => {
+                                            const newInst = [...sessionData.instrumento];
+                                            newInst[i][field] = val;
+                                            handleInputChange('instrumento', newInst);
+                                        };
+                                        return (
+                                            <tr key={row.id} className="divide-x divide-y divide-black/20 border-b border-slate-50 align-top group hover:bg-slate-50 transition-all">
+                                                <td className="p-4 text-center font-black text-slate-900 bg-slate-50/30 align-middle">{row.id}</td>
+                                                <td className="p-0 align-middle"><textarea className="w-full p-3 border-0 outline-none font-bold text-slate-800 resize-none text-center bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.criterio} onChange={e => updateRow('criterio', e.target.value)} placeholder="Defina criterio..." /></td>
+                                                <td className="p-0 align-middle"><textarea className="w-full p-3 border-0 outline-none text-red-600 italic font-medium resize-none text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.c} onChange={e => updateRow('c', e.target.value)} placeholder="..." /></td>
+                                                <td className="p-0 align-middle"><textarea className="w-full p-3 border-0 outline-none text-orange-700 italic font-medium resize-none text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.b} onChange={e => updateRow('b', e.target.value)} placeholder="..." /></td>
+                                                <td className="p-0 align-middle"><textarea className="w-full p-3 border-0 outline-none text-blue-700 italic font-medium resize-none text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.a} onChange={e => updateRow('a', e.target.value)} placeholder="..." /></td>
+                                                <td className="p-0 align-middle"><textarea className="w-full p-3 border-0 outline-none text-emerald-700 italic font-medium resize-none text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.ad} onChange={e => updateRow('ad', e.target.value)} placeholder="..." /></td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </>
+            ) : (
+                <div className="p-20 text-center border-4 border-dashed border-slate-200 rounded-[4rem] bg-slate-50/20 text-slate-300 flex flex-col items-center">
+                    <div className="text-8xl mb-8 grayscale opacity-20 animate-pulse"></div>
+                    <p className="font-black uppercase tracking-[0.3em] text-xs max-w-xs leading-loose">Seleccione los parámetros del encabezado (ÁREA, GRADO, SECC, UNID, SESIÓN) para redactar su sesión de aprendizaje.</p>
+                </div>
+            )}
+            
+            {/* MODAL DE GESTIÓN DE SESIONES */}
+            {isManageModalOpen && (
+                <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-sm animate-fade-in">
+                    <div className="bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col h-[80vh]">
+                        <div className="p-8 text-white flex justify-between items-center" style={{ backgroundColor: themeColor }}>
+                            <div>
+                                <h3 className="text-2xl font-black uppercase tracking-tight leading-none italic">Gestor de Sesiones</h3>
+                                <p className="text-[10px] font-bold text-white/70 mt-2 uppercase tracking-[0.2em]">Registros guardados en Servidor SQL</p>
+                            </div>
+                            <button onClick={() => setIsManageModalOpen(false)} className="w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-2xl transition-all">x</button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
+                            {allSavedSessionsList.length === 0 ? (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-4 opacity-50 italic">
+                                    <span className="text-6xl"></span>
+                                    <p className="font-black text-xs uppercase tracking-widest">No hay sesiones guardadas todavía.</p>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {allSavedSessionsList.map((s, idx) => (
+                                        <div 
+                                            key={idx} 
+                                            onClick={() => handleLoadSpecific(s)}
+                                            className="group bg-slate-50 border border-slate-200 p-5 rounded-[2rem] hover:bg-white hover:border-blue-300 hover:shadow-xl transition-all cursor-pointer relative overflow-hidden"
+                                        >
+                                            <div className="flex items-center gap-4 relative z-10">
+                                                <div className="w-14 h-14 rounded-2xl bg-white flex flex-col items-center justify-center shadow-sm border border-slate-100 shrink-0">
+                                                    <span className="text-[8px] font-black text-slate-400 uppercase">AÑO</span>
+                                                    <span className="text-lg font-black text-blue-600">{s.year}</span>
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <h4 className="font-black text-slate-800 text-sm uppercase truncate pr-4">{s.title}</h4>
+                                                    <div className="flex items-center gap-2 mt-1">
+                                                        <span className="px-2 py-0.5 rounded-lg bg-slate-200 text-slate-600 text-[9px] font-black uppercase">{s.grade} {s.section}</span>
+                                                        <span className="px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-700 text-[9px] font-black uppercase">U{s.unitNumber} S{s.sessionNumber}</span>
+                                                    </div>
+                                                </div>
+                                                <button 
+                                                    onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.id); }}
+                                                    className="w-10 h-10 rounded-full bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white transition-all flex items-center justify-center opacity-0 group-hover:opacity-100 shadow-md"
+                                                >
+                                                    
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+            
+            <style dangerouslySetInnerHTML={{ __html: `
+                @keyframes scaleIn {
+                    from { opacity: 0; transform: scale(0.95) translateY(10px); }
+                    to { opacity: 1; transform: scale(1) translateY(0); }
+                }
+                .animate-scale-in { animation: scaleIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+                @keyframes flyInRight {
+                    0% { opacity: 0; transform: translateX(200px) scale(0.8); }
+                    100% { opacity: 1; transform: translateX(0) scale(1); }
+                }
+                .animate-fly-in-right {
+                    animation: flyInRight 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+                }
+                .generating-glow { position: relative; animation: glow-pulse-border 1.5s infinite; }
+                @keyframes glow-pulse-border { 0% { box-shadow: 0 0 5px rgba(211, 84, 0, 0.2); border-color: rgba(211, 84, 0, 0.3); } 50% { box-shadow: 0 0 20px rgba(211, 84, 0, 0.5); border-color: rgba(211, 84, 0, 0.6); } 100% { box-shadow: 0 0 5px rgba(211, 84, 0, 0.2); border-color: rgba(211, 84, 0, 0.3); } }
+                .comp-table .ql-container.ql-bubble,
+                .comp-table .ql-container.ql-bubble .ql-editor {
+                    background: transparent !important;
+                }
+                .comp-table .trans-quill .ql-container,
+                .comp-table .trans-quill .ql-editor,
+                .comp-table .trans-quill .ql-editor * {
+                    background: transparent !important;
+                    background-color: transparent !important;
+                }
+                .ql-editor { min-height: 80px !important; }
+            `}} />
+        </div>
+    );
+};
