@@ -94,6 +94,66 @@ const fetchManifestJson = async (manifestUrl) => {
   return payload;
 };
 
+const fetchGithubLatestRelease = async (owner, repo) => {
+  const safeOwner = String(owner || '').trim();
+  const safeRepo = String(repo || '').trim();
+  if (!safeOwner || !safeRepo) {
+    throw new Error('Falta owner/repo para recuperar assets desde GitHub.');
+  }
+
+  const response = await fetch(`https://api.github.com/repos/${safeOwner}/${safeRepo}/releases/latest`, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'ARMI-Docente-Updater',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`No se pudo consultar el release de GitHub (HTTP ${response.status}).`);
+  }
+
+  return response.json();
+};
+
+const resolveManifestDownloadUrl = async (manifest, releaseConfig) => {
+  const normalizedManifest = { ...manifest };
+  const desiredAssetName = String(
+    normalizedManifest.assetName || `ARMI_DOCENTE_Setup_${normalizedManifest.version}.exe`
+  ).trim();
+
+  const primaryUrl = String(normalizedManifest.downloadUrl || '').trim();
+  if (!primaryUrl) {
+    throw new Error('version.json no incluye downloadUrl.');
+  }
+
+  try {
+    const response = await fetch(primaryUrl, { method: 'HEAD', redirect: 'follow', cache: 'no-store' });
+    if (response.ok) {
+      normalizedManifest.assetName = desiredAssetName;
+      normalizedManifest.downloadUrl = primaryUrl;
+      return normalizedManifest;
+    }
+  } catch {}
+
+  const githubRelease = await fetchGithubLatestRelease(releaseConfig.owner, releaseConfig.repo);
+  const assets = Array.isArray(githubRelease?.assets) ? githubRelease.assets : [];
+  const exactAsset = assets.find((asset) => String(asset?.name || '').trim() === desiredAssetName);
+  const fallbackAsset = assets.find((asset) => String(asset?.name || '').trim().toLowerCase().endsWith('.exe'));
+  const chosenAsset = exactAsset || fallbackAsset;
+
+  if (!chosenAsset?.browser_download_url) {
+    throw new Error('No se encontro un instalador valido en el release mas reciente de GitHub.');
+  }
+
+  normalizedManifest.assetName = String(chosenAsset.name || desiredAssetName).trim();
+  normalizedManifest.downloadUrl = String(chosenAsset.browser_download_url || '').trim();
+  if (!normalizedManifest.releaseName) {
+    normalizedManifest.releaseName = String(githubRelease.name || githubRelease.tag_name || normalizedManifest.version || '');
+  }
+  return normalizedManifest;
+};
+
 const downloadInstaller = async (downloadUrl, destinationPath, onProgress) => {
   const response = await fetch(downloadUrl);
   if (!response.ok || !response.body) {
@@ -307,7 +367,7 @@ const createManifestProviderController = (releaseConfig, configured, emit, snaps
           percent: 100,
           bytesPerSecond: 0,
           transferred: 0,
-          total,
+          total: 0,
         },
         downloadReady: true,
         downloadedVersion: manifest.version,
@@ -385,7 +445,8 @@ const createManifestProviderController = (releaseConfig, configured, emit, snaps
     });
 
     try {
-      const manifest = await fetchManifestJson(releaseConfig.manifestUrl);
+      const rawManifest = await fetchManifestJson(releaseConfig.manifestUrl);
+      const manifest = await resolveManifestDownloadUrl(rawManifest, releaseConfig);
       latestManifest = manifest;
 
       const currentVersion = app.getVersion();

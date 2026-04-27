@@ -52,6 +52,7 @@ export const AppUpdaterOverlay: React.FC = () => {
       : fallbackSnapshot
   );
   const [expanded, setExpanded] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     if (!window.armiUpdater?.onStateChange) return undefined;
@@ -66,9 +67,21 @@ export const AppUpdaterOverlay: React.FC = () => {
     }
   }, [snapshot.available, snapshot.status]);
 
+  useEffect(() => {
+    if (['checking', 'downloading', 'installing'].includes(snapshot.status)) {
+      setDismissed(false);
+    }
+  }, [snapshot.status]);
+
   const isBlocking = ['downloading', 'installing'].includes(snapshot.status);
-  const isVisible = isBlocking || snapshot.status === 'error' || snapshot.status === 'downloaded';
+  const canDismissModal = snapshot.status === 'error' || snapshot.status === 'downloaded';
+  const isVisible = !dismissed && (isBlocking || snapshot.status === 'error' || snapshot.status === 'downloaded');
   const progress = Math.max(0, Math.min(100, Number(snapshot.progress?.percent || 0)));
+  const closeModal = () => {
+    if (!canDismissModal) return;
+    setDismissed(true);
+    setExpanded(false);
+  };
 
   return (
     <>
@@ -141,7 +154,18 @@ export const AppUpdaterOverlay: React.FC = () => {
 
       {isVisible ? (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-6 backdrop-blur-sm">
-          <div className="w-full max-w-xl rounded-[2rem] bg-white p-8 shadow-[0_28px_80px_rgba(15,23,42,0.28)]">
+          <div className="relative w-full max-w-xl rounded-[2rem] bg-white p-8 shadow-[0_28px_80px_rgba(15,23,42,0.28)]">
+            {canDismissModal ? (
+              <button
+                type="button"
+                onClick={closeModal}
+                className="absolute right-5 top-5 flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-lg font-black text-slate-500 transition hover:border-slate-300 hover:text-slate-700"
+                title="Cerrar"
+              >
+                ×
+              </button>
+            ) : null}
+
             <p className="text-[11px] font-black uppercase tracking-[0.22em] text-sky-500">Actualizacion del sistema</p>
             <h2 className="mt-2 text-3xl font-black text-slate-900">
               {snapshot.status === 'installing'
@@ -191,7 +215,7 @@ export const AppUpdaterOverlay: React.FC = () => {
               <div className="mt-5 flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setExpanded(false)}
+                  onClick={closeModal}
                   className="rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:border-slate-400"
                 >
                   Mas tarde
@@ -202,6 +226,16 @@ export const AppUpdaterOverlay: React.FC = () => {
                   className="rounded-2xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-500"
                 >
                   Abrir instalador
+                </button>
+              </div>
+            ) : snapshot.status === 'error' ? (
+              <div className="mt-5 flex justify-end">
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:border-slate-400"
+                >
+                  Cerrar
                 </button>
               </div>
             ) : null}

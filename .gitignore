@@ -52,3 +52,6 @@ temp/
 *.njsproj
 *.sln
 *.sw?
+dist_electron/
+*.db-shm
+*.db-wal
