@@ -2,60 +2,61 @@
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
-# Run and deploy your AI Studio app
+# Ejecuta e implementa tu aplicación de AI Studio
 
-This contains everything you need to run your app locally.
+Esto contiene todo lo necesario para ejecutar tu aplicación localmente.
 
-View your app in AI Studio: https://ai.studio/apps/drive/1AEweDx5ZnJrswEH3srppr8gY6tsPc9Ai
+Visualiza tu app en AI Studio: https://ai.studio/apps/drive/1AEweDx5ZnJrswEH3srppr8gY6tsPc9Ai
 
-## Run Locally
+## Ejecutar localmente
 
-**Prerequisites:**  Node.js
+**Requisitos previos:** Node.js
 
+1. Instala las dependencias:
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+`npm install`
+2. Configura `GEMINI_API_KEY` en [.env.local](.env.local) con tu clave API de Gemini.
+3. Ejecuta la app:
 
-## Local mode and Google Drive mirror mode
+`npm run dev`
 
-This project now supports two storage modes:
+## Modo local y modo espejo de Google Drive
 
-- `Local only`: everything stays on the current computer
-- `Google Drive mirror`: the app keeps working locally, but also maintains a synchronized mirror folder inside Google Drive for desktop
+Este proyecto ahora admite dos modos de almacenamiento:
 
-What gets synchronized:
+- `Solo local`: todo permanece en el ordenador actual.
+- `Espejo de Google Drive`: la app sigue funcionando localmente, pero también mantiene una carpeta espejo sincronizada en Google Drive para escritorio.
 
-- SQLite data exported from the local database
-- Files from `uploads/`
-- Files from `temp/`
-- Frontend state stored in `localStorage` under `armi_*`
+Qué se sincroniza:
 
-How mirror mode works:
+- Datos SQLite exportados desde la base de datos local.
+- Archivos de `uploads/`.
+- Archivos de `temp/`.
+- Estado del frontend almacenado en `localStorage` en `armi_*`
 
-- The app keeps its working data locally
-- A mirror copy is written into a Google Drive desktop folder chosen by the user
-- The app compares manifests using timestamp + digest
-- If the mirror is newer, the app can pull it back into the local machine
-- If the local machine is newer, the app can push changes to the mirror
+Cómo funciona el modo espejo:
 
-Safety protections included:
+- La aplicación guarda sus datos de trabajo localmente.
+- Se escribe una copia espejo en una carpeta de Google Drive en el escritorio, elegida por el usuario.
+- La aplicación compara los manifiestos mediante la marca de tiempo y el resumen.
+- Si el espejo es más reciente, la aplicación puede descargarlo al equipo local.
+- Si el equipo local es más reciente, la aplicación puede enviar los cambios al espejo.
 
-- Local restore points are created before pulling data from the mirror
-- Removed mirror files are moved to a safety trash inside `.armi-sync/trash`
-- Atomic writes are used for manifests and copied files
-- If files referenced by the mirror manifest are missing, sync stops instead of overwriting healthy data
+Medidas de seguridad incluidas:
 
-Recommended setup:
+- Se crean puntos de restauración locales antes de descargar los datos del espejo.
+- Los archivos del espejo eliminados se mueven a una papelera de seguridad dentro de `.armi-sync/trash`.
+- Se utilizan escrituras atómicas para los manifiestos y los archivos copiados.
+- Si faltan archivos a los que hace referencia el manifiesto del espejo, la sincronización se detiene en lugar de sobrescribir los datos correctos.
 
-1. Install Google Drive for desktop
-2. Sign in with the Google account that will hold the mirror
-3. In the app, choose `Google Drive mirror` mode
-4. Select or paste a mirror path such as `C:\Users\TuUsuario\Google Drive\ARMI Sync`
+Configuración recomendada:
 
-Important note:
+1. Instalar Google Drive para escritorio.
+2. Iniciar sesión con la cuenta de Google que alojará el espejo.
+3. En la aplicación, seleccionar el modo `Google Drive Mirror`.
+4. Seleccionar o pegar una ruta de espejo, como por ejemplo: `C:\Usuarios\TuUsuario\Google Drive\ARMI Sync`
 
-- Data should not be stored inside the application installation folder
-- The mirror folder is separate from the installed app and is meant only for synchronized copies
+Nota importante:
+
+- Los datos no deben almacenarse dentro de la carpeta de instalación de la aplicación.
+- La carpeta espejo es independiente de la aplicación instalada y está destinada únicamente a copias sincronizadas.
