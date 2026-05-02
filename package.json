@@ -1,7 +1,7 @@
 {
   "name": "armi-docente-web",
   "private": true,
-  "version": "11.0.5",
+  "version": "11.0.7",
   "description": "ARMI Docente",
   "author": "ARMI",
   "type": "module",
@@ -34,6 +34,7 @@
     "fs": "^0.0.1-security",
     "path": "^0.12.7",
     "pizzip": "^3.1.7",
+    "qrcode": "^1.5.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-quill-new": "^3.8.3",
@@ -45,6 +46,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.1",
     "@types/node": "^22.14.0",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.0.0",
@@ -63,7 +65,6 @@
     "executableName": "ARMI Docente",
     "icon": "src/Logo_bar.ico",
     "artifactName": "ARMI_DOCENTE_Setup.${ext}",
-
     "asar": true,
     "asarUnpack": [
       "node_modules/better-sqlite3/**/*"
@@ -71,11 +72,9 @@
     "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "nodeGypRebuild": false,
-
     "directories": {
       "output": "dist_electron"
     },
-
     "files": [
       "dist/**/*",
       "backend/**/*",
@@ -91,13 +90,11 @@
       "types.ts",
       "package.json"
     ],
-
     "extraResources": [
       {
         "from": "backend/templates",
         "to": "backend/templates"
       },
-      
       {
         "from": "database",
         "to": "database"
@@ -111,18 +108,18 @@
         "to": "icon.ico"
       }
     ],
-
     "win": {
       "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "src/Logo_bar.ico"
     },
-
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
@@ -134,7 +131,6 @@
       "installerIcon": "src/Logo_bar.ico",
       "uninstallerIcon": "src/Logo_bar.ico",
       "installerHeaderIcon": "src/Logo_bar.ico",
-
       "runAfterFinish": true
     }
   }

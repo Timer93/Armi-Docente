@@ -48,6 +48,21 @@ const writeUpdaterState = (payload = {}) => {
   } catch {}
 };
 
+const clearUpdaterState = () => {
+  try {
+    const state = readUpdaterState();
+    const installerPath = String(state.installerPath || '').trim();
+    if (installerPath && fs.existsSync(installerPath)) {
+      try {
+        fs.unlinkSync(installerPath);
+      } catch {}
+    }
+    if (fs.existsSync(updaterStatePath())) {
+      fs.unlinkSync(updaterStatePath());
+    }
+  } catch {}
+};
+
 const createSnapshot = (patch = {}) => ({
   available: false,
   configured: false,
@@ -428,6 +443,9 @@ const createManifestProviderController = (releaseConfig, configured, emit, snaps
       return snapshotRef();
     }
 
+    clearUpdaterState();
+    cachedState = {};
+
     setTimeout(() => {
       app.quit();
     }, 1200);
@@ -452,7 +470,14 @@ const createManifestProviderController = (releaseConfig, configured, emit, snaps
       const currentVersion = app.getVersion();
       const releaseNotes = Array.isArray(manifest.changelog) ? manifest.changelog.join('\n') : String(manifest.changelog || '');
 
+      if (cachedState?.version && compareVersions(currentVersion, cachedState.version) >= 0) {
+        clearUpdaterState();
+        cachedState = {};
+      }
+
       if (compareVersions(manifest.version, currentVersion) <= 0) {
+        clearUpdaterState();
+        cachedState = {};
         emit({
           available: false,
           status: 'idle',
@@ -475,8 +500,8 @@ const createManifestProviderController = (releaseConfig, configured, emit, snaps
       if (cachedInstallerIsCurrent) {
         emit({
           available: true,
-          status: 'downloaded',
-          message: 'Ya descargamos esta actualizacion anteriormente. Puedes instalarla cuando quieras.',
+          status: 'available',
+          message: 'Ya descargamos esta actualizacion anteriormente. Puedes instalarla cuando quieras desde el panel de actualizaciones.',
           releaseName: manifest.releaseName || manifest.version || '',
           releaseNotes,
           error: '',

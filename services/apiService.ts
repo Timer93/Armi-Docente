@@ -85,6 +85,19 @@ export interface CloudSyncManifest {
     provider: string;
     generatedAt: string;
     digest: string;
+    summary?: {
+        entities?: {
+            programaciones?: number;
+            unidades?: number;
+            sesiones?: number;
+            estudiantes?: number;
+            egresados?: number;
+            asistencias?: number;
+            rostros?: number;
+        };
+        includesAttendance?: boolean;
+        includesFaceProfiles?: boolean;
+    };
     files: CloudSyncFileMeta[];
 }
 
@@ -127,6 +140,9 @@ export interface CloudSyncStatusData {
                     generatedAt?: string;
                     deviceId?: string;
                     digest?: string;
+                    currentCloudVersion?: string;
+                    baseCloudVersion?: string;
+                    summary?: CloudSyncManifest['summary'];
                     url?: string;
                 }>;
             };
@@ -143,6 +159,9 @@ export interface CloudSyncStatusData {
                     generatedAt?: string;
                     deviceId?: string;
                     digest?: string;
+                    currentCloudVersion?: string;
+                    baseCloudVersion?: string;
+                    summary?: CloudSyncManifest['summary'];
                     url?: string;
                 }>;
             };
@@ -165,6 +184,23 @@ export interface CloudSyncStatusData {
         retention: number;
         missingMirrorFiles: string[];
     };
+}
+
+export interface RemoteCameraSessionData {
+    sessionId: string;
+    phoneUrl: string;
+    lanAddresses: string[];
+    createdAt: string;
+}
+
+export interface RemoteCameraSessionFrame {
+    sessionId: string;
+    connected: boolean;
+    imageData: string;
+    width: number;
+    height: number;
+    createdAt: string;
+    lastFrameAt: string | null;
 }
 
 export const loginUser = async (data: { username: string; password: string; remember?: boolean; deviceContext?: Record<string, any> }): Promise<ApiResponse<AuthSession>> => {
@@ -459,6 +495,58 @@ export const pullCloudSync = async (): Promise<ApiResponse<any>> => {
     }
 };
 
+export const pullCloudArtifact = async (data: { artifactId?: string; artifactKind: 'version' | 'conflict' | 'current' }): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/artifact/pull`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const applyCloudArtifact = async (data: { artifactId?: string; artifactKind: 'version' | 'conflict' | 'current' }): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/artifact/apply`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const mergeAttendanceFromCloudArtifact = async (data: { artifactId?: string; artifactKind: 'version' | 'conflict' | 'current' }): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/artifact/merge-attendance`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const mergeStudentsFromCloudArtifact = async (data: { artifactId?: string; artifactKind: 'version' | 'conflict' | 'current' }): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/artifact/merge-students`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
 export const getModuleStatus = async (): Promise<ModuleStatus> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/estado-modulos`);
@@ -570,15 +658,15 @@ export const saveAttendanceRecord = async (record: AttendanceRecord): Promise<Ap
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(record),
         });
-        const contentType = res.headers.get('content-type') || '';
-        if (!contentType.includes('application/json')) {
-            const text = await res.text();
-            if (text.includes('<!DOCTYPE') || text.includes('<html')) {
+        try {
+            return await readJsonResponse<ApiResponse<any>>(res);
+        } catch (error: any) {
+            const message = String(error?.message || '');
+            if (message.includes('<!DOCTYPE') || message.includes('<html') || message.includes('no devolvió JSON válido')) {
                 return { success: false, message: 'El backend no reconocio la ruta de asistencia. Reinicia el servidor y vuelve a intentarlo.' };
             }
-            return { success: false, message: 'Respuesta invalida del servidor al guardar la asistencia.' };
+            return { success: false, message: message || 'Respuesta invalida del servidor al guardar la asistencia.' };
         }
-        return await res.json();
     } catch (e: any) {
         return { success: false, message: e.message };
     }
@@ -645,6 +733,42 @@ export const resetStudentFaceProfiles = async (params: { studentId: string | num
             return { success: false, message: 'Respuesta invalida del servidor al reiniciar la base facial.' };
         }
         return await res.json();
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const createRemoteCameraSession = async (): Promise<ApiResponse<RemoteCameraSessionData>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/remote-camera/session`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const json = await readJsonResponse<ApiResponse<RemoteCameraSessionData>>(res);
+        return json;
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const getRemoteCameraSessionFrame = async (sessionId: string): Promise<ApiResponse<RemoteCameraSessionFrame>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/remote-camera/session/${encodeURIComponent(sessionId)}`);
+        const json = await readJsonResponse<ApiResponse<RemoteCameraSessionFrame>>(res);
+        return json;
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const closeRemoteCameraSession = async (sessionId: string): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/remote-camera/session/${encodeURIComponent(sessionId)}`, {
+            method: 'DELETE',
+        });
+        const json = await readJsonResponse<ApiResponse<any>>(res);
+        return json;
     } catch (e: any) {
         return { success: false, message: e.message };
     }

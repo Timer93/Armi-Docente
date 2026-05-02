@@ -74,9 +74,12 @@ export const AppUpdaterOverlay: React.FC = () => {
   }, [snapshot.status]);
 
   const isBlocking = ['downloading', 'installing'].includes(snapshot.status);
-  const canDismissModal = snapshot.status === 'error' || snapshot.status === 'downloaded';
-  const isVisible = !dismissed && (isBlocking || snapshot.status === 'error' || snapshot.status === 'downloaded');
+  const isError = snapshot.status === 'error';
+  const isDownloadedModal = snapshot.status === 'downloaded';
+  const canDismissModal = isError || isDownloadedModal;
+  const isVisible = !dismissed && (isBlocking || isError || isDownloadedModal);
   const progress = Math.max(0, Math.min(100, Number(snapshot.progress?.percent || 0)));
+
   const closeModal = () => {
     if (!canDismissModal) return;
     setDismissed(true);
@@ -85,7 +88,7 @@ export const AppUpdaterOverlay: React.FC = () => {
 
   return (
     <>
-      <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-3">
+      <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-3 print:hidden">
         {expanded ? (
           <div className="w-[19rem] rounded-[1.75rem] border border-slate-200 bg-white/95 p-4 text-xs shadow-[0_18px_50px_rgba(15,23,42,0.16)] backdrop-blur">
             <div className="flex items-start justify-between gap-3">
@@ -119,7 +122,7 @@ export const AppUpdaterOverlay: React.FC = () => {
               >
                 Buscar actualizacion
               </button>
-              {snapshot.status === 'downloaded' && snapshot.downloadReady ? (
+              {snapshot.downloadReady ? (
                 <button
                   type="button"
                   onClick={() => window.armiUpdater?.installDownloadedUpdate?.()}

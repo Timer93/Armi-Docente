@@ -1,8 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  applyCloudArtifact,
   CloudSyncStatusData,
   getCloudSyncStatus,
+  mergeAttendanceFromCloudArtifact,
+  mergeStudentsFromCloudArtifact,
   pullCloudSync,
+  pullCloudArtifact,
   pushCloudSync,
   saveCloudFrontendState,
   saveCloudSyncConfig,
@@ -12,6 +16,8 @@ import { applyArmiLocalState, CLOUD_SYNC_EVENT, collectArmiLocalState, emitCloud
 
 type SyncAction = 'push' | 'pull' | null;
 type ToastState = { type: 'success' | 'error'; text: string } | null;
+type ArtifactKind = 'version' | 'conflict' | 'current';
+type ArtifactAction = 'inspect' | 'apply' | 'merge-attendance' | 'merge-students';
 
 const reloadApplicationView = () => {
   window.setTimeout(() => {
@@ -30,6 +36,25 @@ const comparisonMeta: Record<CloudSyncStatusData['comparison'], { label: string;
   'mirror-incomplete': { label: 'Copia danada', tone: 'text-rose-800 bg-rose-50 border-rose-200', dot: 'bg-rose-500' },
 };
 
+const syncEntityLabels: Record<string, string> = {
+  programaciones: 'Programaciones',
+  unidades: 'Unidades',
+  sesiones: 'Sesiones',
+  estudiantes: 'Estudiantes',
+  egresados: 'Egresados',
+  asistencias: 'Asistencias',
+  rostros: 'Rostros',
+};
+
+const formatEntitySummary = (summary?: { entities?: Record<string, number> } | null) => {
+  const entities = summary?.entities || {};
+  return Object.entries(syncEntityLabels)
+    .map(([key, label]) => `${label}: ${Number(entities?.[key] || 0)}`)
+    .join(' · ');
+};
+
+const formatArtifactMoment = (value?: string) => value ? new Date(value).toLocaleString() : 'Sin fecha';
+
 export const CloudSyncPanel: React.FC = () => {
   const { session } = useAuth();
   const [status, setStatus] = useState<CloudSyncStatusData | null>(null);
@@ -41,6 +66,7 @@ export const CloudSyncPanel: React.FC = () => {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
+  const [artifactActionKey, setArtifactActionKey] = useState('');
   const [configMode, setConfigMode] = useState<'local' | 'drive_mirror' | 'apps_script_drive'>('local');
   const [autoSyncOnClose, setAutoSyncOnClose] = useState(true);
   const [syncUserKey, setSyncUserKey] = useState('default-user');
@@ -66,6 +92,74 @@ export const CloudSyncPanel: React.FC = () => {
       setErrorMessage(response.message || 'No pude consultar el estado de sincronizacion.');
     }
     setLoadingStatus(false);
+  };
+
+  const runArtifactAction = async (
+    artifactKind: ArtifactKind,
+    artifactId: string | undefined,
+    action: ArtifactAction,
+  ) => {
+    const key = `${action}:${artifactKind}:${artifactId || 'current'}`;
+    setArtifactActionKey(key);
+    setModalOpen(true);
+    setErrorMessage(null);
+    setModalMessage(
+      action === 'merge-attendance'
+        ? 'Fusionando asistencias de la copia seleccionada...'
+        : action === 'merge-students'
+          ? 'Fusionando estudiantes de la copia seleccionada...'
+        : action === 'apply'
+          ? 'Cargando la copia seleccionada en esta PC...'
+          : 'Revisando la copia seleccionada...'
+    );
+
+    const payload = { artifactKind, artifactId };
+    const response = action === 'merge-attendance'
+      ? await mergeAttendanceFromCloudArtifact(payload)
+      : action === 'merge-students'
+        ? await mergeStudentsFromCloudArtifact(payload)
+        : action === 'apply'
+          ? await applyCloudArtifact(payload)
+          : await pullCloudArtifact(payload);
+
+    if (!response.success) {
+      setErrorMessage(response.message || 'No se pudo completar la operacion con la copia seleccionada.');
+      setToast({ type: 'error', text: response.message || 'No se pudo completar la operacion con la copia seleccionada.' });
+      setArtifactActionKey('');
+      await refreshStatus();
+      return;
+    }
+
+    if (action === 'inspect') {
+      const counts = response.data?.counts || {};
+      setModalMessage(`Resumen de la copia seleccionada: Programaciones ${counts.programaciones || 0}, Unidades ${counts.unidades || 0}, Sesiones ${counts.sesiones || 0}, Asistencias ${counts.asistencias || 0}, Rostros ${counts.rostros || 0}.`);
+      setToast({ type: 'success', text: 'Resumen de copia cargado.' });
+      setArtifactActionKey('');
+      return;
+    }
+
+    if (action === 'apply') {
+      const remoteKeys = response.data?.frontendState?.keys || {};
+      applyArmiLocalState(remoteKeys);
+      setToast({ type: 'success', text: 'La copia seleccionada se cargo correctamente.' });
+      setModalMessage('La copia seleccionada se cargo correctamente. Recargaremos la aplicacion para mostrar los datos recuperados.');
+      setArtifactActionKey('');
+      await refreshStatus();
+      emitCloudSyncUpdated();
+      reloadApplicationView();
+      return;
+    }
+
+    setToast({
+      type: 'success',
+      text: response.message || (action === 'merge-students' ? 'Los estudiantes se fusionaron correctamente.' : 'La asistencia se fusiono correctamente.'),
+    });
+    setModalMessage(response.message || (action === 'merge-students'
+      ? 'Los estudiantes se fusionaron correctamente con la copia seleccionada.'
+      : 'La asistencia se fusiono correctamente con la copia seleccionada.'));
+    setArtifactActionKey('');
+    await refreshStatus();
+    emitCloudSyncUpdated();
   };
 
   useEffect(() => {
@@ -244,6 +338,10 @@ export const CloudSyncPanel: React.FC = () => {
   const remoteFolderUrl = status?.config.remoteUser?.folderUrl || sessionSyncProfile.driveFolderUrl;
   const conflictsSummary = status?.config.remoteActivity?.conflicts;
   const versionsSummary = status?.config.remoteActivity?.versions;
+  const latestConflict = conflictsSummary?.items?.[0] || null;
+  const localEntitySummary = formatEntitySummary(status?.localManifest?.summary);
+  const driveEntitySummary = formatEntitySummary(status?.mirrorManifest?.summary);
+  const latestConflictEntitySummary = formatEntitySummary(latestConflict?.summary);
   const localDate = status?.localManifest?.generatedAt
     ? new Date(status.localManifest.generatedAt).toLocaleString()
     : 'Sin datos locales';
@@ -427,10 +525,14 @@ export const CloudSyncPanel: React.FC = () => {
                 <div className="rounded-2xl bg-slate-50 px-3 py-3 text-slate-500">
                   <p className="font-black uppercase tracking-[0.14em] text-slate-400">Local</p>
                   <p className="mt-1 leading-relaxed">{localDate}</p>
+                  <p className="mt-2 leading-relaxed text-slate-600">{localEntitySummary}</p>
                 </div>
                 <div className="rounded-2xl bg-slate-50 px-3 py-3 text-slate-500">
                   <p className="font-black uppercase tracking-[0.14em] text-slate-400">Drive</p>
                   <p className="mt-1 leading-relaxed">{mirrorDate}</p>
+                  <p className="mt-2 leading-relaxed text-slate-600">
+                    {status?.mirrorManifest?.summary ? driveEntitySummary : 'Esta copia aun no trae resumen detallado.'}
+                  </p>
                 </div>
               </div>
 
@@ -469,6 +571,137 @@ export const CloudSyncPanel: React.FC = () => {
                         Ver ultima
                       </a>
                     ) : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {isDriveMode && latestConflict ? (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-3 text-xs text-rose-800">
+                  <p className="font-black uppercase tracking-[0.14em] text-rose-500">Ultimo conflicto detectado</p>
+                  <p className="mt-1 leading-relaxed">
+                    Esta copia quedo protegida en Drive y no reemplazo la version actual automaticamente.
+                  </p>
+                  <p className="mt-2 leading-relaxed">
+                    Fecha: {latestConflict.generatedAt ? new Date(latestConflict.generatedAt).toLocaleString() : 'Sin fecha'}
+                  </p>
+                  <p className="mt-1 leading-relaxed">
+                    Equipo: {latestConflict.deviceId || 'No identificado'}
+                  </p>
+                  <p className="mt-1 leading-relaxed">
+                    {latestConflictEntitySummary || 'Sin resumen legible en esta version del conflicto.'}
+                  </p>
+                  <p className="mt-2 leading-relaxed">
+                    Si usted registro asistencias en otra PC y no las ve aqui, es muy probable que hayan quedado dentro de este conflicto protegido.
+                  </p>
+                </div>
+              ) : null}
+
+              {isDriveMode && conflictsSummary?.items?.length ? (
+                <div className="rounded-2xl bg-slate-50 px-3 py-3 text-xs text-slate-600">
+                  <p className="font-black uppercase tracking-[0.14em] text-slate-400">Copias en conflicto</p>
+                  <div className="mt-2 space-y-2">
+                    {conflictsSummary.items.map((item) => {
+                      const inspectKey = `inspect:conflict:${item.id}`;
+                      const applyKey = `apply:conflict:${item.id}`;
+                      const mergeKey = `merge-attendance:conflict:${item.id}`;
+                      const mergeStudentsKey = `merge-students:conflict:${item.id}`;
+                      return (
+                        <div key={item.id} className="rounded-2xl border border-slate-200 bg-white px-3 py-3">
+                          <p className="font-semibold text-slate-800">{formatArtifactMoment(item.generatedAt || item.createdAt)}</p>
+                          <p className="mt-1 leading-relaxed text-slate-500">{item.deviceId || 'Equipo no identificado'}</p>
+                          <p className="mt-1 leading-relaxed text-slate-500">{formatEntitySummary(item.summary) || 'Sin resumen disponible.'}</p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => runArtifactAction('conflict', item.id, 'inspect')}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl border border-slate-300 bg-white px-3 py-2 font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
+                            >
+                              {artifactActionKey === inspectKey ? 'Revisando...' : 'Ver resumen'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => runArtifactAction('conflict', item.id, 'merge-attendance')}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 font-bold text-amber-800 transition hover:border-amber-400 disabled:opacity-50"
+                            >
+                              {artifactActionKey === mergeKey ? 'Fusionando...' : 'Fusionar asistencia'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => runArtifactAction('conflict', item.id, 'merge-students')}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 font-bold text-sky-800 transition hover:border-sky-400 disabled:opacity-50"
+                            >
+                              {artifactActionKey === mergeStudentsKey ? 'Fusionando...' : 'Fusionar estudiantes'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => runArtifactAction('conflict', item.id, 'apply')}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl bg-slate-900 px-3 py-2 font-bold text-white transition hover:bg-slate-800 disabled:opacity-50"
+                            >
+                              {artifactActionKey === applyKey ? 'Cargando...' : 'Usar copia completa'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {isDriveMode && versionsSummary?.items?.length ? (
+                <div className="rounded-2xl bg-slate-50 px-3 py-3 text-xs text-slate-600">
+                  <p className="font-black uppercase tracking-[0.14em] text-slate-400">Historial de versiones</p>
+                  <div className="mt-2 space-y-2">
+                    {versionsSummary.items.map((item) => {
+                      const inspectKey = `inspect:version:${item.id}`;
+                      const applyKey = `apply:version:${item.id}`;
+                      const mergeKey = `merge-attendance:version:${item.id}`;
+                      const mergeStudentsKey = `merge-students:version:${item.id}`;
+                      return (
+                        <div key={item.id} className="rounded-2xl border border-slate-200 bg-white px-3 py-3">
+                          <p className="font-semibold text-slate-800">{formatArtifactMoment(item.generatedAt || item.createdAt)}</p>
+                          <p className="mt-1 leading-relaxed text-slate-500">{item.deviceId || 'Equipo no identificado'}</p>
+                          <p className="mt-1 leading-relaxed text-slate-500">{formatEntitySummary(item.summary) || 'Sin resumen disponible.'}</p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => runArtifactAction('version', item.id, 'inspect')}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl border border-slate-300 bg-white px-3 py-2 font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
+                            >
+                              {artifactActionKey === inspectKey ? 'Revisando...' : 'Ver resumen'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => runArtifactAction('version', item.id, 'merge-attendance')}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 font-bold text-amber-800 transition hover:border-amber-400 disabled:opacity-50"
+                            >
+                              {artifactActionKey === mergeKey ? 'Fusionando...' : 'Fusionar asistencia'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => runArtifactAction('version', item.id, 'merge-students')}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 font-bold text-sky-800 transition hover:border-sky-400 disabled:opacity-50"
+                            >
+                              {artifactActionKey === mergeStudentsKey ? 'Fusionando...' : 'Fusionar estudiantes'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => runArtifactAction('version', item.id, 'apply')}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl bg-slate-900 px-3 py-2 font-bold text-white transition hover:bg-slate-800 disabled:opacity-50"
+                            >
+                              {artifactActionKey === applyKey ? 'Cargando...' : 'Usar copia completa'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               ) : null}

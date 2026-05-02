@@ -122,6 +122,8 @@ function handleRequest_(e, method) {
         return SyncPush_(params);
       case 'sync_pull':
         return SyncPull_(params);
+      case 'sync_pull_artifact':
+        return SyncPullArtifact_(params);
       case 'resolveauthurl':
       case 'resolve_auth_url':
       case 'resolver':
@@ -414,6 +416,40 @@ function SyncPull_(params) {
       success: true,
       data: {
         user: publicSyncFolderInfo_(folderInfo),
+        manifest: manifest,
+        packageBase64: Utilities.base64Encode(file.getBlob().getBytes())
+      }
+    });
+  } catch (error) {
+    return jsonResponse_({ success: false, message: error.message });
+  }
+}
+
+function SyncPullArtifact_(params) {
+  try {
+    var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
+    var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
+    var artifactId = normalizeText_(params.artifactId || params.id);
+    var artifactKind = normalizeText_(params.artifactKind || params.kind, 'version');
+    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
+    var folder = artifactKind === 'conflict'
+      ? folderInfo.conflictsFolder
+      : artifactKind === 'current'
+        ? folderInfo.currentFolder
+        : folderInfo.versionsFolder;
+    var zipName = artifactKind === 'current' ? 'snapshot.zip' : artifactId + '.zip';
+    var manifestName = artifactKind === 'current' ? 'manifest.json' : artifactId + '-manifest.json';
+    var file = getFirstFileByName_(folder, zipName);
+    if (!file) {
+      return jsonResponse_({ success: false, message: 'No encontre el paquete solicitado en Drive.' });
+    }
+    var manifest = readJsonFileFromFolder_(folder, manifestName);
+    return jsonResponse_({
+      success: true,
+      data: {
+        user: publicSyncFolderInfo_(folderInfo),
+        artifactId: artifactId,
+        artifactKind: artifactKind,
         manifest: manifest,
         packageBase64: Utilities.base64Encode(file.getBlob().getBytes())
       }
@@ -940,6 +976,9 @@ function summarizeSyncManifestFolder_(folder, kind) {
       generatedAt: normalizeText_(payload && (payload.generatedAt || payload.uploadedAt || payload.createdAt), createdAt),
       deviceId: normalizeText_(payload && payload.deviceId),
       digest: normalizeText_(payload && (payload.digest || (payload.manifest && payload.manifest.digest))),
+      currentCloudVersion: normalizeText_(payload && payload.currentCloudVersion),
+      baseCloudVersion: normalizeText_(payload && payload.baseCloudVersion),
+      summary: payload && (payload.summary || (payload.manifest && payload.manifest.summary)) || null,
       url: file.getUrl()
     });
   }

@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { deleteFaceProfile, getAttendanceRecords, getFaceProfiles, resetStudentFaceProfiles, saveAttendanceRecord, saveFaceProfile } from '../../services/apiService';
+import QRCode from 'qrcode';
+import { closeRemoteCameraSession, createRemoteCameraSession, deleteFaceProfile, getAttendanceRecords, getFaceProfiles, getRemoteCameraSessionFrame, resetStudentFaceProfiles, saveAttendanceRecord, saveFaceProfile } from '../../services/apiService';
 import { AttendanceRecord, FaceProfile, GeneralData, ScheduleEntry, Student, TeachingAssignment } from '../../types';
 
 interface Props {
@@ -11,6 +12,12 @@ interface Props {
 }
 
 type HumanInstance = any;
+type RemoteCameraSession = {
+  sessionId: string;
+  phoneUrl: string;
+  lanAddresses: string[];
+  createdAt: string;
+};
 
 const HUMAN_MODEL_BASE = 'https://cdn.jsdelivr.net/npm/@vladmandic/human/models';
 const MATCH_THRESHOLD = 0.58;
@@ -126,10 +133,10 @@ const resolveStudentRowTone = (student: Student) => {
 
 const getStatusGlyph = (status?: string) => {
   switch (String(status || '').toUpperCase()) {
-    case 'P': return '✓';
-    case 'F': return '✕';
-    case 'T': return '⏰';
-    case 'J': return '◌';
+    case 'P': return 'âœ“';
+    case 'F': return 'âœ•';
+    case 'T': return 'â°';
+    case 'J': return 'â—Œ';
     default: return '';
   }
 };
@@ -141,6 +148,26 @@ const getStatusTone = (status?: string) => {
     case 'T': return 'text-amber-700';
     case 'J': return 'text-violet-700';
     default: return 'text-slate-300';
+  }
+};
+
+const getStatusDisplayGlyph = (status?: string) => {
+  switch (String(status || '').toUpperCase()) {
+    case 'P': return '✓';
+    case 'F': return '✗';
+    case 'T': return '⌛';
+    case 'J': return '✏️';
+    default: return '';
+  }
+};
+
+const getStatusBadgeTone = (status?: string) => {
+  switch (String(status || '').toUpperCase()) {
+    case 'P': return 'bg-emerald-100 text-emerald-800';
+    case 'F': return 'bg-rose-100 text-rose-800';
+    case 'T': return 'bg-amber-100 text-amber-800';
+    case 'J': return 'bg-violet-100 text-violet-800';
+    default: return 'bg-transparent text-transparent';
   }
 };
 
@@ -224,17 +251,34 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
   const [attemptPreview, setAttemptPreview] = useState<string>('');
   const [statusText, setStatusText] = useState('Selecciona grado y seccion para comenzar.');
   const [lastRecognized, setLastRecognized] = useState('');
-  const [faceHint, setFaceHint] = useState('Aun no iniciamos la deteccion facial.');
+  const [faceHint, setFaceHint] = useState('Detección facial no iniciada.');
   const [detectorStats, setDetectorStats] = useState('Sin lectura facial aun.');
   const [expandedBimesterView, setExpandedBimesterView] = useState(false);
+  const [highlightedAttendanceStudentId, setHighlightedAttendanceStudentId] = useState('');
+  const [cameraSource, setCameraSource] = useState<'local' | 'remote'>('local');
+  const [remoteSession, setRemoteSession] = useState<RemoteCameraSession | null>(null);
+  const [remoteFrameData, setRemoteFrameData] = useState('');
+  const [remoteConnected, setRemoteConnected] = useState(false);
+  const [remoteLastFrameAt, setRemoteLastFrameAt] = useState('');
+  const [remoteQrDataUrl, setRemoteQrDataUrl] = useState('');
+  const [ipCameraUrl, setIpCameraUrl] = useState(() => {
+    try {
+      return localStorage.getItem('armi_ip_camera_url') || 'http://192.168.0.100:4747/video';
+    } catch {
+      return 'http://192.168.0.100:4747/video';
+    }
+  });
+  const [remoteStreamEnabled, setRemoteStreamEnabled] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteImageRef = useRef<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const humanRef = useRef<HumanInstance | null>(null);
   const recognitionTimerRef = useRef<number | null>(null);
   const enrollmentTimerRef = useRef<number | null>(null);
+  const remotePollingRef = useRef<number | null>(null);
   const recognitionBusyRef = useRef(false);
   const enrollmentBusyRef = useRef(false);
   const recentRecognitionRef = useRef<Record<string, number>>({});
@@ -266,6 +310,55 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     }
   }, []);
 
+  const proxiedIpCameraUrl = useMemo(() => {
+    const value = String(ipCameraUrl || '').trim();
+    if (!value || !remoteStreamEnabled) return '';
+    return `/api/ip-camera/proxy?url=${encodeURIComponent(value)}`;
+  }, [ipCameraUrl, remoteStreamEnabled]);
+
+  useEffect(() => {
+    if (cameraSource !== 'remote') return;
+    if (remoteConnected) {
+      setCameraReady(true);
+      setFaceHint('Celular conectado por Wi-Fi mediante app IP. El video remoto ya puede usarse para reconocimiento facial.');
+    }
+  }, [cameraSource, remoteConnected]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('armi_ip_camera_url', ipCameraUrl);
+    } catch {
+      // Optional persistence only.
+    }
+  }, [ipCameraUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const buildQr = async () => {
+      if (!remoteSession?.phoneUrl) {
+        setRemoteQrDataUrl('');
+        return;
+      }
+      try {
+        const qr = await QRCode.toDataURL(remoteSession.phoneUrl, {
+          width: 220,
+          margin: 1,
+          color: {
+            dark: '#16315f',
+            light: '#ffffff',
+          },
+        });
+        if (!cancelled) setRemoteQrDataUrl(qr);
+      } catch {
+        if (!cancelled) setRemoteQrDataUrl('');
+      }
+    };
+    buildQr();
+    return () => {
+      cancelled = true;
+    };
+  }, [remoteSession]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -273,6 +366,7 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
       guidedActiveRef.current = false;
       if (recognitionTimerRef.current) window.clearInterval(recognitionTimerRef.current);
       if (enrollmentTimerRef.current) window.clearTimeout(enrollmentTimerRef.current);
+      if (remotePollingRef.current) window.clearInterval(remotePollingRef.current);
       if (streamRef.current) streamRef.current.getTracks().forEach((track) => track.stop());
     };
   }, []);
@@ -621,12 +715,12 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
   const totalBimesterDays = useMemo(() => effectiveBimesterDayColumns.reduce((acc, item) => acc + item.dates.length, 0), [effectiveBimesterDayColumns]);
   const visibleBimesterDays = useMemo(() => visibleBimesterDayColumns.reduce((acc, item) => acc + item.dates.length, 0), [visibleBimesterDayColumns]);
   const expandedColumnPreset = useMemo(() => {
-    if (!expandedBimesterView) return { index: 52, name: 280, day: 60, summary: 44 };
-    if (visibleBimesterDays >= 24) return { index: 24, name: 148, day: 17, summary: 20 };
-    if (visibleBimesterDays >= 20) return { index: 26, name: 158, day: 19, summary: 22 };
-    if (visibleBimesterDays >= 16) return { index: 28, name: 170, day: 21, summary: 24 };
-    return { index: 30, name: 180, day: 22, summary: 24 };
-  }, [expandedBimesterView, visibleBimesterDays]);
+  if (!expandedBimesterView) return { index: 52, name: 420, day: 60, summary: 44 };
+  if (visibleBimesterDays >= 24) return { index: 24, name: 220, day: 17, summary: 20 };
+  if (visibleBimesterDays >= 20) return { index: 26, name: 240, day: 19, summary: 22 };
+  if (visibleBimesterDays >= 16) return { index: 28, name: 280, day: 21, summary: 24 };
+  return { index: 30, name: 340, day: 22, summary: 24 };
+}, [expandedBimesterView, visibleBimesterDays]);
   const indexColumnWidth = expandedColumnPreset.index;
   const nameColumnWidth = expandedColumnPreset.name;
   const dayColumnWidth = expandedColumnPreset.day;
@@ -730,7 +824,7 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
       setSection(String(nextSelection.section || '').trim());
       setStatusText(preferred
         ? `Contexto detectado del horario actual: ${nextSelection.areaName} - ${nextSelection.grade} ${nextSelection.section}.`
-        : 'Contexto inicial cargado. Puedes ajustarlo manualmente.');
+        : 'Horario de hoy no coincide con ninguna clase activa, se seleccionó la primera disponible.');
     } catch {
       const fallback = assignments[0];
       if (!fallback) return;
@@ -771,9 +865,40 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     return instance;
   }, []);
 
+  const stopLocalCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+    }
+  }, []);
+
+  const stopRemoteCameraPreview = useCallback(async (closeSession = false) => {
+    if (remotePollingRef.current) {
+      window.clearInterval(remotePollingRef.current);
+      remotePollingRef.current = null;
+    }
+    const sessionId = remoteSession?.sessionId || '';
+    setRemoteConnected(false);
+    setRemoteFrameData('');
+    setRemoteLastFrameAt('');
+    if (closeSession && sessionId) {
+      await closeRemoteCameraSession(sessionId);
+      setRemoteSession(null);
+    }
+  }, [remoteSession]);
+
   const startCamera = useCallback(async () => {
+    if (cameraSource === 'remote') {
+      setFaceHint('La camara remota del celular esta seleccionada. Conecta una URL MJPEG de tu app IP.');
+      return;
+    }
     if (streamRef.current && videoRef.current) return;
     try {
+      await stopRemoteCameraPreview(false);
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 720 } },
         audio: false,
@@ -789,35 +914,137 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     } catch (error: any) {
       showToast(`No se pudo abrir la camara: ${error?.message || 'permiso denegado'}`, 'error');
     }
-  }, [showToast]);
+  }, [cameraSource, showToast, stopRemoteCameraPreview]);
 
-  const captureImage = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas || !video.videoWidth || !video.videoHeight) return '';
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return '';
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.9);
-  }, []);
-
-  const extractDescriptor = useCallback(async (silent = false) => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return null;
-    if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
-      setFaceHint('Esperando que la camara estabilice la imagen...');
+  const createRemoteSession = useCallback(async () => {
+    stopLocalCamera();
+    await stopRemoteCameraPreview(true);
+    const response = await createRemoteCameraSession();
+    if (!response.success || !response.data) {
+      showToast(response.message || 'No se pudo crear la sesion de camara remota.', 'error');
       return null;
     }
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    setCameraSource('remote');
+    setRemoteSession(response.data);
+    setCameraReady(false);
+    setRemoteConnected(false);
+    setRemoteFrameData('');
+    setRemoteLastFrameAt('');
+    setFaceHint('Abre el enlace en tu celular y acepta el permiso de camara.');
+    setStatusText('Camara remota lista para enlazarse con el celular.');
+    showToast('Sesion remota creada. Abre el enlace en tu celular.', 'success');
+    return response.data;
+  }, [showToast, stopLocalCamera, stopRemoteCameraPreview]);
+
+  const connectIpCameraStream = useCallback(async () => {
+    const rawUrl = String(ipCameraUrl || '').trim();
+    if (!rawUrl) {
+      showToast('Pega la URL MJPEG de la app del celular antes de conectar.', 'error');
+      return;
+    }
+    if (!/^https?:\/\//i.test(rawUrl)) {
+      showToast('La URL de la camara debe empezar con http:// o https://', 'error');
+      return;
+    }
+    stopLocalCamera();
+    await stopRemoteCameraPreview(true);
+    setRemoteSession(null);
+    setRemoteQrDataUrl('');
+    setRemoteConnected(false);
+    setRemoteFrameData('');
+    setRemoteLastFrameAt('');
+    setRemoteStreamEnabled(true);
+    setCameraSource('remote');
+    setCameraReady(false);
+    setFaceHint('Esperando el video MJPEG de la app del celular...');
+    setStatusText('Conectando la camara IP del celular...');
+    showToast('Conectando stream del celular...', 'success');
+  }, [ipCameraUrl, showToast, stopLocalCamera, stopRemoteCameraPreview]);
+
+  const startRemotePolling = useCallback((sessionId: string) => {
+    if (remotePollingRef.current) {
+      window.clearInterval(remotePollingRef.current);
+      remotePollingRef.current = null;
+    }
+    const syncFrame = async () => {
+      const response = await getRemoteCameraSessionFrame(sessionId);
+      if (!response.success || !response.data) return;
+      const frame = response.data;
+      setRemoteConnected(frame.connected);
+      setRemoteLastFrameAt(frame.lastFrameAt || '');
+      if (frame.imageData) {
+        setRemoteFrameData((prev) => prev === frame.imageData ? prev : frame.imageData);
+        setCameraReady(true);
+      }
+    };
+    syncFrame();
+    remotePollingRef.current = window.setInterval(syncFrame, 300);
+  }, []);
+
+  const enableRemoteCamera = useCallback(async () => {
+    await connectIpCameraStream();
+  }, [connectIpCameraStream]);
+
+  const useLocalCamera = useCallback(async () => {
+    setCameraSource('local');
+    await stopRemoteCameraPreview(false);
+    setRemoteStreamEnabled(false);
+    setCameraReady(false);
+    setFaceHint('Volviendo a la camara de esta PC...');
+    await startCamera();
+  }, [startCamera, stopRemoteCameraPreview]);
+
+  const stopRemoteCamera = useCallback(async () => {
+    await stopRemoteCameraPreview(true);
+    setRemoteStreamEnabled(false);
+    if (remoteImageRef.current) remoteImageRef.current.src = '';
+    setCameraReady(false);
+    setFaceHint('Camara remota detenida.');
+    setStatusText('Camara remota desconectada en ARMI.');
+    setRemoteConnected(false);
+  }, [stopRemoteCameraPreview]);
+
+  const copyRemoteCameraLink = useCallback(async () => {
+    if (!remoteSession?.phoneUrl) return;
+    try {
+      await navigator.clipboard.writeText(remoteSession.phoneUrl);
+      showToast('Enlace del celular copiado.', 'success');
+    } catch {
+      showToast('No se pudo copiar el enlace del celular.', 'error');
+    }
+  }, [remoteSession, showToast]);
+
+  const captureImage = useCallback(() => {
+    const source = cameraSource === 'remote' ? remoteImageRef.current : videoRef.current;
+    const canvas = canvasRef.current;
+    const width = source instanceof HTMLImageElement ? source.naturalWidth : source?.videoWidth;
+    const height = source instanceof HTMLImageElement ? source.naturalHeight : source?.videoHeight;
+    if (!source || !canvas || !width || !height) return '';
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.9);
+  }, [cameraSource]);
+
+  const extractDescriptor = useCallback(async (silent = false) => {
+    const source = cameraSource === 'remote' ? remoteImageRef.current : videoRef.current;
+    const canvas = canvasRef.current;
+    const width = source instanceof HTMLImageElement ? source.naturalWidth : source?.videoWidth;
+    const height = source instanceof HTMLImageElement ? source.naturalHeight : source?.videoHeight;
+    const isLocalVideoWaiting = source instanceof HTMLVideoElement && (source.readyState < 2 || !width || !height);
+    if (!source || !canvas || !width || !height || isLocalVideoWaiting) {
+      setFaceHint(cameraSource === 'remote' ? 'Esperando que el celular envie imagen...' : 'Esperando que la camara estabilice la imagen...');
+      return null;
+    }
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     const human = await ensureEngine();
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
       const currentPreview = canvas.toDataURL('image/jpeg', 0.85);
       setAttemptPreview(currentPreview);
       const result = await human.detect(canvas);
@@ -836,14 +1063,14 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
       }
       if (!face) {
         setFaceHint(`Intento ${attempt}/3: no detecto un rostro. Mira de frente y acercate un poco.`);
-        setDetectorStats(`Intento ${attempt}/3 · Rostros: 0 · Descriptor: 0`);
+        setDetectorStats(`Intento ${attempt}/3 - Rostros: 0 - Descriptor: 0`);
         await delay(220);
         continue;
       }
       const faceSize = Array.isArray(face?.box) ? Math.round(Math.min(face.box[2] || 0, face.box[3] || 0)) : 0;
       const raw = face?.embedding || face?.descriptor;
       const descriptor = Array.from(raw || []).map((item) => Number(item || 0));
-      setDetectorStats(`Intento ${attempt}/3 · Rostros: 1 · Descriptor: ${descriptor.length} · Tamano: ${faceSize}px`);
+      setDetectorStats(`Intento ${attempt}/3 - Rostros: 1 - Descriptor: ${descriptor.length} - Tamano: ${faceSize}px`);
       if (descriptor.length >= 64) {
         setFaceHint(`Rostro validado correctamente. Descriptor: ${descriptor.length}.`);
         return { descriptor, imageData: captureImage() };
@@ -853,11 +1080,11 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     }
     if (!silent) showToast('No se pudo obtener un descriptor facial valido. Intenta con mejor luz o mas de frente.', 'error');
     return null;
-  }, [captureImage, ensureEngine, showToast]);
+  }, [cameraSource, captureImage, ensureEngine, showToast]);
 
-  const saveAttendance = useCallback(async (student: Student, status: AttendanceRecord['status'], source: string) => {
+  const saveAttendance = useCallback(async (student: Student, status: AttendanceRecord['status'], source: string, targetDate = date) => {
     const response = await saveAttendanceRecord({
-      attendanceDate: date,
+      attendanceDate: targetDate,
       grade,
       section,
       studentId: student.id,
@@ -870,13 +1097,15 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
       showToast(response.message || 'No se pudo guardar la asistencia.', 'error');
       return false;
     }
-    setRecords((prev) => {
-      const rest = prev.filter((item) => String(item.studentId) !== String(student.id));
-      return [...rest, { attendanceDate: date, grade, section, studentId: student.id, studentName: student.name, dni: student.dni, status, source }];
-    });
+    if (targetDate === date) {
+      setRecords((prev) => {
+        const rest = prev.filter((item) => String(item.studentId) !== String(student.id));
+        return [...rest, { attendanceDate: targetDate, grade, section, studentId: student.id, studentName: student.name, dni: student.dni, status, source }];
+      });
+    }
     setHistoryRecords((prev) => {
-      const rest = prev.filter((item) => !(String(item.studentId) === String(student.id) && item.attendanceDate === date));
-      return [...rest, { attendanceDate: date, grade, section, studentId: student.id, studentName: student.name, dni: student.dni, status, source }];
+      const rest = prev.filter((item) => !(String(item.studentId) === String(student.id) && item.attendanceDate === targetDate));
+      return [...rest, { attendanceDate: targetDate, grade, section, studentId: student.id, studentName: student.name, dni: student.dni, status, source }];
     });
     return true;
   }, [date, grade, section, showToast]);
@@ -1004,7 +1233,12 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     if (!grade || !section) return showToast('Selecciona grado y seccion antes de registrar rostros.', 'error');
     if (!activeStudents.length) return showToast('No existe base de estudiantes para este grado y seccion.', 'error');
     stopRecognition();
-    await startCamera();
+    if (cameraSource === 'remote') {
+      if (!remoteSession) await enableRemoteCamera();
+      if (!remoteConnected) return showToast('Activa la app IP del celular y verifica la URL MJPEG antes de continuar.', 'error');
+    } else {
+      await startCamera();
+    }
     await ensureEngine();
     const target = selectedStudent || nextPendingStudent();
     if (!target) return showToast('Todos los estudiantes ya cuentan con una base facial suficiente.', 'success');
@@ -1023,7 +1257,7 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     setLastRecognized(`Lanzando paso 1/${ENROLLMENT_STEPS.length} para ${target.name}...`);
     await delay(150);
     await executeEnrollmentStep(target, 0);
-  }, [activeStudents.length, ensureEngine, executeEnrollmentStep, grade, nextPendingStudent, section, selectedStudent, showToast, startCamera, stopRecognition]);
+  }, [activeStudents.length, cameraSource, enableRemoteCamera, ensureEngine, executeEnrollmentStep, grade, nextPendingStudent, remoteConnected, remoteSession, section, selectedStudent, showToast, startCamera, stopRecognition]);
 
   const recognizeOnce = useCallback(async () => {
     if (recognitionBusyRef.current) return;
@@ -1067,18 +1301,35 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     if (!activeStudents.length) return showToast('No existe base de estudiantes para este grado y seccion.', 'error');
     if (!profiles.length) return showToast('Aun no existe base facial para este grado y seccion.', 'error');
     stopGuided();
-    await startCamera();
+    if (cameraSource === 'remote') {
+      if (!remoteSession) await enableRemoteCamera();
+      if (!remoteConnected) return showToast('Activa la app IP del celular y verifica la URL MJPEG antes de continuar.', 'error');
+    } else {
+      await startCamera();
+    }
     await ensureEngine();
     stopRecognition();
     setRecognitionMode(true);
     setFaceHint('Reconocimiento continuo activo.');
-    setStatusText('Reconocimiento en vivo activo. Los rostros detectados se marcaran como presentes.');
+    setStatusText('Reconocimiento activo.');
     await recognizeOnce();
     recognitionTimerRef.current = window.setInterval(() => { recognizeOnce(); }, 1800);
-  }, [activeStudents.length, ensureEngine, grade, profiles.length, recognizeOnce, section, showToast, startCamera, stopGuided, stopRecognition]);
+  }, [activeStudents.length, cameraSource, enableRemoteCamera, ensureEngine, grade, profiles.length, recognizeOnce, remoteConnected, remoteSession, section, showToast, startCamera, stopGuided, stopRecognition]);
 
   const exportExcel = useCallback(() => {
-    const visibleGroups = effectiveBimesterDayColumns.length ? effectiveBimesterDayColumns : [{ unitNumber: 0, unitLabel: 'Periodo', dates: [date] }];
+    const fallbackMeta = getCalendarDayMeta(date);
+    const visibleGroups = effectiveBimesterDayColumns.length ? effectiveBimesterDayColumns : [{
+      unitNumber: 0,
+      unitLabel: 'Periodo',
+      dates: [{
+        date,
+        isFuture: date > todayIso(),
+        isHoliday: fallbackMeta.isHoliday,
+        isNonLective: fallbackMeta.isNonLective,
+        holidayName: fallbackMeta.holidayName,
+        code: fallbackMeta.code,
+      }],
+    }];
     const headerRows: any[][] = [
       [generalData.institution || 'Institucion Educativa'],
       [`${generalData.district || ''} - ${generalData.province || ''}`.replace(/^\s*-\s*|\s*-\s*$/g, '')],
@@ -1101,7 +1352,7 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
       const row = [index + 1, student.name];
       visibleGroups.forEach((group) => {
         group.dates.forEach((day) => {
-          row.push(day.isHoliday ? '★' : day.isFuture ? '—' : getStatusGlyph(historyAttendanceMap.get(`${student.id}__${day.date}`)?.status));
+          row.push(day.isHoliday ? '★' : day.isFuture ? '—' : getStatusDisplayGlyph(historyAttendanceMap.get(`${student.id}__${day.date}`)?.status));
         });
       });
       row.push(summary.P, summary.F, summary.T, summary.J);
@@ -1139,14 +1390,15 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, sheet, 'Asistencia');
     XLSX.writeFile(book, `Asistencia ${bimesterMeta?.id || ''} - ${currentAssignment?.areaName || 'Area'} - ${grade} ${section}.xlsx`);
-  }, [activeStudents, effectiveBimesterDayColumns, bimesterMeta, currentAssignment, date, generalData.district, generalData.institution, generalData.motto, generalData.province, generalData.teacher, grade, historyAttendanceMap, section, bimesterSummaries]);
+  }, [activeStudents, effectiveBimesterDayColumns, bimesterMeta, currentAssignment, date, generalData.district, generalData.institution, generalData.motto, generalData.province, generalData.teacher, getCalendarDayMeta, grade, historyAttendanceMap, section, bimesterSummaries]);
 
-  const cycleDailyStatus = useCallback(async (student: Student) => {
-    const current = attendanceMap.get(String(student.id))?.status;
+  const cycleDailyStatus = useCallback(async (student: Student, targetDate: string) => {
+    setHighlightedAttendanceStudentId(String(student.id));
+    const current = historyAttendanceMap.get(`${student.id}__${targetDate}`)?.status;
     const sequence: AttendanceRecord['status'][] = ['P', 'T', 'F', 'J'];
     const next = sequence[(Math.max(sequence.indexOf(current as AttendanceRecord['status']), -1) + 1) % sequence.length];
-    await saveAttendance(student, next, 'manual_table');
-  }, [attendanceMap, saveAttendance]);
+    await saveAttendance(student, next, 'manual_table', targetDate);
+  }, [historyAttendanceMap, saveAttendance]);
 
   const guidedStudent = activeStudents.find((item) => String(item.id) === guidedStudentId) || null;
   const guidedSavedCount = guidedStudent ? (profileCountMap.get(String(guidedStudent.id)) || 0) : 0;
@@ -1164,11 +1416,158 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
     return [...baseRows].sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
   }, [profiles, selectedStudentId]);
 
-  const tabs: Array<{ id: 'registro' | 'base' | 'control'; label: string; hint: string }> = [
-    { id: 'registro', label: 'Registro Guiado', hint: 'Camara y capturas' },
-    { id: 'base', label: 'Base Facial', hint: 'Editar y limpiar' },
-    { id: 'control', label: 'Control Diario', hint: 'Reconocimiento y lista' },
+  const remoteCameraLabel = remoteConnected
+    ? `Celular conectado${remoteLastFrameAt ? ` · Ultimo frame ${remoteLastFrameAt}` : ''}`
+    : cameraSource === 'remote' && !remoteStreamEnabled
+      ? 'Stream remoto detenido en ARMI.'
+      : cameraSource === 'remote'
+      ? 'Esperando que cargue el stream MJPEG del celular.'
+      : 'Camara remota inactiva.';
+
+  const renderCameraSourcePanel = () => (
+    <div className="rounded-2xl border border-slate-200 bg-white p-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Fuente de camara</p>
+          <p className="mt-1 text-[11px] font-bold text-slate-600">{cameraSource === 'remote' ? remoteCameraLabel : 'Usando la webcam de esta PC.'}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={useLocalCamera} className={`rounded-2xl px-3.5 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition ${cameraSource === 'local' ? 'bg-slate-900 text-white' : 'border border-slate-200 bg-white text-slate-700'}`}>PC</button>
+          <button type="button" onClick={enableRemoteCamera} className={`rounded-2xl px-3.5 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition ${cameraSource === 'remote' ? 'bg-blue-600 text-white' : 'border border-slate-200 bg-white text-slate-700'}`}>Celular app IP</button>
+        </div>
+      </div>
+      <div className="mt-3 rounded-2xl border border-blue-100 bg-blue-50/70 p-3">
+        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-700">URL del stream MJPEG del celular</p>
+        <input
+          type="text"
+          value={ipCameraUrl}
+          onChange={(e) => setIpCameraUrl(e.target.value)}
+          placeholder="http://IP_DEL_CELULAR:4747/video"
+          className="mt-2 w-full rounded-xl border border-blue-100 bg-white px-3 py-2.5 text-[12px] font-bold text-slate-700 outline-none focus:border-cyan-400"
+        />
+        <p className="mt-2 text-[10px] font-bold leading-relaxed text-slate-600">
+          Ejemplo recomendado: DroidCam en el celular mostrando `http://IP:4747/video`
+        </p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button type="button" onClick={connectIpCameraStream} className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-blue-700">Conectar stream</button>
+          <button type="button" onClick={stopRemoteCamera} className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-rose-700">Detener camara</button>
+        </div>
+      </div>
+      {cameraSource === 'remote' && remoteSession ? (
+        <div className="mt-3 rounded-2xl border border-blue-100 bg-blue-50/70 p-3">
+          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-700">Abre este enlace en tu celular</p>
+          <p className="mt-1 break-all text-[11px] font-bold text-slate-700">{remoteSession.phoneUrl}</p>
+          {remoteQrDataUrl ? (
+            <div className="mt-3 flex items-center gap-3 rounded-2xl border border-blue-100 bg-white/90 p-3">
+              <img src={remoteQrDataUrl} alt="QR de camara remota" className="h-24 w-24 rounded-xl border border-slate-200 bg-white p-1" />
+              <div className="min-w-0">
+                <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-700">Escanea el QR</p>
+                <p className="mt-1 text-[11px] font-bold leading-relaxed text-slate-600">Con la camara del celular o cualquier lector QR, luego acepta el permiso de video.</p>
+              </div>
+            </div>
+          ) : null}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" onClick={copyRemoteCameraLink} className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-blue-700">Copiar enlace</button>
+            <button type="button" onClick={() => window.open(remoteSession.phoneUrl, '_blank', 'noopener,noreferrer')} className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-blue-700">Abrir enlace</button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+
+  const renderCameraViewport = () => (
+    <div className="relative overflow-hidden rounded-[1.4rem] border border-white/10 bg-black">
+      {cameraSource === 'remote' ? (
+        proxiedIpCameraUrl ? (
+          <img
+            ref={remoteImageRef}
+            src={proxiedIpCameraUrl}
+            alt="Camara remota"
+            className="aspect-[4/3] w-full object-cover"
+            onLoad={() => {
+              setRemoteConnected(true);
+              setCameraReady(true);
+              setRemoteLastFrameAt(new Date().toLocaleTimeString());
+            }}
+            onError={() => {
+              setRemoteConnected(false);
+              setCameraReady(false);
+              setFaceHint('No se pudo abrir el stream MJPEG del celular. Revisa la URL y que la app siga transmitiendo.');
+            }}
+          />
+        ) : (
+          <div className="flex aspect-[4/3] w-full items-center justify-center bg-slate-950 px-6 text-center text-[12px] font-bold text-slate-300">
+            Pega la URL MJPEG de la app del celular para iniciar la vista remota...
+          </div>
+        )
+      ) : (
+        <video ref={videoRef} playsInline muted className="aspect-[4/3] w-full object-cover" />
+      )}
+      <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full object-cover" />
+    </div>
+  );
+
+  const renderRemoteConnectionBanner = () => {
+    if (cameraSource !== 'remote' || !remoteSession) return null;
+    return (
+      <div className="mx-6 mt-4 rounded-[1.6rem] border border-blue-200 bg-[linear-gradient(135deg,#eff6ff_0%,#ffffff_100%)] p-4 shadow-[0_18px_44px_rgba(37,99,235,0.10)]">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-black uppercase tracking-[0.22em] text-blue-700">Camara remota del celular</p>
+            <p className="mt-1 text-[14px] font-black text-slate-800">Escanee este QR o abra el enlace en su telefono para iniciar la transmision.</p>
+            <p className="mt-2 break-all text-[11px] font-bold text-slate-600">{remoteSession.phoneUrl}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" onClick={copyRemoteCameraLink} className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-blue-700">Copiar enlace</button>
+              <button type="button" onClick={() => window.open(remoteSession.phoneUrl, '_blank', 'noopener,noreferrer')} className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-blue-700">Abrir enlace</button>
+            </div>
+            <p className="mt-3 text-[11px] font-bold text-slate-500">{remoteCameraLabel}</p>
+          </div>
+          <div className="shrink-0 rounded-[1.3rem] border border-blue-100 bg-white p-3">
+            {remoteQrDataUrl ? (
+              <img src={remoteQrDataUrl} alt="QR de camara remota" className="h-36 w-36 rounded-xl border border-slate-200 bg-white p-1" />
+            ) : (
+              <div className="flex h-36 w-36 items-center justify-center rounded-xl border border-dashed border-slate-200 text-center text-[11px] font-bold text-slate-400">
+                Generando QR...
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const tabs: Array<{ id: 'registro' | 'base' | 'control'; label: string }> = [
+    { id: 'registro', label: 'Registro' },
+    { id: 'base', label: 'Base facial' },
+    { id: 'control', label: 'Control diario' },
   ];
+  const renderTabIcon = (tabId: 'registro' | 'base' | 'control', active: boolean) => {
+    const tone = active ? '#ff8a3d' : '#ffffff';
+    if (tabId === 'registro') {
+      return (
+        <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke={tone} strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="4.5" y="6.5" width="15" height="11" rx="2.5" />
+          <path d="M9 6.5l1.2-2h3.6l1.2 2" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      );
+    }
+    if (tabId === 'base') {
+      return (
+        <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke={tone} strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M12 4.5c2.7 0 4.8 2.1 4.8 4.8S14.7 14.1 12 14.1 7.2 12 7.2 9.3 9.3 4.5 12 4.5z" />
+          <path d="M5.5 18.5c1.8-2.2 4-3.3 6.5-3.3s4.7 1.1 6.5 3.3" />
+        </svg>
+      );
+    }
+    return (
+      <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke={tone} strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M6 18.5V10.5" />
+        <path d="M12 18.5V6.5" />
+        <path d="M18 18.5v-4" />
+      </svg>
+    );
+  };
   const tabThemes: Record<'registro' | 'base' | 'control', {
     activeCard: string;
     activeHint: string;
@@ -1265,38 +1664,60 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
           </div>
         </div>
 
-        <div className="border-t border-slate-100 bg-white px-6 py-4">
-            <div className="grid gap-3 md:grid-cols-3">
-              {tabs.map((tab) => {
+        <div className="border-t border-slate-100 bg-white px-6 pt-3 pb-0">
+            <div className="overflow-visible rounded-t-[2rem] bg-[#2f6fe8] px-4 pt-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_22px_rgba(37,99,235,0.14)]">
+            <div className="grid items-end gap-0 md:grid-cols-3">
+              {tabs.map((tab, index) => {
                 const active = activeTab === tab.id;
-                const theme = tabThemes[tab.id];
                 return (
                   <button
                     key={tab.id}
                     type="button"
                     onClick={() => setActiveTab(tab.id)}
-                    className={`rounded-[1.5rem] border px-4 py-3 text-left transition ${
+                    className={`relative min-h-[58px] overflow-visible border-0 px-5 pb-3.5 pt-2.5 text-left transition-all duration-300 ${
                       active
-                        ? theme.activeCard
-                        : 'border-slate-200 bg-slate-50/70 hover:border-slate-300 hover:bg-white'
+                        ? 'z-10 bg-white text-slate-900 shadow-[0_8px_18px_rgba(15,23,42,0.07)]'
+                        : 'bg-transparent text-white/95 hover:bg-white/6'
                     }`}
+                    style={{
+                      borderTopLeftRadius: active ? '34px' : '0px',
+                      borderTopRightRadius: active ? '34px' : '0px',
+                      borderBottomLeftRadius: '0px',
+                      borderBottomRightRadius: '0px',
+                      marginTop: active ? '2px' : '0px',
+                      marginBottom: active ? '-1px' : '0px',
+                      marginLeft: active ? '4px' : '0px',
+                      marginRight: active ? '4px' : '0px',
+                    }}
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className={`text-[10px] font-black uppercase tracking-[0.2em] ${active ? theme.activeHint : 'text-slate-500'}`}>{tab.hint}</p>
-                        <p className={`mt-1 text-[18px] font-black uppercase tracking-[0.05em] ${active ? theme.activeLabel : 'text-slate-700'}`}>{tab.label}</p>
-                      </div>
-                      <span className={`shrink-0 rounded-full px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.18em] ${active ? theme.badge : 'border border-slate-200 bg-white text-slate-400'}`}>
-                        {tab.id === 'registro' ? 'R' : tab.id === 'base' ? 'B' : 'C'}
+                    {active ? <span className="pointer-events-none absolute inset-x-10 top-0 h-[3px] rounded-full bg-[#ff8a3d]" /> : null}
+                    {active ? <span className="pointer-events-none absolute inset-x-0 -bottom-6 h-6 bg-white" /> : null}
+                    {!active && index < tabs.length - 1 ? <span className="pointer-events-none absolute right-0 top-3.5 h-6 w-px bg-white/14" /> : null}
+                    <div className="flex items-center gap-3">
+                      <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center ${
+                        active ? 'rounded-full bg-slate-100' : ''
+                      }`}>
+                        {renderTabIcon(tab.id, active)}
                       </span>
+                      <div>
+                        <p className={`text-[15px] font-black tracking-[0.01em] ${active ? 'text-slate-800' : 'text-white'}`}>{tab.label}</p>
+                        {tab.id === 'control' ? (
+                          <p className={`mt-0.5 text-[10px] font-bold ${active ? 'text-slate-500' : 'text-white/72'}`}>
+                            {bimesterMeta ? `${bimesterMeta.id} bimestre · ${visibleBimesterDays} de ${totalBimesterDays || 0} fecha(s) visibles` : 'Sin bimestre'}
+                          </p>
+                        ) : null}
+                      </div>
                     </div>
                   </button>
                 );
               })}
             </div>
+            </div>
           </div>
 
-          <div className={`grid gap-5 px-6 pb-6 ${activeTab === 'control' ? 'xl:grid-cols-[1.05fr_0.95fr]' : 'grid-cols-1'}`}>
+          {renderRemoteConnectionBanner()}
+
+          <div className={`grid gap-5 rounded-t-[1.85rem] bg-white px-6 pb-6 pt-4 ${activeTab === 'control' ? 'xl:grid-cols-[1.05fr_0.95fr]' : 'grid-cols-1'}`}>
             {activeTab !== 'control' ? (
           <div className="space-y-4">
             <div className={`rounded-[1.75rem] border p-5 ${tabThemes[activeTab].panelBorder} ${tabThemes[activeTab].panelBg}`}>
@@ -1353,7 +1774,8 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                           <img src={profile.imageData || ''} alt={profile.studentName} className="h-12 w-12 rounded-lg object-cover" />
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-[10px] font-black uppercase tracking-[0.12em] text-slate-700">{profile.source || 'captura'}</p>
-                            <p className="mt-0.5 text-[10px] font-bold text-slate-500">{profile.updatedAt || profile.createdAt || 'Sin fecha'}</p>
+                            <p className="mt-0.5 text-[10px] font-bold text-slate-500">{profile.grade} {profile.section}</p>
+                            <p className="text-[10px] font-bold text-slate-500">{profile.updatedAt || profile.createdAt || 'Sin fecha'}</p>
                           </div>
                           <button type="button" onClick={() => removeFaceSample(profile)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-slate-700">
                             Eliminar
@@ -1369,9 +1791,11 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                 </div>
 
                 {activeTab === 'registro' ? <div className="rounded-[1.8rem] border border-slate-200 bg-slate-950 p-4 text-white shadow-[0_18px_45px_rgba(2,6,23,0.28)]">
+                  <div className="mb-3">
+                    {renderCameraSourcePanel()}
+                  </div>
                   <div className="relative overflow-hidden rounded-[1.4rem] border border-white/10 bg-black">
-                    <video ref={videoRef} playsInline muted className="aspect-[4/3] w-full object-cover" />
-                    <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full object-cover" />
+                    {renderCameraViewport()}
                     <div className="pointer-events-none absolute inset-x-4 top-4 rounded-full bg-black/50 px-4 py-2 text-[11px] font-black uppercase tracking-[0.2em] text-cyan-100">
                       {guidedMode && guidedStudentId ? `Registrando a ${activeStudents.find((item) => String(item.id) === guidedStudentId)?.name || 'estudiante'}` : recognitionMode ? 'Reconocimiento activo' : 'Camara lista para asistencia'}
                     </div>
@@ -1425,6 +1849,7 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                         <img src={profile.imageData || ''} alt={profile.studentName} className="h-28 w-full object-cover" />
                         <div className="space-y-1.5 p-2.5">
                           <p className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-700">{profile.source || 'captura'}</p>
+                          <p className="text-[9px] font-bold text-slate-500">{profile.grade} {profile.section}</p>
                           <p className="text-[9px] font-bold text-slate-500">{profile.updatedAt || profile.createdAt || 'Sin fecha'}</p>
                           <button type="button" onClick={() => removeFaceSample(profile)} className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[9px] font-black uppercase tracking-[0.12em] text-slate-700">Eliminar</button>
                         </div>
@@ -1445,35 +1870,25 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                   <h3 className="text-lg font-black uppercase tracking-[0.08em] text-slate-800">Asistencia automatica por rostro</h3>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <button type="button" onClick={startRecognition} className="rounded-2xl bg-blue-600 px-4 py-2 text-[11px] font-black uppercase tracking-[0.16em] text-white shadow-[0_12px_30px_rgba(37,99,235,0.25)] transition hover:translate-y-[-1px]">Iniciar reconocimiento</button>
-                  <button type="button" onClick={stopRecognition} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-700 transition hover:bg-slate-100">Detener reconocimiento</button>
+                  <button type="button" onClick={startRecognition} className="rounded-2xl bg-blue-600 px-4 py-2 text-[11px] font-black uppercase tracking-[0.16em] text-white shadow-[0_12px_30px_rgba(37,99,235,0.25)] transition hover:translate-y-[-1px]">▶️</button>
+                  <button type="button" onClick={stopRecognition} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-700 transition hover:bg-slate-100">⏹️</button>
                 </div>
               </div>
-              <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/60 p-4 text-sm font-bold text-slate-700">
-                El grupo necesita una base facial previa para que este modo funcione. Si no hay rostros registrados para <span className="font-black text-slate-900">{grade || '...'}</span> <span className="font-black text-slate-900">{section || ''}</span>, el sistema te lo indicara antes de iniciar.
+              
+              <div className="mt-4">
+                {renderCameraSourcePanel()}
               </div>
               <div className="mt-4 rounded-[1.8rem] border border-slate-200 bg-slate-950 p-3.5 text-white">
-                <div className="relative overflow-hidden rounded-[1.4rem] border border-white/10 bg-black">
-                  <video ref={videoRef} playsInline muted className="aspect-[4/3] w-full object-cover" />
-                  <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full object-cover" />
-                </div>
+                {renderCameraViewport()}
                 <p className="mt-3 text-[15px] font-black leading-snug text-cyan-100">{statusText}</p>
                 <p className="mt-1 text-[10px] font-bold leading-relaxed text-cyan-200">{faceHint}</p>
                 <p className="mt-1 text-[9px] font-black uppercase tracking-[0.14em] text-amber-200">{detectorStats}</p>
-                <p className="mt-1 text-[10px] font-bold leading-relaxed text-slate-300">{lastRecognized || 'La voz dira el nombre cuando la asistencia se marque correctamente.'}</p>
+                
               </div>
             </div>
           </div> : null}
 
           {activeTab === 'control' ? <div className="rounded-[1.75rem] border border-slate-200 bg-white p-5">
-            <div>
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-500">Control diario</p>
-                <h3 className="text-lg font-black uppercase tracking-[0.08em] text-slate-800">Asistencia del grupo</h3>
-                <p className="mt-1 text-[11px] font-bold text-slate-500">{bimesterMeta ? `${bimesterMeta.id} bimestre · ${visibleBimesterDays} de ${totalBimesterDays || 0} fecha(s) visibles` : 'Sin bimestre detectado'}</p>
-              </div>
-            </div>
-
             {!grade || !section ? (
               <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-5 py-10 text-center text-sm font-bold text-slate-500">
                 Selecciona un grado y una seccion para abrir la base de estudiantes y asistencia.
@@ -1484,46 +1899,55 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
               </div>
             ) : (
               <>
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
+              <div className="mt-4 rounded-[1.4rem] border border-slate-200">
+                <div className="relative border-b border-slate-200 bg-[linear-gradient(135deg,#eff6ff_0%,#f8fafc_100%)] px-4 py-3">
                   <button
                     type="button"
                     onClick={() => setExpandedBimesterView((prev) => !prev)}
                     disabled={totalBimesterDays <= 1}
-                    title={expandedBimesterView ? 'Ver solo el dia' : totalBimesterDays > 1 ? `Desplegar ${totalBimesterDays} fechas` : 'Solo hay 1 fecha'}
-                    className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    title={expandedBimesterView ? 'Ver solo el dia actual' : totalBimesterDays > 1 ? `Mostrar las ${totalBimesterDays} fechas` : 'Solo hay 1 fecha visible'}
+                    className="absolute right-4 top-3 inline-flex h-10 items-center gap-1.5 rounded-2xl border border-slate-200 bg-white px-3 text-slate-700 shadow-sm transition hover:border-cyan-300 hover:text-cyan-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <span aria-hidden="true">{expandedBimesterView ? '▣' : '▤'}</span>
-                    <span aria-hidden="true">{expandedBimesterView ? '↘' : '↗'}</span>
+                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      {expandedBimesterView ? (
+                        <>
+                          <rect x="5" y="6" width="14" height="12" rx="2" />
+                          <path d="M9 10h6" />
+                          <path d="M9 14h4" />
+                        </>
+                      ) : (
+                        <>
+                          <rect x="4.5" y="5.5" width="6" height="6" rx="1.2" />
+                          <rect x="13.5" y="5.5" width="6" height="6" rx="1.2" />
+                          <rect x="4.5" y="12.5" width="6" height="6" rx="1.2" />
+                          <rect x="13.5" y="12.5" width="6" height="6" rx="1.2" />
+                        </>
+                      )}
+                    </svg>
+                    <svg viewBox="0 0 24 24" className={`h-4 w-4 transition-transform ${expandedBimesterView ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M8 10l4 4 4-4" />
+                    </svg>
                   </button>
-                  </div>
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-slate-600">
-                    {loadingData ? 'Sincronizando...' : `${records.length} registro(s) del dia`}
-                  </div>
-                </div>
-              <div className="mt-3 rounded-[1.4rem] border border-slate-200">
-                <div className="border-b border-slate-200 bg-[linear-gradient(135deg,#eff6ff_0%,#f8fafc_100%)] px-4 py-3">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3 pr-24">
                     <div>
-                      <p className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-500">{generalData.institution || 'Institución educativa'}</p>
-                      <p className="mt-1 text-sm font-black text-slate-800">{currentAssignment?.areaName || 'Área'} · {grade} {section} · {bimesterMeta ? `${bimesterMeta.id} bimestre` : 'Sin bimestre'}</p>
+                      <p className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-500">{loadingData ? 'Sincronizando...' : `${records.length} registro(s) del dia`}</p>
+                      <p className="mt-1 text-sm font-black text-slate-800">{currentAssignment?.areaName || 'Area'} - {grade} {section} - {bimesterMeta ? `${bimesterMeta.id} bimestre` : 'Sin bimestre'}</p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em]">
                       <span className="rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">✓ Asistencia</span>
-                      <span className="rounded-full bg-rose-50 px-3 py-1 text-rose-700">✕ Falta</span>
-                      <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">⏰ Tardanza</span>
-                      <span className="rounded-full bg-violet-50 px-3 py-1 text-violet-700">◌ Justificada</span>
+                      <span className="rounded-full bg-rose-50 px-3 py-1 text-rose-700">✗ Falta</span>
+                      <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">⌛ Tardanza</span>
+                      <span className="rounded-full bg-violet-50 px-3 py-1 text-violet-700">✏️ Justificada</span>
                       <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-800">★ Feriado</span>
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-500">— Futuro bloqueado</span>
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-500">- Futuro bloqueado</span>
                     </div>
                   </div>
                 </div>
-                <div className="border-b border-slate-200 bg-slate-50 px-4 py-3 text-[11px] font-bold text-slate-600">
-                  Haz clic en la celda de la fecha seleccionada para alternar entre presente, tardanza, falta y justificación.
-                </div>
+               
                 <div className="max-h-[640px] overflow-x-auto overflow-y-auto pb-3">
                   <div className="inline-block min-w-max pr-6 align-top">
                   <table className="table-fixed border-collapse" style={{ minWidth: `${attendanceTableWidth}px`, width: 'max-content' }}>
+                    
                     <colgroup>
                       <col style={{ width: `${indexColumnWidth}px` }} />
                       <col style={{ width: `${nameColumnWidth}px` }} />
@@ -1537,37 +1961,37 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                     </colgroup>
                     <thead className="sticky top-0 z-10">
                       <tr className="bg-slate-900 text-white">
-                        <th rowSpan={3} className="sticky left-0 z-20 border-r border-white/10 bg-slate-900 px-3 py-3 text-center text-[10px] font-black uppercase tracking-[0.18em]">N°</th>
-                        <th rowSpan={3} className="sticky z-20 border-r border-white/10 bg-slate-900 px-3 py-3 text-left text-[10px] font-black uppercase tracking-[0.18em]" style={{ left: `${indexColumnWidth}px`, width: `${nameColumnWidth}px` }}>Apellidos y nombres</th>
-                        <th colSpan={visibleBimesterDays} className="border-l border-white/10 bg-sky-900 px-3 py-3 text-center text-[11px] font-black uppercase tracking-[0.22em]">
+                        <th rowSpan={3} className="sticky left-0 z-20 border-r border-white/10 bg-slate-900 px-3 py-2 text-center text-[10px] font-black uppercase tracking-[0.18em]">N.</th>
+                        <th rowSpan={3} className="sticky z-20 border-r border-white/10 bg-slate-900 px-3 py-2 text-left text-[10px] font-black uppercase tracking-[0.18em]" style={{ left: `${indexColumnWidth}px`, width: `${nameColumnWidth}px` }}>Apellidos y nombres</th>
+                        <th colSpan={visibleBimesterDays} className="border-l border-white/10 bg-sky-900 px-3 py-2 text-center text-[11px] font-black uppercase tracking-[0.22em]">
                           {bimesterMeta ? `${bimesterMeta.id} bimestre` : 'Bimestre'}
                         </th>
-                        <th rowSpan={3} className="border-l border-white/10 bg-sky-700 px-1 py-3 text-center text-[10px] font-black uppercase tracking-[0.18em]" style={{ width: `${summaryColumnWidth}px` }}>
-                          <span className="inline-flex min-h-[120px] items-center justify-center [writing-mode:vertical-rl] rotate-180">Asist.</span>
+                        <th rowSpan={3} className="border-l border-white/10 bg-sky-700 px-1 py-2 text-center text-[10px] font-black uppercase tracking-[0.18em]" style={{ width: `${summaryColumnWidth}px` }}>
+                          <span className="inline-flex min-h-[110px] items-center justify-center [writing-mode:vertical-rl] rotate-180">Asistencias</span>
                         </th>
-                        <th rowSpan={3} className="bg-rose-600 px-1 py-3 text-center text-[10px] font-black uppercase tracking-[0.18em]" style={{ width: `${summaryColumnWidth}px` }}>
-                          <span className="inline-flex min-h-[120px] items-center justify-center [writing-mode:vertical-rl] rotate-180">Falt.</span>
+                        <th rowSpan={3} className="bg-rose-600 px-1 py-2 text-center text-[10px] font-black uppercase tracking-[0.18em]" style={{ width: `${summaryColumnWidth}px` }}>
+                          <span className="inline-flex min-h-[110px] items-center justify-center [writing-mode:vertical-rl] rotate-180">Faltas</span>
                         </th>
-                        <th rowSpan={3} className="bg-violet-700 px-1 py-3 text-center text-[10px] font-black uppercase tracking-[0.18em]" style={{ width: `${summaryColumnWidth}px` }}>
-                          <span className="inline-flex min-h-[120px] items-center justify-center [writing-mode:vertical-rl] rotate-180">Tard.</span>
+                        <th rowSpan={3} className="bg-violet-700 px-1 py-2 text-center text-[10px] font-black uppercase tracking-[0.18em]" style={{ width: `${summaryColumnWidth}px` }}>
+                          <span className="inline-flex min-h-[110px] items-center justify-center [writing-mode:vertical-rl] rotate-180">Tardanzas</span>
                         </th>
-                        <th rowSpan={3} className="bg-amber-500 px-1 py-3 text-center text-[10px] font-black uppercase tracking-[0.18em]" style={{ width: `${summaryColumnWidth}px` }}>
-                          <span className="inline-flex min-h-[120px] items-center justify-center [writing-mode:vertical-rl] rotate-180">Just.</span>
+                        <th rowSpan={3} className="bg-amber-500 px-1 py-2 text-center text-[10px] font-black uppercase tracking-[0.18em]" style={{ width: `${summaryColumnWidth}px` }}>
+                          <span className="inline-flex min-h-[110px] items-center justify-center [writing-mode:vertical-rl] rotate-180">Justifiaciones</span>
                         </th>
                       </tr>
                       <tr className="bg-slate-100 text-white">
                         {visibleBimesterDayColumns.map((group) => (
-                          <th key={group.unitNumber} colSpan={group.dates.length} className={`border-l border-white/10 px-3 py-2 text-center text-[10px] font-black uppercase tracking-[0.18em] ${group.unitNumber % 2 === 0 ? 'bg-blue-800' : 'bg-sky-800'}`}>
+                          <th key={group.unitNumber} colSpan={group.dates.length} className={`border-l border-white/10 px-3 py-1.5 text-center text-[10px] font-black uppercase tracking-[0.18em] ${group.unitNumber % 2 === 0 ? 'bg-blue-800' : 'bg-sky-800'}`}>
                             {group.unitLabel}
                           </th>
                         ))}
                       </tr>
                       <tr className="bg-slate-100 text-slate-700">
                         {visibleBimesterDayColumns.flatMap((group) => group.dates.map((day) => (
-                          <th key={`${group.unitNumber}-${day.date}`} className={`border-l border-slate-200 px-1 py-2 text-center text-[10px] font-black uppercase tracking-[0.08em] ${day.date === date ? 'bg-cyan-100 text-cyan-800' : day.isHoliday ? 'bg-amber-100 text-amber-800' : day.isFuture ? 'bg-slate-100 text-slate-400' : ''}`} style={{ width: `${dayColumnWidth}px` }}>
+                          <th key={`${group.unitNumber}-${day.date}`} className={`border-l border-slate-200 px-1 py-1.5 text-center text-[10px] font-black uppercase tracking-[0.08em] ${day.date === date ? 'bg-cyan-100 text-cyan-800' : day.isHoliday ? 'bg-amber-100 text-amber-800' : day.isFuture ? 'bg-slate-100 text-slate-400' : ''}`} style={{ width: `${dayColumnWidth}px` }}>
                             <div>{shortDayNames[new Date(`${day.date}T00:00:00`).getDay()] || ''}</div>
                             <div className="mt-0.5 text-[9px]">{formatShortDate(day.date)}</div>
-                            <div className="mt-0.5 text-[9px]">{day.isHoliday ? '★' : day.isFuture ? '—' : ''}</div>
+                            <div className="mt-0.5 text-[9px]">{day.isHoliday ? '★' : day.isFuture ? '-' : ''}</div>
                           </th>
                         )))}
                       </tr>
@@ -1578,25 +2002,25 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                         const rowTone = resolveStudentRowTone(student);
                         const normalizedEstado = normalize(String(student.estado || ''));
                         const hasSpecialRow = normalizedEstado === 'r' || normalizedEstado === 't' || normalizedEstado === 'na' || normalizedEstado.includes('retir') || normalizedEstado.includes('traslad') || normalizedEstado.includes('no asiste');
+                        const isHighlightedRow = !hasSpecialRow && String(student.id) === String(highlightedAttendanceStudentId);
                         const rowIndex = activeStudents.findIndex((item) => String(item.id) === String(student.id)) + 1;
                         return (
-                          <tr key={student.id} className={`${hasSpecialRow ? rowTone : String(student.id) === String(selectedStudentId) ? 'bg-cyan-50/70' : 'bg-white'}`}>
-                            <td className={`sticky left-0 z-[1] border-b border-r bg-inherit px-2 py-2 text-center text-[11px] font-black ${hasSpecialRow ? 'border-white/10 text-inherit' : 'border-slate-100 text-slate-700'}`}>{rowIndex}</td>
-                            <td className={`sticky z-[1] border-b border-r bg-inherit px-3 py-2 ${hasSpecialRow ? 'border-white/10' : 'border-slate-100'}`} style={{ left: `${indexColumnWidth}px`, width: `${nameColumnWidth}px` }}>
+                          <tr key={student.id} className={`${hasSpecialRow ? rowTone : isHighlightedRow ? 'bg-cyan-100/80' : String(student.id) === String(selectedStudentId) ? 'bg-cyan-50/70' : 'bg-white'}`}>
+                            <td className={`sticky left-0 z-[1] border-b border-r bg-inherit px-2 py-0.5 text-center text-[10px] font-black leading-tight ${hasSpecialRow ? 'border-white/10 text-inherit' : isHighlightedRow ? 'border-cyan-200 text-cyan-900 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.12)]' : 'border-slate-100 text-slate-700'}`}>{rowIndex}</td>
+                            <td className={`sticky z-[1] border-b border-r bg-inherit px-3 py-0.5 ${hasSpecialRow ? 'border-white/10' : isHighlightedRow ? 'border-cyan-200 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.12)]' : 'border-slate-100'}`} style={{ left: `${indexColumnWidth}px`, width: `${nameColumnWidth}px` }}>
                               <button type="button" onClick={() => setSelectedStudentId(String(student.id))} className="text-left">
-                                <p className={`text-[10px] font-black ${hasSpecialRow ? 'text-inherit' : 'text-slate-800'}`}>{student.name}</p>
-                                <div className="mt-1 h-1" />
+                                <p className={`text-[8.5px] leading-tight font-black ${hasSpecialRow ? 'text-inherit' : isHighlightedRow ? 'text-cyan-950' : 'text-slate-800'}`}>{student.name}</p>
                               </button>
                             </td>
                             {visibleBimesterDayColumns.flatMap((group) => group.dates.map((day) => {
                               const dayRecord = historyAttendanceMap.get(`${student.id}__${day.date}`);
-                              const activeDay = day.date === date;
-                              const canEdit = activeDay && !day.isFuture && !day.isNonLective;
+                              const canEdit = !hasSpecialRow && !day.isFuture && !day.isNonLective;
+                              const statusGlyph = getStatusDisplayGlyph(dayRecord?.status);
                               return (
                                 <td
                                   key={`${student.id}-${day.date}`}
-                                  onClick={canEdit ? () => cycleDailyStatus(student) : undefined}
-                                  className={`border-b border-l px-1 py-2 text-center text-base font-black ${
+                                  onClick={canEdit ? () => cycleDailyStatus(student, day.date) : undefined}
+                                  className={`border-b border-l px-1 py-0.5 text-center text-[13px] font-black leading-none ${
                                     hasSpecialRow
                                       ? 'border-white/10 bg-inherit text-inherit'
                                       : day.isHoliday || day.isNonLective
@@ -1604,17 +2028,33 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                                       : day.isFuture
                                         ? 'bg-slate-100 text-slate-300'
                                         : getStatusTone(dayRecord?.status)
-                                  } ${hasSpecialRow ? '' : canEdit ? 'cursor-pointer bg-cyan-50 hover:bg-cyan-100' : !day.isHoliday && !day.isFuture ? group.unitNumber % 2 === 0 ? 'bg-blue-50/50' : 'bg-sky-50/40' : ''}`} style={{ width: `${dayColumnWidth}px` }}
-                                  title={day.isHoliday ? (day.holidayName || 'Feriado / día no lectivo') : day.isFuture ? 'Fecha futura: asistencia bloqueada.' : canEdit ? 'Haz clic para cambiar el estado del día seleccionado.' : formatLongDate(day.date)}
+                                  } ${hasSpecialRow ? '' : canEdit ? isHighlightedRow ? 'cursor-pointer bg-cyan-100 hover:bg-cyan-100' : 'cursor-pointer bg-cyan-50 hover:bg-cyan-100' : !day.isHoliday && !day.isFuture ? group.unitNumber % 2 === 0 ? 'bg-blue-50/50' : 'bg-sky-50/40' : ''} ${isHighlightedRow && !hasSpecialRow ? 'border-cyan-200 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.12)]' : ''}`} style={{ width: `${dayColumnWidth}px` }}
+                                  title={
+                                    hasSpecialRow
+                                      ? 'Fila bloqueada para estudiantes retirados, trasladados o no asistentes.'
+                                      : day.isHoliday
+                                        ? (day.holidayName || 'Feriado / dia no lectivo')
+                                        : day.isFuture
+                                          ? 'Fecha futura: asistencia bloqueada.'
+                                          : 'Haz clic para cambiar el estado de esta fecha.'
+                                  }
                                 >
-                                  {day.isHoliday || day.isNonLective ? '★' : day.isFuture ? '—' : getStatusGlyph(dayRecord?.status)}
+                                  {day.isHoliday || day.isNonLective ? (
+                                    <span className="inline-flex min-h-[14px] min-w-[14px] items-center justify-center text-[11px] leading-none text-amber-700">★</span>
+                                  ) : day.isFuture ? (
+                                    <span className="inline-flex min-h-[14px] min-w-[14px] items-center justify-center text-[11px] leading-none text-slate-400">-</span>
+                                  ) : statusGlyph ? (
+                                    <span className={`inline-flex min-h-[14px] min-w-[14px] items-center justify-center rounded-full px-1 text-[10px] font-black leading-none ${getStatusBadgeTone(dayRecord?.status)}`}>
+                                      {statusGlyph}
+                                    </span>
+                                  ) : ''}
                                 </td>
                               );
                             }))}
-                            <td className={`border-b border-l px-2 py-2 text-center text-sm font-black ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-100 bg-sky-50 text-sky-700'}`} style={{ width: `${summaryColumnWidth}px` }}>{summary.P}</td>
-                            <td className={`border-b px-2 py-2 text-center text-sm font-black ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-100 bg-rose-50 text-rose-700'}`} style={{ width: `${summaryColumnWidth}px` }}>{summary.F}</td>
-                            <td className={`border-b px-2 py-2 text-center text-sm font-black ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-100 bg-violet-50 text-violet-700'}`} style={{ width: `${summaryColumnWidth}px` }}>{summary.T}</td>
-                            <td className={`border-b px-2 py-2 text-center text-sm font-black ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-100 bg-amber-50 text-amber-700'}`} style={{ width: `${summaryColumnWidth}px` }}>{summary.J}</td>
+                            <td className={`border-b border-l px-2 py-0.5 text-center text-[12px] font-black leading-none ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : isHighlightedRow ? 'border-cyan-200 bg-sky-100 text-sky-800 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.12)]' : 'border-slate-100 bg-sky-50 text-sky-700'}`} style={{ width: `${summaryColumnWidth}px` }}>{summary.P}</td>
+                            <td className={`border-b px-2 py-0.5 text-center text-[12px] font-black leading-none ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : isHighlightedRow ? 'border-cyan-200 bg-rose-100 text-rose-800 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.12)]' : 'border-slate-100 bg-rose-50 text-rose-700'}`} style={{ width: `${summaryColumnWidth}px` }}>{summary.F}</td>
+                            <td className={`border-b px-2 py-0.5 text-center text-[12px] font-black leading-none ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : isHighlightedRow ? 'border-cyan-200 bg-violet-100 text-violet-800 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.12)]' : 'border-slate-100 bg-violet-50 text-violet-700'}`} style={{ width: `${summaryColumnWidth}px` }}>{summary.T}</td>
+                            <td className={`border-b px-2 py-0.5 text-center text-[12px] font-black leading-none ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : isHighlightedRow ? 'border-cyan-200 bg-amber-100 text-amber-800 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.12)]' : 'border-slate-100 bg-amber-50 text-amber-700'}`} style={{ width: `${summaryColumnWidth}px` }}>{summary.J}</td>
                           </tr>
                         );
                       })}

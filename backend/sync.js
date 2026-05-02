@@ -319,6 +319,7 @@ const serializeLocalFiles = () => {
 };
 
 const buildManifestFromFiles = (files, provider, storageMode) => {
+  const entityCounts = getSyncEntityCounts();
   const digest = crypto.createHash('sha256')
     .update(
       JSON.stringify(
@@ -338,6 +339,11 @@ const buildManifestFromFiles = (files, provider, storageMode) => {
     storageMode,
     generatedAt: new Date().toISOString(),
     digest,
+    summary: {
+      entities: entityCounts,
+      includesAttendance: true,
+      includesFaceProfiles: true,
+    },
     files: files.map(({ relativePath, scope, size, mtimeMs, checksum }) => ({
       relativePath,
       scope,
@@ -387,6 +393,15 @@ const extractSyncPackageToFolder = (packageBase64, targetFolder) => {
 const getExtractedFilePath = (extractRoot, relativePath) => (
   path.join(extractRoot, fromPosixToCurrentOs(relativePath))
 );
+
+const extractDatabaseDumpFromPackageBase64 = (packageBase64, targetFolder) => {
+  const manifest = extractSyncPackageToFolder(packageBase64, targetFolder);
+  const dump = readJsonFile(getExtractedFilePath(targetFolder, 'database/database-dump.json'), null);
+  if (!dump?.tables) {
+    throw new Error('El paquete remoto no contiene una base de datos valida.');
+  }
+  return { manifest, dump, extractRoot: targetFolder };
+};
 
 const applyExtractedPackageToLocal = (extractRoot, manifest, restoreRoot) => {
   const manifestPaths = new Set((manifest.files || [])
@@ -614,6 +629,375 @@ const persistMirrorSyncState = (mirrorPath, state) => {
   });
 };
 
+const getSyncEntityCounts = () => {
+  const safeCount = (table) => {
+    try {
+      return Number(db.prepare(`SELECT COUNT(*) as total FROM "${table}"`).get()?.total || 0);
+    } catch {
+      return 0;
+    }
+  };
+
+  return {
+    programaciones: safeCount('programacion_anual'),
+    unidades: safeCount('unidades_didacticas'),
+    sesiones: safeCount('sesiones'),
+    estudiantes: safeCount('db_estudiantes'),
+    egresados: safeCount('db_egresados'),
+    asistencias: safeCount('asistencia_registros'),
+    rostros: safeCount('asistencia_rostros'),
+  };
+};
+
+const getSyncEntityCountsFromDump = (dump) => ({
+  programaciones: Array.isArray(dump?.tables?.programacion_anual) ? dump.tables.programacion_anual.length : 0,
+  unidades: Array.isArray(dump?.tables?.unidades_didacticas) ? dump.tables.unidades_didacticas.length : 0,
+  sesiones: Array.isArray(dump?.tables?.sesiones) ? dump.tables.sesiones.length : 0,
+  estudiantes: Array.isArray(dump?.tables?.db_estudiantes) ? dump.tables.db_estudiantes.length : 0,
+  egresados: Array.isArray(dump?.tables?.db_egresados) ? dump.tables.db_egresados.length : 0,
+  asistencias: Array.isArray(dump?.tables?.asistencia_registros) ? dump.tables.asistencia_registros.length : 0,
+  rostros: Array.isArray(dump?.tables?.asistencia_rostros) ? dump.tables.asistencia_rostros.length : 0,
+});
+
+const normalizeArtifactKind = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'conflict' ? 'conflict' : normalized === 'current' ? 'current' : 'version';
+};
+
+const fetchCloudArtifact = async ({ artifactId = '', artifactKind = 'version' } = {}) => {
+  const config = readConfig();
+  if (config.mode !== 'apps_script_drive') {
+    return { success: false, message: 'Esta funcion solo esta disponible cuando la sincronizacion por Drive esta activada.' };
+  }
+
+  const response = await postAppsScript({
+    action: 'sync_pull_artifact',
+    syncUserKey: sanitizeUserScope(config.syncUserKey),
+    syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+    artifactId: String(artifactId || '').trim(),
+    artifactKind: normalizeArtifactKind(artifactKind),
+  }, 240000);
+
+  if (!response.success) {
+    return { success: false, message: response.message || 'No se pudo descargar la copia seleccionada desde Drive.' };
+  }
+
+  return { success: true, data: response.data || null };
+};
+
+const mergeAttendanceTablesFromDump = (dump) => {
+  const attendanceRows = Array.isArray(dump?.tables?.asistencia_registros) ? dump.tables.asistencia_registros : [];
+  const faceRows = Array.isArray(dump?.tables?.asistencia_rostros) ? dump.tables.asistencia_rostros : [];
+  let insertedAttendance = 0;
+  let updatedAttendance = 0;
+  let insertedFaces = 0;
+
+  const compareTimestamps = (left, right) => {
+    const leftTime = Date.parse(String(left || '')) || 0;
+    const rightTime = Date.parse(String(right || '')) || 0;
+    return leftTime - rightTime;
+  };
+
+  const transaction = db.transaction(() => {
+    const selectAttendance = db.prepare(`
+      SELECT * FROM asistencia_registros
+      WHERE attendance_date = ? AND grade = ? AND section = ? AND student_id = ?
+      LIMIT 1
+    `);
+    const insertAttendance = db.prepare(`
+      INSERT INTO asistencia_registros (
+        attendance_date, grade, section, student_id, student_name, dni, status, marked_at, source, notes, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const updateAttendance = db.prepare(`
+      UPDATE asistencia_registros
+      SET student_name = ?, dni = ?, status = ?, marked_at = ?, source = ?, notes = ?, updated_at = ?
+      WHERE attendance_date = ? AND grade = ? AND section = ? AND student_id = ?
+    `);
+    const selectFace = db.prepare(`
+      SELECT id FROM asistencia_rostros
+      WHERE student_id = ? AND grade = ? AND section = ? AND descriptor = ? AND source = ?
+      LIMIT 1
+    `);
+    const insertFace = db.prepare(`
+      INSERT INTO asistencia_rostros (
+        student_id, student_name, grade, section, image_data, descriptor, source, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    attendanceRows.forEach((row) => {
+      const key = [
+        row?.attendance_date ?? '',
+        row?.grade ?? '',
+        row?.section ?? '',
+        row?.student_id ?? '',
+      ].map((item) => String(item || '').trim());
+      if (key.some((item) => !item)) return;
+
+      const existing = selectAttendance.get(...key);
+      const incomingUpdatedAt = row?.updated_at || row?.marked_at || '';
+      if (!existing) {
+        insertAttendance.run(
+          key[0],
+          key[1],
+          key[2],
+          key[3],
+          row?.student_name ?? '',
+          row?.dni ?? '',
+          row?.status ?? 'P',
+          row?.marked_at || incomingUpdatedAt || new Date().toISOString(),
+          row?.source ?? 'cloud_merge',
+          row?.notes ?? '',
+          incomingUpdatedAt || new Date().toISOString(),
+        );
+        insertedAttendance += 1;
+        return;
+      }
+
+      const existingUpdatedAt = existing.updated_at || existing.marked_at || '';
+      if (compareTimestamps(incomingUpdatedAt, existingUpdatedAt) > 0) {
+        updateAttendance.run(
+          row?.student_name ?? existing.student_name ?? '',
+          row?.dni ?? existing.dni ?? '',
+          row?.status ?? existing.status ?? 'P',
+          row?.marked_at || incomingUpdatedAt || existing.marked_at || new Date().toISOString(),
+          row?.source ?? existing.source ?? 'cloud_merge',
+          row?.notes ?? existing.notes ?? '',
+          incomingUpdatedAt || new Date().toISOString(),
+          key[0],
+          key[1],
+          key[2],
+          key[3],
+        );
+        updatedAttendance += 1;
+      }
+    });
+
+    faceRows.forEach((row) => {
+      const studentId = String(row?.student_id || '').trim();
+      const grade = String(row?.grade || '').trim();
+      const section = String(row?.section || '').trim();
+      const descriptor = String(row?.descriptor || '').trim();
+      const source = String(row?.source || 'cloud_merge').trim() || 'cloud_merge';
+      if (!studentId || !grade || !section || !descriptor) return;
+      const exists = selectFace.get(studentId, grade, section, descriptor, source);
+      if (exists?.id) return;
+      insertFace.run(
+        studentId,
+        row?.student_name ?? '',
+        grade,
+        section,
+        row?.image_data ?? '',
+        descriptor,
+        source,
+        row?.created_at || row?.updated_at || new Date().toISOString(),
+        row?.updated_at || row?.created_at || new Date().toISOString(),
+      );
+      insertedFaces += 1;
+    });
+  });
+
+  transaction();
+
+  return {
+    attendance: {
+      inserted: insertedAttendance,
+      updated: updatedAttendance,
+    },
+    faces: {
+      inserted: insertedFaces,
+    },
+  };
+};
+
+const buildStudentIdentityKey = (row = {}, scope = 'student') => {
+  const dni = String(row?.dni || '').trim();
+  if (dni) return `${scope}:dni:${dni}`;
+  const nivel = String(row?.nivel || '').trim().toLowerCase();
+  const name = String(row?.estudiantes || row?.student_name || row?.name || '').trim().toLowerCase();
+  const grade = String(row?.grado || row?.grade || '').trim().toLowerCase();
+  const section = String(row?.secc || row?.section || '').trim().toLowerCase();
+  return `${scope}:fallback:${nivel}|${name}|${grade}|${section}`;
+};
+
+const mergeStudentsTablesFromDump = (dump) => {
+  const studentRows = Array.isArray(dump?.tables?.db_estudiantes) ? dump.tables.db_estudiantes : [];
+  const graduateRows = Array.isArray(dump?.tables?.db_egresados) ? dump.tables.db_egresados : [];
+  let insertedStudents = 0;
+  let updatedStudents = 0;
+  let insertedGraduates = 0;
+  let updatedGraduates = 0;
+  let promotedToGraduate = 0;
+
+  const compareTimestamps = (left, right) => {
+    const leftTime = Date.parse(String(left || '')) || 0;
+    const rightTime = Date.parse(String(right || '')) || 0;
+    return leftTime - rightTime;
+  };
+
+  const existingStudents = db.prepare('SELECT * FROM db_estudiantes').all();
+  const existingGraduates = db.prepare('SELECT * FROM db_egresados').all();
+  const studentKeyMap = new Map(existingStudents.map((row) => [buildStudentIdentityKey(row, 'student'), row]));
+  const graduateKeyMap = new Map(existingGraduates.map((row) => [buildStudentIdentityKey(row, 'graduate'), row]));
+  const graduateByDni = new Map(existingGraduates.filter((row) => String(row?.dni || '').trim()).map((row) => [String(row.dni).trim(), row]));
+
+  const transaction = db.transaction(() => {
+    const insertStudent = db.prepare(`
+      INSERT INTO db_estudiantes (
+        nivel, dni, estudiantes, grado, secc, gmail, outlook, estado, grupo, sexo, edad, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const updateStudent = db.prepare(`
+      UPDATE db_estudiantes
+      SET nivel = ?, dni = ?, estudiantes = ?, grado = ?, secc = ?, gmail = ?, outlook = ?, estado = ?, grupo = ?, sexo = ?, edad = ?, updated_at = ?
+      WHERE id = ?
+    `);
+    const deleteStudent = db.prepare('DELETE FROM db_estudiantes WHERE id = ?');
+    const insertGraduate = db.prepare(`
+      INSERT INTO db_egresados (
+        estudiante_id_origen, nivel, dni, estudiantes, grado, secc, gmail, outlook, estado, grupo, sexo, edad, egresado_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const updateGraduate = db.prepare(`
+      UPDATE db_egresados
+      SET estudiante_id_origen = ?, nivel = ?, dni = ?, estudiantes = ?, grado = ?, secc = ?, gmail = ?, outlook = ?, estado = ?, grupo = ?, sexo = ?, edad = ?, egresado_at = ?
+      WHERE id = ?
+    `);
+
+    studentRows.forEach((row) => {
+      const key = buildStudentIdentityKey(row, 'student');
+      const incomingUpdatedAt = row?.updated_at || new Date().toISOString();
+      const existingGraduateSameDni = String(row?.dni || '').trim() ? graduateByDni.get(String(row.dni).trim()) : null;
+      if (existingGraduateSameDni && compareTimestamps(existingGraduateSameDni.egresado_at, incomingUpdatedAt) >= 0) {
+        return;
+      }
+
+      const existing = studentKeyMap.get(key);
+      if (!existing) {
+        insertStudent.run(
+          row?.nivel ?? '',
+          row?.dni ?? '',
+          row?.estudiantes ?? '',
+          row?.grado ?? '',
+          row?.secc ?? '',
+          row?.gmail ?? '',
+          row?.outlook ?? '',
+          row?.estado ?? 'A',
+          row?.grupo ?? '',
+          row?.sexo ?? '',
+          row?.edad ?? null,
+          incomingUpdatedAt,
+        );
+        insertedStudents += 1;
+        return;
+      }
+
+      const existingUpdatedAt = existing.updated_at || '';
+      if (compareTimestamps(incomingUpdatedAt, existingUpdatedAt) > 0) {
+        updateStudent.run(
+          row?.nivel ?? existing.nivel ?? '',
+          row?.dni ?? existing.dni ?? '',
+          row?.estudiantes ?? existing.estudiantes ?? '',
+          row?.grado ?? existing.grado ?? '',
+          row?.secc ?? existing.secc ?? '',
+          row?.gmail ?? existing.gmail ?? '',
+          row?.outlook ?? existing.outlook ?? '',
+          row?.estado ?? existing.estado ?? 'A',
+          row?.grupo ?? existing.grupo ?? '',
+          row?.sexo ?? existing.sexo ?? '',
+          row?.edad ?? existing.edad ?? null,
+          incomingUpdatedAt,
+          existing.id,
+        );
+        updatedStudents += 1;
+      }
+    });
+
+    graduateRows.forEach((row) => {
+      const key = buildStudentIdentityKey(row, 'graduate');
+      const incomingGraduateAt = row?.egresado_at || new Date().toISOString();
+      const existingGraduate = graduateKeyMap.get(key);
+      if (!existingGraduate) {
+        insertGraduate.run(
+          row?.estudiante_id_origen ?? '',
+          row?.nivel ?? '',
+          row?.dni ?? '',
+          row?.estudiantes ?? '',
+          row?.grado ?? '',
+          row?.secc ?? '',
+          row?.gmail ?? '',
+          row?.outlook ?? '',
+          row?.estado ?? '',
+          row?.grupo ?? '',
+          row?.sexo ?? '',
+          row?.edad ?? null,
+          incomingGraduateAt,
+        );
+        insertedGraduates += 1;
+      } else if (compareTimestamps(incomingGraduateAt, existingGraduate.egresado_at) > 0) {
+        updateGraduate.run(
+          row?.estudiante_id_origen ?? existingGraduate.estudiante_id_origen ?? '',
+          row?.nivel ?? existingGraduate.nivel ?? '',
+          row?.dni ?? existingGraduate.dni ?? '',
+          row?.estudiantes ?? existingGraduate.estudiantes ?? '',
+          row?.grado ?? existingGraduate.grado ?? '',
+          row?.secc ?? existingGraduate.secc ?? '',
+          row?.gmail ?? existingGraduate.gmail ?? '',
+          row?.outlook ?? existingGraduate.outlook ?? '',
+          row?.estado ?? existingGraduate.estado ?? '',
+          row?.grupo ?? existingGraduate.grupo ?? '',
+          row?.sexo ?? existingGraduate.sexo ?? '',
+          row?.edad ?? existingGraduate.edad ?? null,
+          incomingGraduateAt,
+          existingGraduate.id,
+        );
+        updatedGraduates += 1;
+      }
+
+      const remoteDni = String(row?.dni || '').trim();
+      if (remoteDni) {
+        const localStudent = db.prepare('SELECT * FROM db_estudiantes WHERE dni = ? LIMIT 1').get(remoteDni);
+        if (localStudent) {
+          const localStudentUpdatedAt = localStudent.updated_at || '';
+          if (compareTimestamps(incomingGraduateAt, localStudentUpdatedAt) >= 0) {
+            deleteStudent.run(localStudent.id);
+            promotedToGraduate += 1;
+          }
+        }
+      }
+    });
+  });
+
+  transaction();
+
+  return {
+    students: {
+      inserted: insertedStudents,
+      updated: updatedStudents,
+    },
+    graduates: {
+      inserted: insertedGraduates,
+      updated: updatedGraduates,
+      promoted: promotedToGraduate,
+    },
+  };
+};
+
+const detectDestructiveCountRegression = (localCounts, remoteCounts) => {
+  const regressions = ['programaciones', 'unidades', 'sesiones', 'asistencias', 'rostros']
+    .map((key) => ({
+      key,
+      local: Number(localCounts?.[key] || 0),
+      remote: Number(remoteCounts?.[key] || 0),
+    }))
+    .filter((item) => item.remote < item.local && item.local > 0);
+
+  return {
+    blocked: regressions.length > 0,
+    regressions,
+  };
+};
+
 export const getSyncStatus = async () => {
   const config = readConfig();
   const resolvedMirror = resolveEffectiveMirrorPath(config);
@@ -729,8 +1113,10 @@ export const updateSyncConfig = async (payload = {}) => {
 export const pushToCloud = async () => {
   const config = readConfig();
   const effectiveMirror = resolveEffectiveMirrorPath(config);
+  const restorePoint = createLocalRestorePoint();
   stageLocalDatabaseDump();
   const manifest = buildManifestFromFiles(serializeLocalFiles(), 'local-app-storage', config.mode);
+  const localCounts = getSyncEntityCounts();
   writeJsonAtomic(localManifestPath, manifest);
 
   if (config.mode === 'apps_script_drive') {
@@ -741,6 +1127,7 @@ export const pushToCloud = async () => {
         data: {
           manifest,
           mode: config.mode,
+          restorePoint,
           skippedUpload: true,
           reason: 'same-digest',
           message: 'No hubo cambios nuevos para subir a Drive.',
@@ -768,6 +1155,19 @@ export const pushToCloud = async () => {
     }
 
     const cloudManifest = response.data?.manifest || manifest;
+    if (String(cloudManifest?.digest || '') !== String(manifest.digest || '')) {
+      return {
+        success: false,
+        message: 'Drive no confirmó la misma copia que se intentó subir. La nube parece haberse quedado con una versión anterior.',
+        data: {
+          localDigest: manifest.digest,
+          remoteDigest: cloudManifest?.digest || '',
+          localCounts,
+          restorePoint,
+          remoteUser: response.data?.user || null,
+        },
+      };
+    }
     writeJsonAtomic(remoteSyncStatePath, {
       lastCloudVersion: cloudManifest.cloudVersion || '',
       lastCloudDigest: cloudManifest.digest || '',
@@ -781,6 +1181,8 @@ export const pushToCloud = async () => {
       data: {
         manifest: cloudManifest,
         mode: config.mode,
+        counts: localCounts,
+        restorePoint,
         remoteUser: response.data?.user || null,
       },
     };
@@ -840,11 +1242,13 @@ export const pushToCloud = async () => {
 
   return {
     success: true,
-    data: {
-      manifest: mirrorManifest,
-      mode: config.mode,
-      removedPathsMovedToTrash: removedPaths,
-    },
+      data: {
+        manifest: mirrorManifest,
+        mode: config.mode,
+        counts: localCounts,
+        restorePoint,
+        removedPathsMovedToTrash: removedPaths,
+      },
   };
 };
 
@@ -862,12 +1266,30 @@ export const pullFromCloud = async () => {
       return { success: false, message: response.message || 'No se pudo descargar la copia desde Drive.' };
     }
 
+    const localCountsBeforePull = getSyncEntityCounts();
     const restoreRoot = createLocalRestorePoint();
     const extractRoot = path.join(runtimeFolder, 'remote-download', new Date().toISOString().replace(/[:.]/g, '-'));
     const extractedManifest = extractSyncPackageToFolder(response.data?.packageBase64, extractRoot);
     const remoteManifest = response.data?.manifest || extractedManifest;
     if (!remoteManifest?.files) {
       return { success: false, message: 'La copia remota no contiene un manifiesto valido.' };
+    }
+
+    const remoteDump = readJsonFile(getExtractedFilePath(extractRoot, 'database/database-dump.json'), null);
+    const remoteCounts = getSyncEntityCountsFromDump(remoteDump);
+    const regressionCheck = detectDestructiveCountRegression(localCountsBeforePull, remoteCounts);
+    if (regressionCheck.blocked) {
+      return {
+        success: false,
+        message: 'La copia de Drive tiene menos registros que tu copia local en Programaciones, Unidades, Sesiones o Asistencia. Se bloqueo la descarga para proteger tu trabajo.',
+        data: {
+          localCounts: localCountsBeforePull,
+          remoteCounts,
+          regressions: regressionCheck.regressions,
+          restorePoint: restoreRoot,
+          remoteUser: response.data?.user || null,
+        },
+      };
     }
 
     applyExtractedPackageToLocal(extractRoot, remoteManifest, restoreRoot);
@@ -884,6 +1306,7 @@ export const pullFromCloud = async () => {
       success: true,
       data: {
         manifest: remoteManifest,
+        counts: getSyncEntityCounts(),
         frontendState: readJsonFile(frontendStatePath, { keys: {} }),
         restorePoint: restoreRoot,
         remoteUser: response.data?.user || null,
@@ -910,7 +1333,23 @@ export const pullFromCloud = async () => {
     };
   }
 
+  const localCountsBeforePull = getSyncEntityCounts();
   const restoreRoot = createLocalRestorePoint();
+  const mirrorDump = readJsonFile(getMirrorFilePath(effectiveMirror.mirrorPath, 'database/database-dump.json'), null);
+  const remoteCounts = getSyncEntityCountsFromDump(mirrorDump);
+  const regressionCheck = detectDestructiveCountRegression(localCountsBeforePull, remoteCounts);
+  if (regressionCheck.blocked) {
+    return {
+      success: false,
+      message: 'La copia de Drive tiene menos registros que tu copia local en Programaciones, Unidades, Sesiones o Asistencia. Se bloqueo la descarga para proteger tu trabajo.',
+      data: {
+        localCounts: localCountsBeforePull,
+        remoteCounts,
+        regressions: regressionCheck.regressions,
+        restorePoint: restoreRoot,
+      },
+    };
+  }
   applyMirrorToLocal(effectiveMirror.mirrorPath, mirrorManifest, restoreRoot);
   writeJsonAtomic(localManifestPath, mirrorManifest);
   persistMirrorSyncState(effectiveMirror.mirrorPath, {
@@ -925,10 +1364,142 @@ export const pullFromCloud = async () => {
     success: true,
     data: {
       manifest: mirrorManifest,
+      counts: getSyncEntityCounts(),
       frontendState: readJsonFile(frontendStatePath, { keys: {} }),
       restorePoint: restoreRoot,
     },
   };
+};
+
+export const pullCloudArtifact = async (payload = {}) => {
+  const artifactId = String(payload.artifactId || '').trim();
+  const artifactKind = normalizeArtifactKind(payload.artifactKind);
+  if (artifactKind !== 'current' && !artifactId) {
+    return { success: false, message: 'Falta indicar la copia que deseas descargar.' };
+  }
+
+  const response = await fetchCloudArtifact({ artifactId, artifactKind });
+  if (!response.success) return response;
+
+  const runtimeExtractRoot = path.join(runtimeFolder, 'artifact-download', `${artifactKind}-${artifactId || 'current'}-${Date.now()}`);
+  try {
+    const extracted = extractDatabaseDumpFromPackageBase64(response.data?.packageBase64, runtimeExtractRoot);
+    return {
+      success: true,
+      data: {
+        artifactId,
+        artifactKind,
+        manifest: response.data?.manifest || extracted.manifest || null,
+        counts: getSyncEntityCountsFromDump(extracted.dump),
+        packageBase64: response.data?.packageBase64 || '',
+      },
+    };
+  } catch (error) {
+    return { success: false, message: error?.message || 'No se pudo preparar la copia seleccionada.' };
+  }
+};
+
+export const applyCloudArtifact = async (payload = {}) => {
+  const artifactId = String(payload.artifactId || '').trim();
+  const artifactKind = normalizeArtifactKind(payload.artifactKind);
+  if (artifactKind !== 'current' && !artifactId) {
+    return { success: false, message: 'Falta indicar la copia que deseas cargar.' };
+  }
+
+  const response = await fetchCloudArtifact({ artifactId, artifactKind });
+  if (!response.success) return response;
+
+  const restoreRoot = createLocalRestorePoint();
+  const extractRoot = path.join(runtimeFolder, 'artifact-apply', `${artifactKind}-${artifactId || 'current'}-${Date.now()}`);
+
+  try {
+    const extractedManifest = extractSyncPackageToFolder(response.data?.packageBase64, extractRoot);
+    const remoteManifest = response.data?.manifest || extractedManifest;
+    if (!remoteManifest?.files) {
+      return { success: false, message: 'La copia seleccionada no contiene un manifiesto valido.' };
+    }
+    applyExtractedPackageToLocal(extractRoot, remoteManifest, restoreRoot);
+    writeJsonAtomic(localManifestPath, remoteManifest);
+    return {
+      success: true,
+      data: {
+        artifactId,
+        artifactKind,
+        manifest: remoteManifest,
+        counts: getSyncEntityCounts(),
+        frontendState: readJsonFile(frontendStatePath, { keys: {} }),
+        restorePoint: restoreRoot,
+      },
+    };
+  } catch (error) {
+    return { success: false, message: error?.message || 'No se pudo aplicar la copia seleccionada.' };
+  }
+};
+
+export const mergeAttendanceFromCloudArtifact = async (payload = {}) => {
+  const artifactId = String(payload.artifactId || '').trim();
+  const artifactKind = normalizeArtifactKind(payload.artifactKind);
+  if (artifactKind !== 'current' && !artifactId) {
+    return { success: false, message: 'Falta indicar la copia que deseas fusionar.' };
+  }
+
+  const response = await fetchCloudArtifact({ artifactId, artifactKind });
+  if (!response.success) return response;
+
+  const restoreRoot = createLocalRestorePoint();
+  const extractRoot = path.join(runtimeFolder, 'artifact-merge', `${artifactKind}-${artifactId || 'current'}-${Date.now()}`);
+
+  try {
+    const { manifest, dump } = extractDatabaseDumpFromPackageBase64(response.data?.packageBase64, extractRoot);
+    const mergeStats = mergeAttendanceTablesFromDump(dump);
+    return {
+      success: true,
+      data: {
+        artifactId,
+        artifactKind,
+        manifest: response.data?.manifest || manifest || null,
+        mergeStats,
+        counts: getSyncEntityCounts(),
+        restorePoint: restoreRoot,
+      },
+      message: 'La asistencia se fusiono correctamente con la copia seleccionada.',
+    };
+  } catch (error) {
+    return { success: false, message: error?.message || 'No se pudo fusionar la asistencia de la copia seleccionada.' };
+  }
+};
+
+export const mergeStudentsFromCloudArtifact = async (payload = {}) => {
+  const artifactId = String(payload.artifactId || '').trim();
+  const artifactKind = normalizeArtifactKind(payload.artifactKind);
+  if (artifactKind !== 'current' && !artifactId) {
+    return { success: false, message: 'Falta indicar la copia que deseas fusionar.' };
+  }
+
+  const response = await fetchCloudArtifact({ artifactId, artifactKind });
+  if (!response.success) return response;
+
+  const restoreRoot = createLocalRestorePoint();
+  const extractRoot = path.join(runtimeFolder, 'artifact-merge-students', `${artifactKind}-${artifactId || 'current'}-${Date.now()}`);
+
+  try {
+    const { manifest, dump } = extractDatabaseDumpFromPackageBase64(response.data?.packageBase64, extractRoot);
+    const mergeStats = mergeStudentsTablesFromDump(dump);
+    return {
+      success: true,
+      data: {
+        artifactId,
+        artifactKind,
+        manifest: response.data?.manifest || manifest || null,
+        mergeStats,
+        counts: getSyncEntityCounts(),
+        restorePoint: restoreRoot,
+      },
+      message: 'Los estudiantes se fusionaron correctamente con la copia seleccionada.',
+    };
+  } catch (error) {
+    return { success: false, message: error?.message || 'No se pudo fusionar la lista de estudiantes de la copia seleccionada.' };
+  }
 };
 
 export { saveFrontendStateSnapshot };

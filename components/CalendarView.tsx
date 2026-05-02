@@ -70,6 +70,19 @@ const MONTH_TEXT_COLORS = [
     'text-red-700'      // DIC
 ];
 
+const UNIT_FILL_COLORS = ['#ccfbf1', '#ffedd5', '#dbeafe', '#ffe4e6', '#ede9fe', '#ecfccb', '#fef9c3', '#e2e8f0'];
+const UNIT_TEXT_COLORS = ['#0f766e', '#f97316', '#1d4ed8', '#be123c', '#6d28d9', '#4d7c0f', '#ca8a04', '#334155'];
+const UNIT_MARK_COLORS = ['#0f766e', '#f97316', '#1d4ed8', '#be123c', '#6d28d9', '#4d7c0f', '#facc15', '#334155'];
+const toIsoOrEmpty = (value?: string) => {
+    const raw = String(value || '').trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
+};
+
+const isIsoWithinRange = (value: string, start: string, end: string) => {
+    if (!value || !start || !end) return false;
+    return value >= start && value <= end;
+};
+
 export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
   const [year, setYear] = useState<number>(new Date().getFullYear());
   const [calendarState, setCalendarState] = useState<CalendarDayState>({});
@@ -235,6 +248,41 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     return sections.size;
   }, [students]);
 
+  const unitDateRanges = useMemo(() => (
+    Array.from({ length: 8 }, (_, index) => {
+      const unitNumber = index + 1;
+      const start = toIsoOrEmpty(generalData[`u${unitNumber}_start` as keyof GeneralData] as string | undefined);
+      const end = toIsoOrEmpty(generalData[`u${unitNumber}_end` as keyof GeneralData] as string | undefined);
+      return {
+        unitNumber,
+        start,
+        end,
+        fill: UNIT_FILL_COLORS[index],
+        text: UNIT_TEXT_COLORS[index],
+      };
+    }).filter((item) => item.start && item.end)
+  ), [generalData]);
+
+  const getUnitFillStyle = (date: Date | null) => {
+    if (!date) return undefined;
+    const dayOfWeek = date.getDay();
+    if (dayOfWeek === 0 || dayOfWeek === 6) return undefined;
+    const iso = date.toISOString().split('T')[0];
+    const unitRange = unitDateRanges.find((item) => isIsoWithinRange(iso, item.start, item.end));
+    if (!unitRange) return undefined;
+    return { backgroundColor: unitRange.fill, color: unitRange.text } as React.CSSProperties;
+  };
+
+  const getUnitAccentColor = (date: Date | null) => {
+    if (!date) return '';
+    const dayOfWeek = date.getDay();
+    if (dayOfWeek === 0 || dayOfWeek === 6) return '';
+    const iso = date.toISOString().split('T')[0];
+    const unitRange = unitDateRanges.find((item) => isIsoWithinRange(iso, item.start, item.end));
+    if (!unitRange) return '';
+    return UNIT_MARK_COLORS[Math.max(0, unitRange.unitNumber - 1)] || '';
+  };
+
   const paintDay = (date: Date) => {
       const iso = date.toISOString().split('T')[0];
       const mmdd = iso.substring(5);
@@ -361,7 +409,13 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 <td rowSpan={2} className="bg-[#e2efda] border-r border-slate-400 text-center font-bold text-xs uppercase text-slate-800 px-2">{label}</td>
                 <td className="bg-[#fff2cc] border-r border-slate-300 text-center text-[10px] font-bold px-1 h-5">Fecha</td>
                 {dateCells.map((cell, i) => (
-                    <td key={`d-${i}`} className={`border-r border-slate-300 text-center text-[10px] h-5 ${i % 7 === 6 ? 'border-r-2 border-r-slate-500' : ''} ${!cell.date ? 'bg-black' : 'bg-white'}`}>{cell.date ? cell.date.getDate() : ''}</td>
+                    <td
+                        key={`d-${i}`}
+                        className={`border-r border-slate-300 text-center text-[10px] h-5 ${i % 7 === 6 ? 'border-r-2 border-r-slate-500' : ''} ${!cell.date ? 'bg-black' : 'bg-white'}`}
+                        style={!cell.date ? undefined : getUnitFillStyle(cell.date)}
+                    >
+                        {cell.date ? cell.date.getDate() : ''}
+                    </td>
                 ))}
                 {[...Array(42 - dateCells.length)].map((_, i) => <td key={`pad-d-${i}`} className="bg-black border-r border-slate-300"></td>)}
                 <td rowSpan={2} className="bg-[#e2f0d9] border-l-2 border-slate-500 text-center font-bold text-xs text-slate-800">{daysEffective}</td>
@@ -406,6 +460,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     const isWeekend = d.getDay() === 0 || d.getDay() === 6;
                     const mmdd = d.toISOString().split('T')[0].substring(5);
                     const isAutomatic = holidays.some(h => h.mmdd === mmdd);
+                    const unitAccentColor = getUnitAccentColor(d);
                     let bgClass = 'bg-white', textClass = 'text-slate-700', borderClass = '';
                     if (config) {
                         bgClass = config.color; textClass = config.text || 'text-slate-900';
@@ -416,9 +471,17 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                             onMouseDown={(e) => handleMouseDown(e, d)} 
                             onMouseEnter={() => handleMouseEnter(d)} 
                             onContextMenu={(e) => e.preventDefault()}
-                            className={`min-h-[2.5rem] flex flex-col items-center justify-center text-xs font-medium transition-colors relative ${bgClass} ${textClass} ${borderClass} ${(isWeekend || isAutomatic) ? 'cursor-not-allowed opacity-90' : 'cursor-pointer hover:brightness-95 hover:z-10'}`} 
+                            className={`min-h-[2.5rem] flex flex-col items-center justify-center text-xs font-medium transition-colors relative overflow-hidden ${bgClass} ${textClass} ${borderClass} ${(isWeekend || isAutomatic) ? 'cursor-not-allowed opacity-90' : 'cursor-pointer hover:brightness-95 hover:z-10'}`} 
                             title={isAutomatic ? holidays.find(h => h.mmdd === mmdd)?.name : (isWeekend ? 'Fines de semana bloqueados' : '')}
                         >
+                            {unitAccentColor ? (
+                                <span className="pointer-events-none absolute inset-px">
+                                    <span
+                                        className="absolute right-0 top-0 h-[6px] w-[6px]"
+                                        style={{ backgroundColor: unitAccentColor, clipPath: 'polygon(100% 0, 0 0, 100% 100%)' }}
+                                    />
+                                </span>
+                            ) : null}
                             <span>{d.getDate()}</span>
                             {status && <span className="text-[8px] font-extrabold opacity-75 leading-none mt-0.5">{status}</span>}
                         </div>
@@ -533,7 +596,16 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
   if (activeSection === 'calendarizacion_resumen') {
       const hoursPerDay = calculateHoursPerDay();
       return (
-        <div className="animate-fade-in bg-white p-6 rounded-[2rem] shadow-xl min-w-[1000px] overflow-x-auto border border-slate-200">
+        <div className="relative animate-fade-in bg-white p-6 rounded-[2rem] shadow-xl min-w-[1000px] overflow-x-auto border border-slate-200">
+            <div className="absolute right-6 top-6 z-10 print:hidden">
+                <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-white/95 px-1 py-1 text-sm font-black text-slate-700 shadow-lg backdrop-blur transition hover:bg-slate-50"
+                >
+                    <span>🖨️</span>
+                </button>
+            </div>
             <div className="flex items-center justify-between mb-6 border-b-4 border-black pb-4 px-2">
                 <div className="w-20 h-20 flex items-center justify-center overflow-hidden">
                     {generalData.insignia ? (
