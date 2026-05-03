@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { getDatosGenerales, getEstudiantes, updateModuleStatus } from '../services/apiService';
+import { getDatosGenerales, getEstudiantes, saveDatosGenerales, updateModuleStatus } from '../services/apiService';
 import { INITIAL_GENERAL_DATA } from '../constants';
 import { Input } from './Input';
 import { Select } from './Select';
@@ -12,7 +12,7 @@ interface Props {
 }
 
 // Types for Calendar
-type DayType = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G';
+type DayType = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'I';
 
 interface CalendarDayState {
   [dateIso: string]: DayType;
@@ -48,7 +48,8 @@ const LEGEND = [
   { code: 'D', label: 'Sábados o domingos', short: 'Descanso', color: 'bg-white', text: 'text-slate-900', border: 'border-slate-300', light: 'bg-slate-50' },
   { code: 'E', label: 'Vacaciones estudiantiles', short: 'Vacaciones', color: 'bg-[#b4c6e7]', text: 'text-purple-900', border: 'border-purple-400', light: 'bg-[#f3e5f5]' },
   { code: 'F', label: 'Feriados', short: 'Feriado', color: 'bg-[#ffc7ce]', text: 'text-red-900', border: 'border-red-500', light: 'bg-[#fff1f1]' },
-  { code: 'G', label: 'Clausura', short: 'Clausura', color: 'bg-[#fbbf24]', text: 'text-amber-950', border: 'border-amber-600', light: 'bg-[#fff9c4]' }, 
+  { code: 'G', label: 'Clausura', short: 'Clausura', color: 'bg-[#fbbf24]', text: 'text-amber-950', border: 'border-amber-600', light: 'bg-[#fff9c4]' },
+  { code: 'I', label: 'Informativas', short: 'Informativa', color: 'bg-[#dbeafe]', text: 'text-sky-900', border: 'border-sky-500', light: 'bg-[#eff6ff]' },
 ];
 
 const MONTH_ABBR = ['ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN', 'JUL', 'AGO', 'SET', 'OCT', 'NOV', 'DIC'];
@@ -83,6 +84,49 @@ const isIsoWithinRange = (value: string, start: string, end: string) => {
     return value >= start && value <= end;
 };
 
+const INSTITUTIONAL_DATE_TABLES: Array<Array<{ key: keyof GeneralData; label: string; matchTerms: string[] }>> = [
+    [
+        { key: 'ie_anniversary_date', label: 'ANIVERSARIO DE LA IE', matchTerms: ['aniversario de la ie', 'aniversario ie', 'aniversario de la institucion educativa', 'aniversario institucion educativa'] },
+        { key: 'achievement_day_1_date', label: 'DIA DEL LOGRO 1', matchTerms: ['dia del logro 1', 'día del logro 1', 'primer dia del logro', 'primer día del logro'] },
+    ],
+    [
+        { key: 'community_anniversary_date', label: 'ANIVERSARIO DE LA COMUNIDAD', matchTerms: ['aniversario de la comunidad', 'aniversario comunidad'] },
+        { key: 'achievement_day_2_date', label: 'DIA DEL LOGRO 2', matchTerms: ['dia del logro 2', 'día del logro 2', 'segundo dia del logro', 'segundo día del logro'] },
+    ],
+    [
+        { key: 'province_anniversary_date', label: 'ANIVERSARIO DE LA PROVINCIA', matchTerms: ['aniversario de la provincia', 'aniversario provincia'] },
+        { key: 'other_important_date', label: 'CONCURSO DEL AREA', matchTerms: ['otra fecha importante'] },
+    ],
+];
+
+const CONTEST_DEFINITIONS = [
+    { label: 'PREMIO JOSE MARIA ARGUEDAS', matchTerms: ['premio jose maria arguedas', 'jose maria arguedas'] },
+    { label: 'CREA Y EMPRENDE', matchTerms: ['crea y emprende'] },
+    { label: 'EUREKA', matchTerms: ['eureka', 'feria de ciencia y tecnologia', 'feria de ciencia y tecnología'] },
+    { label: 'ONEM', matchTerms: ['onem', 'olimpiada nacional escolar de matematica', 'olimpiada nacional escolar de matemática'] },
+    { label: 'EL PERU LEE', matchTerms: ['el peru lee', 'el perú lee'] },
+    { label: 'JUEGOS FLORALES ESCOLARES NACIONALES', matchTerms: ['juegos florales escolares nacionales', 'juegos florales'] },
+    { label: 'CONCURSO JOSE FAUSTINO SANCHEZ CARRION', matchTerms: ['jose faustino sanchez carrion', 'josé faustino sánchez carrión'] },
+    { label: 'IDEAS EN ACCION', matchTerms: ['ideas en accion', 'ideas en acción'] },
+    { label: 'JUEGOS DEPORTIVOS ESCOLARES NACIONALES', matchTerms: ['juegos deportivos escolares nacionales', 'juegos deportivos'] },
+];
+
+const formatCalendarInfoDate = (value?: string) => {
+    const raw = String(value || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return 'SIN FECHA';
+    const parsed = new Date(`${raw}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return 'SIN FECHA';
+    return parsed.toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+};
+
+const normalizeEventLabel = (value?: string) =>
+    String(value || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
 export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
   const [year, setYear] = useState<number>(new Date().getFullYear());
   const [calendarState, setCalendarState] = useState<CalendarDayState>({});
@@ -94,6 +138,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
   const [dragMode, setDragMode] = useState<'paint' | 'erase' | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'warning' | 'error' } | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
+  const [isSavingInstitutionalDates, setIsSavingInstitutionalDates] = useState(false);
   
   const [isAdding, setIsAdding] = useState(false);
   const [editingHolidayId, setEditingHolidayId] = useState<string | null>(null);
@@ -178,10 +223,28 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
       }
   }
 
+  const handleInstitutionalDateChange = async (key: keyof GeneralData, value: string) => {
+      const nextData = { ...generalData, [key]: value };
+      setGeneralData(nextData);
+      setIsSavingInstitutionalDates(true);
+      try {
+          const result = await saveDatosGenerales(nextData);
+          if (!result.success) {
+              showToast(result.message || 'No se pudo guardar la fecha informativa.', 'error');
+              return;
+          }
+          showToast('Fecha informativa guardada.', 'success');
+      } catch (error: any) {
+          showToast(error?.message || 'No se pudo guardar la fecha informativa.', 'error');
+      } finally {
+          setIsSavingInstitutionalDates(false);
+      }
+  };
+
   const getDayStatus = (date: Date): DayType | null => {
     const iso = date.toISOString().split('T')[0];
     const mmdd = iso.substring(5);
-    const recurrentEvent = holidays.find(h => h.mmdd === mmdd);
+    const recurrentEvent = holidays.find(h => h.mmdd === mmdd && h.type !== 'I');
     if (recurrentEvent) return recurrentEvent.type;
     const day = date.getDay();
     if (day === 0 || day === 6) return 'D';
@@ -196,7 +259,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
   };
 
   const globalStats = useMemo(() => {
-    const counts: Record<string, number> = { A:0, B:0, C:0, D:0, E:0, F:0, G:0 };
+    const counts: Record<string, number> = { A:0, B:0, C:0, D:0, E:0, F:0, G:0, I:0 };
     MONTHS_ORDER.forEach(monthIndex => {
         const y = monthIndex === 0 ? year + 1 : year;
         const daysInMonth = new Date(y, monthIndex + 1, 0).getDate();
@@ -208,6 +271,40 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     });
     return counts;
   }, [calendarState, holidays, year]);
+
+  const institutionalAutoDates = useMemo(() => {
+    const resolved: Partial<Record<keyof GeneralData, string>> = {};
+
+    INSTITUTIONAL_DATE_TABLES.flat().forEach((row) => {
+      const matchedHoliday = holidays.find((holiday) => {
+        const normalizedName = normalizeEventLabel(holiday.name);
+        return row.matchTerms.some((term) => normalizedName.includes(normalizeEventLabel(term)));
+      });
+
+      if (matchedHoliday?.date) {
+        resolved[row.key] = matchedHoliday.date;
+      }
+    });
+
+    return resolved;
+  }, [holidays]);
+
+  const detectedAreaContest = useMemo(() => {
+    const informativeHolidays = holidays.filter((holiday) => holiday.type === 'I');
+    for (const contest of CONTEST_DEFINITIONS) {
+      const matchedHoliday = informativeHolidays.find((holiday) => {
+        const normalizedName = normalizeEventLabel(holiday.name);
+        return contest.matchTerms.some((term) => normalizedName.includes(normalizeEventLabel(term)));
+      });
+      if (matchedHoliday) {
+        return {
+          label: contest.label,
+          date: matchedHoliday.date,
+        };
+      }
+    }
+    return null;
+  }, [holidays]);
 
   const clausuraDate = useMemo(() => {
     const holiday = holidays.find(h => h.type === 'G');
@@ -287,7 +384,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
       const iso = date.toISOString().split('T')[0];
       const mmdd = iso.substring(5);
       const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-      const isAutomatic = holidays.some(h => h.mmdd === mmdd);
+      const isAutomatic = holidays.some(h => h.mmdd === mmdd && h.type !== 'I');
       if (isWeekend || isAutomatic) return;
       if (calendarState[iso] === selectedTool) return;
       setCalendarState(prev => ({ ...prev, [iso]: selectedTool }));
@@ -298,7 +395,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
       const iso = date.toISOString().split('T')[0];
       const mmdd = iso.substring(5);
       const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-      const isAutomatic = holidays.some(h => h.mmdd === mmdd);
+      const isAutomatic = holidays.some(h => h.mmdd === mmdd && h.type !== 'I');
       if (isWeekend || isAutomatic) return;
       if (!calendarState[iso]) return;
       setCalendarState(prev => {
@@ -352,7 +449,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
       
       const newHolidays: Holiday[] = editingHolidayId 
         ? holidays.map(h => h.id === editingHolidayId ? { ...h, date: hDate, mmdd, name: hName, type: hType } : h)
-        : [...holidays.filter(h => h.mmdd !== mmdd), { id: Date.now().toString(), date: hDate, mmdd, name: hName, type: hType }].sort((a,b) => a.mmdd.localeCompare(b.mmdd));
+        : [...holidays, { id: Date.now().toString(), date: hDate, mmdd, name: hName, type: hType }].sort((a,b) => a.mmdd.localeCompare(b.mmdd));
       
       setHolidays(newHolidays);
       localStorage.setItem('armi_holidays_v7', JSON.stringify(newHolidays));
@@ -459,7 +556,9 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     const config = status ? LEGEND.find(l => l.code === status) : null;
                     const isWeekend = d.getDay() === 0 || d.getDay() === 6;
                     const mmdd = d.toISOString().split('T')[0].substring(5);
-                    const isAutomatic = holidays.some(h => h.mmdd === mmdd);
+                    const blockingHoliday = holidays.find(h => h.mmdd === mmdd && h.type !== 'I');
+                    const informativeHoliday = holidays.find(h => h.mmdd === mmdd && h.type === 'I');
+                    const isAutomatic = holidays.some(h => h.mmdd === mmdd && h.type !== 'I');
                     const unitAccentColor = getUnitAccentColor(d);
                     let bgClass = 'bg-white', textClass = 'text-slate-700', borderClass = '';
                     if (config) {
@@ -472,7 +571,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                             onMouseEnter={() => handleMouseEnter(d)} 
                             onContextMenu={(e) => e.preventDefault()}
                             className={`min-h-[2.5rem] flex flex-col items-center justify-center text-xs font-medium transition-colors relative overflow-hidden ${bgClass} ${textClass} ${borderClass} ${(isWeekend || isAutomatic) ? 'cursor-not-allowed opacity-90' : 'cursor-pointer hover:brightness-95 hover:z-10'}`} 
-                            title={isAutomatic ? holidays.find(h => h.mmdd === mmdd)?.name : (isWeekend ? 'Fines de semana bloqueados' : '')}
+                            title={blockingHoliday?.name || informativeHoliday?.name || (isWeekend ? 'Fines de semana bloqueados' : '')}
                         >
                             {unitAccentColor ? (
                                 <span className="pointer-events-none absolute inset-px">
@@ -594,9 +693,25 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
   }
 
   if (activeSection === 'calendarizacion_resumen') {
-      const hoursPerDay = calculateHoursPerDay();
-      return (
-        <div className="relative animate-fade-in bg-white p-6 rounded-[2rem] shadow-xl min-w-[1000px] overflow-x-auto border border-slate-200">
+  const hoursPerDay = calculateHoursPerDay();
+  return (
+        <div className="calendar-ie-print-sheet relative animate-fade-in bg-white p-6 rounded-[2rem] shadow-xl min-w-[1000px] overflow-x-auto border border-slate-200 print:min-w-0 print:overflow-visible print:border-0 print:shadow-none print:rounded-none print:p-0 print:space-y-0">
+            <style>{`
+                @media print {
+                    @page {
+                        size: landscape;
+                        margin: 6mm;
+                    }
+
+                    .calendar-ie-print-sheet {
+                        zoom: 0.82;
+                    }
+
+                    .calendar-ie-print-footer {
+                        display: flex;
+                    }
+                }
+            `}</style>
             <div className="absolute right-6 top-6 z-10 print:hidden">
                 <button
                     type="button"
@@ -606,7 +721,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     <span>🖨️</span>
                 </button>
             </div>
-            <div className="flex items-center justify-between mb-6 border-b-4 border-black pb-4 px-2">
+            <div className="flex items-center justify-between mb-6 border-b-4 border-black pb-4 px-2 print:mb-2 print:pb-2">
                 <div className="w-20 h-20 flex items-center justify-center overflow-hidden">
                     {generalData.insignia ? (
                         <img src={generalData.insignia} alt="Insignia" className="max-w-full max-h-full object-contain" />
@@ -625,24 +740,24 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     )}
                 </div>
             </div>
-            <div className="grid grid-cols-[auto_1fr_auto_auto] gap-0 border-2 border-black bg-[#548235] text-white text-xs font-bold mb-6 rounded-lg overflow-hidden">
+            <div className="grid grid-cols-[auto_1fr_auto_auto] gap-0 border-2 border-black bg-[#548235] text-white text-xs font-bold mb-6 rounded-lg overflow-hidden print:mb-2">
                 <div className="px-4 py-1.5 border-r border-white">UGEL: <span className="font-normal bg-[#548235] text-white px-2 py-0.5 ml-2 uppercase border border-white/40 rounded">{generalData.ugel || '...'}</span></div>
                 <div className="px-4 py-1.5 border-r border-white">INSTITUCIÓN EDUCATIVA: <span className="font-normal bg-[#548235] text-white px-2 py-0.5 ml-2 uppercase border border-white/40 rounded">{generalData.institution || '...'}</span></div>
                 <div className="px-4 py-1.5 border-r border-white">DISTRITO: <span className="font-normal bg-[#548235] text-white px-2 py-0.5 ml-2 uppercase border border-white/40 rounded">{generalData.district || '...'}</span></div>
                 <div className="px-4 py-1.5">AÑO: <span className="font-normal bg-[#548235] text-white px-2 py-0.5 ml-2 border border-white/40 rounded">{year}</span></div>
             </div>
-            <div className="flex gap-4 mb-6 items-start">
+            <div className="flex gap-4 mb-6 items-start print:mb-2">
                 {/* Columna 1: Nota + Resumen General */}
                 <div className="flex-1 flex flex-col gap-4">
-                    <div className="border border-slate-600 text-[10px] rounded-xl overflow-hidden shadow-sm">
-                        <div className="bg-[#a9d08e] font-bold px-3 py-1 border-b border-slate-600 italic">Nota:</div>
-                        <div className="grid grid-cols-[90px_1fr] border-b border-slate-400"><div className="bg-[#548235] text-white px-3 py-1 font-bold">Inicial</div><div className="bg-[#e2efda] px-3 py-1">900 horas efectivas.</div></div>
-                        <div className="grid grid-cols-[90px_1fr] border-b border-slate-400"><div className="bg-[#548235] text-white px-3 py-1 font-bold">Primaria</div><div className="bg-[#e2efda] px-3 py-1">1100 horas efectivas.</div></div>
-                        <div className="grid grid-cols-[90px_1fr]"><div className="bg-[#548235] text-white px-3 py-1 font-bold">Secundaria</div><div className="bg-[#e2efda] px-3 py-1">JER: 1200 / JEC: 1600 horas.</div></div>
+                    <div className="border border-slate-600 text-[9px] rounded-xl overflow-hidden shadow-sm">
+                        <div className="bg-[#a9d08e] font-bold px-3 py-0.5 border-b border-slate-600 italic leading-tight">Nota:</div>
+                        <div className="grid grid-cols-[90px_1fr] border-b border-slate-400"><div className="bg-[#548235] text-white px-3 py-0.5 font-bold leading-tight">Inicial</div><div className="bg-[#e2efda] px-3 py-0.5 leading-tight">900 horas efectivas.</div></div>
+                        <div className="grid grid-cols-[90px_1fr] border-b border-slate-400"><div className="bg-[#548235] text-white px-3 py-0.5 font-bold leading-tight">Primaria</div><div className="bg-[#e2efda] px-3 py-0.5 leading-tight">1100 horas efectivas.</div></div>
+                        <div className="grid grid-cols-[90px_1fr]"><div className="bg-[#548235] text-white px-3 py-0.5 font-bold leading-tight">Secundaria</div><div className="bg-[#e2efda] px-3 py-0.5 leading-tight">JER: 1200 / JEC: 1600 horas.</div></div>
                     </div>
 
                     <div className="rounded-xl overflow-hidden border border-black shadow-sm">
-                        <table className="w-full text-[10px] border-collapse h-full">
+                        <table className="w-full text-[9px] border-collapse h-full">
                             <tbody>
                                 <tr className="border-b border-slate-400">
                                     <td className="bg-[#548235] text-white px-2 py-1 font-bold uppercase text-[9px] border-r border-white/20">Número de secciones</td>
@@ -654,7 +769,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                 </tr>
                                 <tr className="h-full">
                                     <td className="bg-[#548235] text-white px-2 py-1 font-bold uppercase text-[9px] border-r border-white/20">Tipo de organización anual</td>
-                                    <td className="bg-slate-100 px-3 py-1 text-center font-black text-slate-800 uppercase">Bimestral</td>
+                                    <td className="bg-slate-100 px-3 py-0.5 text-center font-black text-slate-800 uppercase leading-tight">Bimestral</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -664,13 +779,13 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 {/* Columna 2: Leyenda "Tipos de día" */}
                 <div className="flex-1">
                      <div className="rounded-xl overflow-hidden border border-black shadow-sm h-full">
-                         <table className="w-full text-[10px] border-collapse">
+                         <table className="w-full text-[9px] border-collapse">
                             <thead><tr className="bg-[#548235] text-white"><th colSpan={3} className="py-1.5 font-black uppercase tracking-tight">LEYENDA "Tipos de día"</th></tr></thead>
                             <tbody>
-                                {LEGEND.map(l => (
+                                {LEGEND.filter(l => l.code !== 'I').map(l => (
                                     <tr key={l.code} className="border-t border-slate-400">
-                                        <td className={`w-8 text-center font-black border-r border-slate-400 ${l.color} ${l.text} py-1`}>{l.code}</td>
-                                        <td className="px-3 bg-[#e2efda] uppercase text-[9px] font-bold">{l.label}</td>
+                                        <td className={`w-8 text-center font-black border-r border-slate-400 ${l.color} ${l.text} py-0.5 leading-tight`}>{l.code}</td>
+                                        <td className="px-3 py-0.5 bg-[#e2efda] uppercase text-[8px] font-bold leading-tight">{l.label}</td>
                                         <td className="w-12 text-center font-black bg-[#e2efda] border-l border-slate-400">{globalStats[l.code] || 0}</td>
                                     </tr>
                                 ))}
@@ -682,45 +797,45 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 {/* Columna 3: Temporalización Bimestral */}
                 <div className="flex-1">
                     <div className="rounded-xl overflow-hidden border border-black shadow-sm h-full">
-                        <table className="w-full text-[10px] border-collapse">
+                        <table className="w-full text-[9px] border-collapse">
                             <thead>
                                 <tr className="bg-[#548235] text-white border-b border-slate-400">
                                     <th colSpan={3} className="py-1.5 font-black uppercase tracking-tight">TEMPORALIZACIÓN BIMESTRAL</th>
                                 </tr>
                                 <tr className="bg-black text-white divide-x divide-white border-b border-white">
-                                    <th className="py-1 uppercase text-[9px]">BIMESTRES</th>
-                                    <th className="py-1 uppercase text-[9px]">INICIO</th>
+                                    <th className="py-0.5 uppercase text-[8px] leading-tight">BIMESTRES</th>
+                                    <th className="py-0.5 uppercase text-[8px] leading-tight">INICIO</th>
                                     <th className="py-1 uppercase text-[9px]">TÉRMINO</th>
                                 </tr>
                             </thead>
                             <tbody className="text-center font-black bg-[#e2efda] uppercase divide-y divide-slate-400">
                                 <tr className="divide-x divide-slate-400">
-                                    <td className="py-1 px-1 text-left bg-emerald-50/50">I BIMESTRE</td>
+                                    <td className="py-0.5 px-1 text-left bg-emerald-50/50 leading-tight">I BIMESTRE</td>
                                     <td>{generalData.b1_start}</td>
                                     <td>{generalData.b1_end}</td>
                                 </tr>
                                 <tr className="divide-x divide-slate-400">
-                                    <td className="py-1 px-1 text-left bg-emerald-50/50">II BIMESTRE</td>
+                                    <td className="py-0.5 px-1 text-left bg-emerald-50/50 leading-tight">II BIMESTRE</td>
                                     <td>{generalData.b2_start}</td>
                                     <td>{generalData.b2_end}</td>
                                 </tr>
                                 <tr className="divide-x divide-slate-400 bg-[#fff2cc] text-amber-900 font-black">
-                                    <td className="py-1 px-1 text-left">VACACIONES</td>
+                                    <td className="py-0.5 px-1 text-left leading-tight">VACACIONES</td>
                                     <td>{generalData.vac_start}</td>
                                     <td>{generalData.vac_end}</td>
                                 </tr>
                                 <tr className="divide-x divide-slate-400">
-                                    <td className="py-1 px-1 text-left bg-emerald-50/50">III BIMESTRE</td>
+                                    <td className="py-0.5 px-1 text-left bg-emerald-50/50 leading-tight">III BIMESTRE</td>
                                     <td>{generalData.b3_start}</td>
                                     <td>{generalData.b3_end}</td>
                                 </tr>
                                 <tr className="divide-x divide-slate-400">
-                                    <td className="py-1 px-1 text-left bg-emerald-50/50">IV BIMESTRE</td>
+                                    <td className="py-0.5 px-1 text-left bg-emerald-50/50 leading-tight">IV BIMESTRE</td>
                                     <td>{generalData.b4_start}</td>
                                     <td>{generalData.b4_end}</td>
                                 </tr>
                                 <tr className="divide-x divide-slate-400 bg-[#edf6e8]">
-                                    <td className="py-1 px-1 text-left font-black text-slate-800">CLAUSURA</td>
+                                    <td className="py-0.5 px-1 text-left font-black text-slate-800 leading-tight">CLAUSURA</td>
                                     <td colSpan={2} className="text-center text-slate-900">{clausuraDate}</td>
                                 </tr>
                             </tbody>
@@ -759,6 +874,61 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                         </tbody>
                     </table>
                 </div>
+            </div>
+            <div className="mt-5 grid grid-cols-3 gap-3 print:mt-2 print:gap-2">
+                {INSTITUTIONAL_DATE_TABLES.map((tableRows, tableIndex) => (
+                    <div key={tableIndex} className="rounded-xl overflow-hidden border border-black shadow-sm bg-white">
+                        <table className="w-full border-collapse text-[9px]">
+                            <tbody>
+                                {tableRows.map((row, rowIndex) => {
+                                    const autoDate = row.key === 'other_important_date'
+                                        ? (detectedAreaContest?.date || institutionalAutoDates[row.key])
+                                        : institutionalAutoDates[row.key];
+                                    const manualDate = String(generalData[row.key] || '');
+                                    const effectiveDate = autoDate || manualDate;
+                                    const effectiveLabel = row.key === 'other_important_date'
+                                        ? (detectedAreaContest?.label || row.label)
+                                        : row.label;
+                                    return (
+                                    <tr key={row.key} className={rowIndex === 0 ? '' : 'border-t border-slate-400'}>
+                                        <td className="w-[69%] bg-[#548235] px-2 py-[3px] text-[8px] font-black uppercase tracking-[0.08em] text-white border-r border-white/20 leading-tight">
+                                            {effectiveLabel}
+                                        </td>
+                                        <td className="bg-[#e2efda] px-1 py-[2px] uppercase">
+                                            <div className="print:hidden">
+                                                {autoDate ? (
+                                                    <div className="flex min-h-[18px] items-center justify-between gap-1 rounded-md border border-[#548235]/15 bg-white px-1.5 py-[1px] text-[8px] font-black text-slate-800">
+                                                        <span>{formatCalendarInfoDate(effectiveDate)}</span>
+                                                        <span className="rounded bg-[#548235]/10 px-1 py-0.5 text-[7px] tracking-[0.08em] text-[#548235]">AUTO</span>
+                                                    </div>
+                                                ) : (
+                                                    <input
+                                                        type="date"
+                                                        value={manualDate}
+                                                        onChange={(e) => void handleInstitutionalDateChange(row.key, e.target.value)}
+                                                        className="h-5 w-full rounded-md border border-[#548235]/20 bg-white px-1 py-0 text-[8px] font-black uppercase text-slate-800 outline-none transition focus:border-[#548235] focus:ring-2 focus:ring-[#548235]/20"
+                                                    />
+                                                )}
+                                            </div>
+                                            <div className="hidden min-h-[16px] items-center justify-center text-center text-[8px] font-black text-slate-800 print:flex">
+                                                {formatCalendarInfoDate(effectiveDate)}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                )})}
+                            </tbody>
+                        </table>
+                    </div>
+                ))}
+            </div>
+            {isSavingInstitutionalDates ? (
+                <div className="mt-2 text-right text-[9px] font-black uppercase tracking-[0.14em] text-[#548235] print:hidden">
+                    Guardando fechas informativas...
+                </div>
+            ) : null}
+            <div className="calendar-ie-print-footer mt-4 hidden items-center justify-between px-1 text-[11px] italic text-slate-500/80 print:mt-2">
+                <span>Área: Institucional</span>
+                <span>Docente: {generalData.teacher || 'Docente'}</span>
             </div>
         </div>
       );
@@ -821,7 +991,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                    {LEGEND.filter(l => l.code !== 'D').map((item) => (
+                    {LEGEND.filter(l => l.code !== 'D' && l.code !== 'I').map((item) => (
                         <button key={item.code} onClick={() => setSelectedTool(item.code as DayType)} className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-[11px] font-black uppercase tracking-tighter transition-all ${selectedTool === item.code ? 'ring-2 ring-offset-1 ring-blue-500 shadow-md transform scale-105' : 'hover:bg-slate-50 opacity-80'} ${item.color} ${item.text} ${item.border}`}>
                             <span className="w-5 h-5 flex items-center justify-center bg-white/50 rounded-full">{item.code}</span>
                             {item.label}
@@ -839,7 +1009,7 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             
             <div className="bg-slate-800 text-slate-300 p-6 rounded-[2rem] mt-6 text-[10px] flex flex-wrap justify-center gap-8 border border-slate-700 shadow-lg">
                 <span className="font-black text-white uppercase tracking-[0.25em] border-r border-white/10 pr-6">Leyenda Oficial:</span>
-                {LEGEND.map(l => (
+                {LEGEND.filter(l => l.code !== 'I').map(l => (
                     <div key={l.code} className="flex items-center gap-2 group cursor-help">
                         <span className={`w-5 h-5 flex items-center justify-center text-[9px] font-black text-slate-900 rounded-lg shadow-inner group-hover:scale-110 transition-transform ${l.color}`}>{l.code}</span>
                         <span className="font-bold text-slate-400 group-hover:text-white transition-colors uppercase tracking-tighter">{l.label}</span>

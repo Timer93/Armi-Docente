@@ -1,7 +1,7 @@
 {
   "name": "armi-docente-web",
   "private": true,
-  "version": "11.0.7",
+  "version": "11.0.8",
   "description": "ARMI Docente",
   "author": "ARMI",
   "type": "module",
@@ -16,7 +16,8 @@
     "preview": "vite preview",
     "electron": "electron .",
     "dist:win": "node scripts/build-installer.mjs",
-    "release:github": "node scripts/publish-github-release.mjs"
+    "release:github": "node scripts/publish-github-release.mjs",
+    "push:github": "node scripts/push-github.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.35.0",

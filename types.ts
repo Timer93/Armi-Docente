@@ -62,6 +62,14 @@ export interface GeneralData {
   u3_end?: string; u4_end?: string;
   u5_end?: string; u6_end?: string;
   u7_end?: string; u8_end?: string;
+
+  // Calendarización - Fechas institucionales
+  ie_anniversary_date?: string;
+  achievement_day_1_date?: string;
+  community_anniversary_date?: string;
+  achievement_day_2_date?: string;
+  province_anniversary_date?: string;
+  other_important_date?: string;
 }
 
 export interface MetaData {

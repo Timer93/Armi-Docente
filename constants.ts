@@ -51,6 +51,13 @@ export const INITIAL_GENERAL_DATA: GeneralData = {
   u7_start: '', u7_end: '',
   u8_start: '', u8_end: '',
   u_vac_start: '', u_vac_end: '',
+
+  ie_anniversary_date: '',
+  achievement_day_1_date: '',
+  community_anniversary_date: '',
+  achievement_day_2_date: '',
+  province_anniversary_date: '',
+  other_important_date: '',
 };
 
 export const INITIAL_MODULE_STATUS: ModuleStatus = {

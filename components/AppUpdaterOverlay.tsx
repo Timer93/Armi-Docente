@@ -62,12 +62,6 @@ export const AppUpdaterOverlay: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (snapshot.status === 'error' || snapshot.available || ['downloading', 'installing', 'downloaded'].includes(snapshot.status)) {
-      setExpanded(true);
-    }
-  }, [snapshot.available, snapshot.status]);
-
-  useEffect(() => {
     if (['checking', 'downloading', 'installing'].includes(snapshot.status)) {
       setDismissed(false);
     }
@@ -79,6 +73,7 @@ export const AppUpdaterOverlay: React.FC = () => {
   const canDismissModal = isError || isDownloadedModal;
   const isVisible = !dismissed && (isBlocking || isError || isDownloadedModal);
   const progress = Math.max(0, Math.min(100, Number(snapshot.progress?.percent || 0)));
+  const hasAttention = snapshot.available || isError || Boolean(snapshot.downloadReady);
 
   const closeModal = () => {
     if (!canDismissModal) return;
@@ -144,13 +139,18 @@ export const AppUpdaterOverlay: React.FC = () => {
           <button
             type="button"
             onClick={() => setExpanded(true)}
-            className="flex items-center gap-3 rounded-full border border-slate-200 bg-white/95 px-4 py-3 text-sm font-bold text-slate-800 shadow-[0_16px_40px_rgba(15,23,42,0.16)] backdrop-blur transition hover:-translate-y-0.5"
+            title={`Actualizaciones${snapshot.currentVersion ? ` - ${snapshot.currentVersion}` : ''}`}
+            className={`relative flex h-9 w-9 items-center justify-center rounded-full border bg-white/95 text-slate-800 shadow-[0_16px_40px_rgba(15,23,42,0.16)] backdrop-blur transition hover:-translate-y-0.5 hover:border-slate-300 ${hasAttention ? 'border-sky-300' : 'border-slate-200'}`}
           >
-            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-900 text-white">UP</span>
-            <span className="text-left leading-tight">
-              <span className="block text-[11px] uppercase tracking-[0.18em] text-slate-400">Version</span>
-              <span>{snapshot.currentVersion || 'web'}</span>
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-900 text-white">
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <path d="M21 3v6h-6" />
+              </svg>
             </span>
+            {hasAttention ? (
+              <span className="absolute right-0.5 top-0.5 h-3 w-3 rounded-full border border-white bg-sky-500" />
+            ) : null}
           </button>
         )}
       </div>
