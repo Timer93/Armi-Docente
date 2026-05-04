@@ -484,10 +484,12 @@ export const pushCloudSync = async (): Promise<ApiResponse<any>> => {
     }
 };
 
-export const pullCloudSync = async (): Promise<ApiResponse<any>> => {
+export const pullCloudSync = async (data?: { force?: boolean }): Promise<ApiResponse<any>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/sync/pull`, {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data || {}),
         }, 120000);
         return await readJsonResponse(res);
     } catch (e: any) {

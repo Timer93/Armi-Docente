@@ -1,7 +1,7 @@
 {
   "name": "armi-docente-web",
   "private": true,
-  "version": "11.0.8",
+  "version": "11.1.1",
   "description": "ARMI Docente",
   "author": "ARMI",
   "type": "module",
@@ -10,6 +10,7 @@
     "dev:backend": "node backend/server.js",
     "dev:frontend": "vite",
     "dev": "node scripts/dev.mjs",
+    "prepare:win-icon": "node scripts/prepare-windows-icon.mjs",
     "rebuild:native:node": "node scripts/rebuild-better-sqlite3.mjs node",
     "rebuild:native:electron": "node scripts/rebuild-better-sqlite3.mjs electron",
     "build": "vite build",
@@ -55,6 +56,7 @@
     "concurrently": "^9.2.1",
     "electron": "^37.2.3",
     "electron-builder": "^26.0.12",
+    "png-to-ico": "^3.0.1",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.1",
     "typescript": "~5.8.2",
@@ -64,7 +66,7 @@
     "appId": "com.armi.docente",
     "productName": "ARMI Docente",
     "executableName": "ARMI Docente",
-    "icon": "src/Logo_bar.ico",
+    "icon": "build/icon.ico",
     "artifactName": "ARMI_DOCENTE_Setup.${ext}",
     "asar": true,
     "asarUnpack": [
@@ -105,12 +107,16 @@
         "to": "electron/release-config.json"
       },
       {
-        "from": "src/Logo_bar.ico",
+        "from": "build/icon.ico",
+        "to": "app-icon.ico"
+      },
+      {
+        "from": "build/icon.ico",
         "to": "icon.ico"
       }
     ],
     "win": {
-      "signAndEditExecutable": false,
+      "signAndEditExecutable": true,
       "target": [
         {
           "target": "nsis",
@@ -119,19 +125,20 @@
           ]
         }
       ],
-      "icon": "src/Logo_bar.ico"
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
       "perMachine": true,
+      "include": "build/installer.nsh",
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "ARMI Docente",
-      "installerIcon": "src/Logo_bar.ico",
-      "uninstallerIcon": "src/Logo_bar.ico",
-      "installerHeaderIcon": "src/Logo_bar.ico",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
       "runAfterFinish": true
     }
   }

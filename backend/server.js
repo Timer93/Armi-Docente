@@ -1875,7 +1875,7 @@ app.post('/api/sync/push', async (req, res) => {
 });
 app.post('/api/sync/pull', async (req, res) => {
   try {
-    res.json(await pullFromCloud());
+    res.json(await pullFromCloud(req.body || {}));
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }

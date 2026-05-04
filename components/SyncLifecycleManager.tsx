@@ -34,6 +34,8 @@ const canAutoRestoreFromCloud = (status: CloudSyncStatusData) => {
   return !status.localManifest;
 };
 
+const SKIP_NEXT_LOCAL_PUSH_FLAG = 'armi-sync-skip-next-local-push';
+
 const reloadApplicationView = () => {
   window.setTimeout(() => {
     window.location.reload();
@@ -112,7 +114,7 @@ export const SyncLifecycleManager: React.FC = () => {
     }
   };
 
-  const restoreFromCloud = async (statusSnapshot?: CloudSyncStatusData, options?: { startup?: boolean }) => {
+  const restoreFromCloud = async (statusSnapshot?: CloudSyncStatusData, options?: { startup?: boolean; force?: boolean }) => {
     const isStartupRestore = options?.startup === true;
     if (isStartupRestore) {
       setStartupGateOpen(true);
@@ -128,7 +130,7 @@ export const SyncLifecycleManager: React.FC = () => {
     }
 
     await saveCloudFrontendState(collectArmiLocalState());
-    const response = await pullCloudSync();
+    const response = await pullCloudSync({ force: options?.force === true });
     if (!response.success) {
       if (isStartupRestore) {
         setStartupFlow('error');
@@ -164,6 +166,9 @@ export const SyncLifecycleManager: React.FC = () => {
       message: 'La informacion mas reciente del usuario ya esta lista en esta PC.',
       tone: 'success',
     });
+    if (isStartupRestore) {
+      window.sessionStorage.setItem(SKIP_NEXT_LOCAL_PUSH_FLAG, '1');
+    }
     reloadApplicationView();
     return true;
   };
@@ -261,6 +266,18 @@ export const SyncLifecycleManager: React.FC = () => {
       }
 
       if (freshStatus.comparison === 'local-newer') {
+        if (window.sessionStorage.getItem(SKIP_NEXT_LOCAL_PUSH_FLAG) === '1') {
+          window.sessionStorage.removeItem(SKIP_NEXT_LOCAL_PUSH_FLAG);
+          setStartupGateOpen(false);
+          setStartupFlow('idle');
+          setCloseError(null);
+          setNotice({
+            title: 'Copia de Drive lista',
+            message: 'Acabamos de cargar Drive en esta misma apertura, asi que no volveremos a subir una copia local inmediatamente.',
+            tone: 'info',
+          });
+          return;
+        }
         await pushLocalSnapshotToDrive();
         return;
       }
@@ -477,7 +494,7 @@ export const SyncLifecycleManager: React.FC = () => {
                 type="button"
                 onClick={async () => {
                   setShowRestorePrompt(false);
-                  await restoreFromCloud(status || undefined, { startup: true });
+                  await restoreFromCloud(status || undefined, { startup: true, force: true });
                 }}
                   className="rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-800"
               >

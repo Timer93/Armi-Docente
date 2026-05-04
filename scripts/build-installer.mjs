@@ -13,6 +13,7 @@ const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 const requiresSymlinkPrivilege = process.platform === 'win32' && packageJson?.build?.win?.signAndEditExecutable === true;
 
 const stages = [
+  { label: 'Preparando icono Windows', command: npmCmd, args: ['run', 'prepare:win-icon'] },
   { label: 'Reconstruyendo dependencias nativas para Electron', command: npxCmd, args: ['electron-builder', 'install-app-deps'] },
   {
     label: 'Recompilando better-sqlite3 para Electron',

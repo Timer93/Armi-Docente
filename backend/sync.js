@@ -1252,7 +1252,8 @@ export const pushToCloud = async () => {
   };
 };
 
-export const pullFromCloud = async () => {
+export const pullFromCloud = async (payload = {}) => {
+  const force = payload?.force === true;
   const config = readConfig();
   const effectiveMirror = resolveEffectiveMirrorPath(config);
   if (config.mode === 'apps_script_drive') {
@@ -1278,7 +1279,7 @@ export const pullFromCloud = async () => {
     const remoteDump = readJsonFile(getExtractedFilePath(extractRoot, 'database/database-dump.json'), null);
     const remoteCounts = getSyncEntityCountsFromDump(remoteDump);
     const regressionCheck = detectDestructiveCountRegression(localCountsBeforePull, remoteCounts);
-    if (regressionCheck.blocked) {
+    if (regressionCheck.blocked && !force) {
       return {
         success: false,
         message: 'La copia de Drive tiene menos registros que tu copia local en Programaciones, Unidades, Sesiones o Asistencia. Se bloqueo la descarga para proteger tu trabajo.',
@@ -1338,7 +1339,7 @@ export const pullFromCloud = async () => {
   const mirrorDump = readJsonFile(getMirrorFilePath(effectiveMirror.mirrorPath, 'database/database-dump.json'), null);
   const remoteCounts = getSyncEntityCountsFromDump(mirrorDump);
   const regressionCheck = detectDestructiveCountRegression(localCountsBeforePull, remoteCounts);
-  if (regressionCheck.blocked) {
+  if (regressionCheck.blocked && !force) {
     return {
       success: false,
       message: 'La copia de Drive tiene menos registros que tu copia local en Programaciones, Unidades, Sesiones o Asistencia. Se bloqueo la descarga para proteger tu trabajo.',

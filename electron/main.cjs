@@ -20,6 +20,7 @@ const getAppIconPath = () => {
         path.join(appRoot, 'icon.ico'),
       ]
     : [
+        path.join(process.resourcesPath, 'app-icon.ico'),
         path.join(process.resourcesPath, 'icon.ico'),
         path.join(process.resourcesPath, 'app.asar.unpacked', 'src', 'Logo_bar.ico'),
       ];
@@ -76,6 +77,10 @@ const createMainWindow = async () => {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
+
+  if (appIconPath && typeof mainWindow.setIcon === 'function') {
+    mainWindow.setIcon(appIconPath);
+  }
 
   mainWindowRef = mainWindow;
   allowWindowClose = false;
