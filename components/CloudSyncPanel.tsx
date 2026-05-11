@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   applyCloudArtifact,
   CloudSyncStatusData,
+  clearCloudVersionHistory,
   getCloudSyncStatus,
   mergeAttendanceFromCloudArtifact,
   mergeStudentsFromCloudArtifact,
@@ -67,6 +68,7 @@ export const CloudSyncPanel: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
   const [artifactActionKey, setArtifactActionKey] = useState('');
+  const [clearingHistory, setClearingHistory] = useState(false);
   const [configMode, setConfigMode] = useState<'local' | 'drive_mirror' | 'apps_script_drive'>('local');
   const [autoSyncOnClose, setAutoSyncOnClose] = useState(true);
   const [syncUserKey, setSyncUserKey] = useState('default-user');
@@ -328,6 +330,25 @@ export const CloudSyncPanel: React.FC = () => {
     setToast({ type: 'success', text: 'Copia subida correctamente a Drive.' });
     setModalMessage('La copia de Drive quedo actualizada correctamente.');
     setActiveAction(null);
+    await refreshStatus();
+    emitCloudSyncUpdated();
+  };
+
+  const clearVersionHistory = async () => {
+    setClearingHistory(true);
+    setErrorMessage(null);
+    const response = await clearCloudVersionHistory();
+    if (!response.success) {
+      const nextError = response.message || 'No se pudo limpiar el historial de versiones.';
+      setErrorMessage(nextError);
+      setToast({ type: 'error', text: nextError });
+      setClearingHistory(false);
+      await refreshStatus();
+      return;
+    }
+
+    setToast({ type: 'success', text: response.message || 'Historial de versiones archivado correctamente.' });
+    setClearingHistory(false);
     await refreshStatus();
     emitCloudSyncUpdated();
   };
@@ -653,7 +674,17 @@ export const CloudSyncPanel: React.FC = () => {
 
               {isDriveMode && versionsSummary?.items?.length ? (
                 <div className="rounded-2xl bg-slate-50 px-3 py-3 text-xs text-slate-600">
-                  <p className="font-black uppercase tracking-[0.14em] text-slate-400">Historial de versiones</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-black uppercase tracking-[0.14em] text-slate-400">Historial de versiones</p>
+                    <button
+                      type="button"
+                      onClick={clearVersionHistory}
+                      disabled={clearingHistory || activeAction !== null || artifactActionKey !== ''}
+                      className="rounded-xl border border-slate-300 bg-white px-3 py-2 font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
+                    >
+                      {clearingHistory ? 'Limpiando...' : 'Limpiar'}
+                    </button>
+                  </div>
                   <div className="mt-2 space-y-2">
                     {versionsSummary.items.map((item) => {
                       const inspectKey = `inspect:version:${item.id}`;

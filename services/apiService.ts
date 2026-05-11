@@ -549,6 +549,17 @@ export const mergeStudentsFromCloudArtifact = async (data: { artifactId?: string
     }
 };
 
+export const clearCloudVersionHistory = async (): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/history/clear`, {
+            method: 'POST',
+        }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
 export const getModuleStatus = async (): Promise<ModuleStatus> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/estado-modulos`);

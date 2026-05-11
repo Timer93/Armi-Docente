@@ -124,6 +124,12 @@ function handleRequest_(e, method) {
         return SyncPull_(params);
       case 'sync_pull_artifact':
         return SyncPullArtifact_(params);
+      case 'sync_resolve_conflict':
+      case 'sync_mark_conflict_resolved':
+        return SyncResolveConflict_(params);
+      case 'sync_clear_versions':
+      case 'sync_archive_versions':
+        return SyncClearVersions_(params);
       case 'resolveauthurl':
       case 'resolve_auth_url':
       case 'resolver':
@@ -452,6 +458,71 @@ function SyncPullArtifact_(params) {
         artifactKind: artifactKind,
         manifest: manifest,
         packageBase64: Utilities.base64Encode(file.getBlob().getBytes())
+      }
+    });
+  } catch (error) {
+    return jsonResponse_({ success: false, message: error.message });
+  }
+}
+
+function SyncResolveConflict_(params) {
+  try {
+    var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
+    var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
+    var conflictId = normalizeText_(params.conflictId || params.artifactId || params.id);
+    if (!conflictId) {
+      return jsonResponse_({ success: false, message: 'Falta indicar el conflicto que deseas marcar como solucionado.' });
+    }
+
+    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
+    var resolvedFolder = folderInfo.resolvedConflictsFolder;
+    var zipName = conflictId + '.zip';
+    var manifestName = conflictId + '-manifest.json';
+    var zipFile = getFirstFileByName_(folderInfo.conflictsFolder, zipName);
+    var manifestFile = getFirstFileByName_(folderInfo.conflictsFolder, manifestName);
+
+    if (!zipFile && !manifestFile) {
+      return jsonResponse_({ success: false, message: 'No encontre ese conflicto pendiente en Drive.' });
+    }
+
+    if (zipFile) zipFile.moveTo(resolvedFolder);
+    if (manifestFile) {
+      var manifest = readJsonFileFromFile_(manifestFile) || {};
+      manifest.resolved = true;
+      manifest.resolvedAt = new Date().toISOString();
+      manifest.resolvedBy = userKey;
+      manifestFile.setTrashed(true);
+      createOrReplaceJsonFile_(resolvedFolder, manifestName, manifest);
+    }
+
+    return jsonResponse_({
+      success: true,
+      message: 'Conflicto marcado como solucionado.',
+      data: {
+        conflictId: conflictId,
+        user: publicSyncFolderInfo_(folderInfo)
+      }
+    });
+  } catch (error) {
+    return jsonResponse_({ success: false, message: error.message });
+  }
+}
+
+function SyncClearVersions_(params) {
+  try {
+    var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
+    var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
+    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
+    var moved = moveFolderContents_(folderInfo.versionsFolder, folderInfo.archivedVersionsFolder);
+
+    return jsonResponse_({
+      success: true,
+      message: moved > 0
+        ? 'Historial de versiones archivado correctamente.'
+        : 'No habia versiones en el historial para archivar.',
+      data: {
+        archivedCount: moved,
+        user: publicSyncFolderInfo_(folderInfo)
       }
     });
   } catch (error) {
@@ -863,6 +934,8 @@ function ensureSyncUserFolder_(userKey, userLabel) {
   var currentFolder = getOrCreateFolder_(userFolder, 'current');
   var versionsFolder = getOrCreateFolder_(userFolder, 'versions');
   var conflictsFolder = getOrCreateFolder_(userFolder, 'conflicts');
+  var resolvedConflictsFolder = getOrCreateFolder_(userFolder, 'resolved-conflicts');
+  var archivedVersionsFolder = getOrCreateFolder_(userFolder, 'archived-versions');
 
   return {
     syncUserKey: sanitizeSyncUserKey_(userKey),
@@ -873,9 +946,13 @@ function ensureSyncUserFolder_(userKey, userLabel) {
     currentFolder: currentFolder,
     versionsFolder: versionsFolder,
     conflictsFolder: conflictsFolder,
+    resolvedConflictsFolder: resolvedConflictsFolder,
+    archivedVersionsFolder: archivedVersionsFolder,
     currentFolderId: currentFolder.getId(),
     versionsFolderId: versionsFolder.getId(),
-    conflictsFolderId: conflictsFolder.getId()
+    conflictsFolderId: conflictsFolder.getId(),
+    resolvedConflictsFolderId: resolvedConflictsFolder.getId(),
+    archivedVersionsFolderId: archivedVersionsFolder.getId()
   };
 }
 
@@ -892,7 +969,11 @@ function publicSyncFolderInfo_(folderInfo) {
     versionsFolderId: folderInfo.versionsFolderId,
     versionsFolderUrl: buildDriveFolderUrl_(folderInfo.versionsFolderId),
     conflictsFolderId: folderInfo.conflictsFolderId,
-    conflictsFolderUrl: buildDriveFolderUrl_(folderInfo.conflictsFolderId)
+    conflictsFolderUrl: buildDriveFolderUrl_(folderInfo.conflictsFolderId),
+    resolvedConflictsFolderId: folderInfo.resolvedConflictsFolderId,
+    resolvedConflictsFolderUrl: buildDriveFolderUrl_(folderInfo.resolvedConflictsFolderId),
+    archivedVersionsFolderId: folderInfo.archivedVersionsFolderId,
+    archivedVersionsFolderUrl: buildDriveFolderUrl_(folderInfo.archivedVersionsFolderId)
   };
 }
 
@@ -932,6 +1013,20 @@ function createOrReplaceBase64File_(folder, name, base64, mimeType) {
 function readJsonFileFromFolder_(folder, name) {
   var file = getFirstFileByName_(folder, name);
   if (!file) return null;
+  return readJsonFileFromFile_(file);
+}
+
+function moveFolderContents_(sourceFolder, targetFolder) {
+  var moved = 0;
+  var files = sourceFolder.getFiles();
+  while (files.hasNext()) {
+    files.next().moveTo(targetFolder);
+    moved += 1;
+  }
+  return moved;
+}
+
+function readJsonFileFromFile_(file) {
   try {
     return JSON.parse(file.getBlob().getDataAsString());
   } catch (error) {

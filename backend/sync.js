@@ -685,6 +685,29 @@ const fetchCloudArtifact = async ({ artifactId = '', artifactKind = 'version' } 
   return { success: true, data: response.data || null };
 };
 
+export const clearCloudVersionHistory = async () => {
+  const config = readConfig();
+  if (config.mode !== 'apps_script_drive') {
+    return { success: false, message: 'Esta funcion solo esta disponible cuando la sincronizacion por Drive esta activada.' };
+  }
+
+  const response = await postAppsScript({
+    action: 'sync_clear_versions',
+    syncUserKey: sanitizeUserScope(config.syncUserKey),
+    syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+  }, 120000);
+
+  if (!response.success) {
+    return { success: false, message: response.message || 'No se pudo limpiar el historial de versiones.' };
+  }
+
+  return {
+    success: true,
+    message: response.message || 'Historial de versiones archivado correctamente.',
+    data: response.data || null,
+  };
+};
+
 const mergeAttendanceTablesFromDump = (dump) => {
   const attendanceRows = Array.isArray(dump?.tables?.asistencia_registros) ? dump.tables.asistencia_registros : [];
   const faceRows = Array.isArray(dump?.tables?.asistencia_rostros) ? dump.tables.asistencia_rostros : [];
