@@ -9,6 +9,7 @@ import {
   pullCloudSync,
   pullCloudArtifact,
   pushCloudSync,
+  resolveCloudConflict,
   saveCloudFrontendState,
   saveCloudSyncConfig,
 } from '../services/apiService';
@@ -353,6 +354,26 @@ export const CloudSyncPanel: React.FC = () => {
     emitCloudSyncUpdated();
   };
 
+  const markConflictResolved = async (artifactId: string) => {
+    const key = `resolve:conflict:${artifactId}`;
+    setArtifactActionKey(key);
+    setErrorMessage(null);
+    const response = await resolveCloudConflict({ artifactId });
+    if (!response.success) {
+      const nextError = response.message || 'No se pudo marcar el conflicto como resuelto.';
+      setErrorMessage(nextError);
+      setToast({ type: 'error', text: nextError });
+      setArtifactActionKey('');
+      await refreshStatus();
+      return;
+    }
+
+    setToast({ type: 'success', text: response.message || 'Conflicto archivado correctamente.' });
+    setArtifactActionKey('');
+    await refreshStatus();
+    emitCloudSyncUpdated();
+  };
+
   const badge = comparisonMeta[status?.comparison || 'local-mode'];
   const isDriveMode = configMode === 'apps_script_drive';
   const remoteFolderName = status?.config.remoteUser?.folderName || sessionSyncProfile.driveFolderName;
@@ -626,6 +647,7 @@ export const CloudSyncPanel: React.FC = () => {
                       const applyKey = `apply:conflict:${item.id}`;
                       const mergeKey = `merge-attendance:conflict:${item.id}`;
                       const mergeStudentsKey = `merge-students:conflict:${item.id}`;
+                      const resolveKey = `resolve:conflict:${item.id}`;
                       return (
                         <div key={item.id} className="rounded-2xl border border-slate-200 bg-white px-3 py-3">
                           <p className="font-semibold text-slate-800">{formatArtifactMoment(item.generatedAt || item.createdAt)}</p>
@@ -663,6 +685,14 @@ export const CloudSyncPanel: React.FC = () => {
                               className="rounded-xl bg-slate-900 px-3 py-2 font-bold text-white transition hover:bg-slate-800 disabled:opacity-50"
                             >
                               {artifactActionKey === applyKey ? 'Cargando...' : 'Usar copia completa'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => markConflictResolved(item.id)}
+                              disabled={artifactActionKey !== ''}
+                              className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 font-bold text-rose-800 transition hover:border-rose-400 disabled:opacity-50"
+                            >
+                              {artifactActionKey === resolveKey ? 'Archivando...' : 'Marcar resuelto'}
                             </button>
                           </div>
                         </div>

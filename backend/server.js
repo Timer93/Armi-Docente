@@ -15,7 +15,7 @@ import programacionWordRoutes from './routes/programacionWord.routes.js';
 import unidadWordRoutes from './routes/unidadWord.routes.js';
 import sesionWordRoutes from './routes/sesionWord.routes.js';
 import { checkPurchaseStatus, getAuthProviderInfo, getPurchaseConfig, loginUser, submitPurchase } from './auth.js';
-import { applyCloudArtifact, clearCloudVersionHistory, getSyncStatus, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, saveFrontendStateSnapshot, updateSyncConfig } from './sync.js';
+import { applyCloudArtifact, clearCloudVersionHistory, getSyncStatus, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, resolveCloudConflict, saveFrontendStateSnapshot, updateSyncConfig } from './sync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1911,6 +1911,13 @@ app.post('/api/sync/artifact/merge-students', async (req, res) => {
 app.post('/api/sync/history/clear', async (req, res) => {
   try {
     res.json(await clearCloudVersionHistory());
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+app.post('/api/sync/conflict/resolve', async (req, res) => {
+  try {
+    res.json(await resolveCloudConflict(req.body || {}));
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }

@@ -560,6 +560,19 @@ export const clearCloudVersionHistory = async (): Promise<ApiResponse<any>> => {
     }
 };
 
+export const resolveCloudConflict = async (data: { artifactId: string }): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/conflict/resolve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
 export const getModuleStatus = async (): Promise<ModuleStatus> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/estado-modulos`);

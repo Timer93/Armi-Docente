@@ -692,17 +692,32 @@ const resolveArtifactManifest = (remoteManifest, extractedManifest) => {
   return remoteManifest || extractedManifest || null;
 };
 
-const resolveCloudConflict = async ({ artifactId = '' } = {}) => {
+export const resolveCloudConflict = async ({ artifactId = '' } = {}) => {
   const config = readConfig();
   const conflictId = String(artifactId || '').trim();
-  if (config.mode !== 'apps_script_drive' || !conflictId) return null;
+  if (config.mode !== 'apps_script_drive') {
+    return { success: false, message: 'Esta funcion solo esta disponible cuando la sincronizacion por Drive esta activada.' };
+  }
+  if (!conflictId) {
+    return { success: false, message: 'Falta indicar el conflicto que deseas marcar como resuelto.' };
+  }
 
-  return await postAppsScript({
+  const response = await postAppsScript({
     action: 'sync_resolve_conflict',
     syncUserKey: sanitizeUserScope(config.syncUserKey),
     syncUserLabel: normalizeUserLabel(config.syncUserLabel),
     conflictId,
   }, 120000);
+
+  if (!response.success) {
+    return { success: false, message: response.message || 'No se pudo marcar el conflicto como resuelto.' };
+  }
+
+  return {
+    success: true,
+    message: response.message || 'Conflicto marcado como resuelto.',
+    data: response.data || null,
+  };
 };
 
 export const clearCloudVersionHistory = async () => {
