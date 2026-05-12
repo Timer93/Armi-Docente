@@ -56,6 +56,66 @@ const formatEntitySummary = (summary?: { entities?: Record<string, number> } | n
 };
 
 const formatArtifactMoment = (value?: string) => value ? new Date(value).toLocaleString() : 'Sin fecha';
+const VERSION_HISTORY_VISIBILITY_KEY = 'armi_cloud_sync_show_version_history';
+
+const iconButtonBase = 'flex h-9 w-9 items-center justify-center rounded-xl border transition disabled:opacity-50';
+
+const EyeIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
+const AttendanceMergeIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M8 2v4" />
+    <path d="M16 2v4" />
+    <rect x="3" y="4" width="18" height="18" rx="3" />
+    <path d="M3 10h18" />
+    <path d="m8 16 2 2 5-5" />
+  </svg>
+);
+
+const StudentsMergeIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+  </svg>
+);
+
+const RestoreIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 12a9 9 0 1 0 3-6.7" />
+    <path d="M3 4v6h6" />
+    <path d="M12 8v5l3 2" />
+  </svg>
+);
+
+const VersionActionButton: React.FC<{
+  label: string;
+  title: string;
+  loading: boolean;
+  disabled: boolean;
+  tone: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}> = ({ label, title, loading, disabled, tone, onClick, children }) => (
+  <button
+    type="button"
+    aria-label={loading ? label : title}
+    title={loading ? label : title}
+    onClick={onClick}
+    disabled={disabled}
+    className={`${iconButtonBase} ${tone}`}
+  >
+    {loading ? (
+      <span className="h-4 w-4 animate-pulse rounded-full bg-current/45" aria-hidden="true" />
+    ) : children}
+  </button>
+);
 
 export const CloudSyncPanel: React.FC = () => {
   const { session } = useAuth();
@@ -70,6 +130,10 @@ export const CloudSyncPanel: React.FC = () => {
   const [toast, setToast] = useState<ToastState>(null);
   const [artifactActionKey, setArtifactActionKey] = useState('');
   const [clearingHistory, setClearingHistory] = useState(false);
+  const [showVersionHistory, setShowVersionHistory] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return window.localStorage.getItem(VERSION_HISTORY_VISIBILITY_KEY) !== 'false';
+  });
   const [configMode, setConfigMode] = useState<'local' | 'drive_mirror' | 'apps_script_drive'>('local');
   const [autoSyncOnClose, setAutoSyncOnClose] = useState(true);
   const [syncUserKey, setSyncUserKey] = useState('default-user');
@@ -374,6 +438,14 @@ export const CloudSyncPanel: React.FC = () => {
     emitCloudSyncUpdated();
   };
 
+  const toggleVersionHistoryVisibility = () => {
+    setShowVersionHistory((current) => {
+      const next = !current;
+      window.localStorage.setItem(VERSION_HISTORY_VISIBILITY_KEY, next ? 'true' : 'false');
+      return next;
+    });
+  };
+
   const badge = comparisonMeta[status?.comparison || 'local-mode'];
   const isDriveMode = configMode === 'apps_script_drive';
   const remoteFolderName = status?.config.remoteUser?.folderName || sessionSyncProfile.driveFolderName;
@@ -601,9 +673,13 @@ export const CloudSyncPanel: React.FC = () => {
                     <p className="font-black uppercase tracking-[0.14em] text-slate-400">Historial</p>
                     <p className="mt-1 text-sm font-semibold text-slate-800">{versionsSummary?.count || 0}</p>
                     <p className="mt-1 leading-relaxed">
-                      {versionsSummary?.latestAt ? new Date(versionsSummary.latestAt).toLocaleString() : 'Aun no hay versiones subidas'}
+                      {!showVersionHistory && versionsSummary?.count
+                        ? 'Oculto'
+                        : versionsSummary?.latestAt
+                          ? new Date(versionsSummary.latestAt).toLocaleString()
+                          : 'Aun no hay versiones subidas'}
                     </p>
-                    {versionsSummary?.latestUrl ? (
+                    {versionsSummary?.latestUrl && showVersionHistory ? (
                       <a
                         href={versionsSummary.latestUrl}
                         target="_blank"
@@ -612,6 +688,15 @@ export const CloudSyncPanel: React.FC = () => {
                       >
                         Ver ultima
                       </a>
+                    ) : null}
+                    {versionsSummary?.count ? (
+                      <button
+                        type="button"
+                        onClick={toggleVersionHistoryVisibility}
+                        className="mt-1 inline-block font-semibold text-emerald-700 hover:text-emerald-800"
+                      >
+                        {showVersionHistory ? 'Ocultar' : 'Mostrar'}
+                      </button>
                     ) : null}
                   </div>
                 </div>
@@ -702,64 +787,85 @@ export const CloudSyncPanel: React.FC = () => {
                 </div>
               ) : null}
 
-              {isDriveMode && versionsSummary?.items?.length ? (
-                <div className="rounded-2xl bg-slate-50 px-3 py-3 text-xs text-slate-600">
+              {isDriveMode && showVersionHistory && versionsSummary?.items?.length ? (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-3 text-xs text-emerald-900">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="font-black uppercase tracking-[0.14em] text-slate-400">Historial de versiones</p>
-                    <button
-                      type="button"
-                      onClick={clearVersionHistory}
-                      disabled={clearingHistory || activeAction !== null || artifactActionKey !== ''}
-                      className="rounded-xl border border-slate-300 bg-white px-3 py-2 font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
-                    >
-                      {clearingHistory ? 'Limpiando...' : 'Limpiar'}
-                    </button>
+                    <p className="font-black uppercase tracking-[0.14em] text-emerald-700">Historial de versiones</p>
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={toggleVersionHistoryVisibility}
+                        className="rounded-xl border border-emerald-300 bg-white px-3 py-2 font-bold text-emerald-800 transition hover:border-emerald-400"
+                      >
+                        Ocultar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearVersionHistory}
+                        disabled={clearingHistory || activeAction !== null || artifactActionKey !== ''}
+                        className="rounded-xl border border-emerald-300 bg-white px-3 py-2 font-bold text-emerald-800 transition hover:border-emerald-400 disabled:opacity-50"
+                      >
+                        {clearingHistory ? 'Limpiando...' : 'Limpiar'}
+                      </button>
+                    </div>
                   </div>
-                  <div className="mt-2 space-y-2">
+                  <div className="mt-3 space-y-2">
                     {versionsSummary.items.map((item) => {
                       const inspectKey = `inspect:version:${item.id}`;
                       const applyKey = `apply:version:${item.id}`;
                       const mergeKey = `merge-attendance:version:${item.id}`;
                       const mergeStudentsKey = `merge-students:version:${item.id}`;
                       return (
-                        <div key={item.id} className="rounded-2xl border border-slate-200 bg-white px-3 py-3">
-                          <p className="font-semibold text-slate-800">{formatArtifactMoment(item.generatedAt || item.createdAt)}</p>
-                          <p className="mt-1 leading-relaxed text-slate-500">{item.deviceId || 'Equipo no identificado'}</p>
-                          <p className="mt-1 leading-relaxed text-slate-500">{formatEntitySummary(item.summary) || 'Sin resumen disponible.'}</p>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => runArtifactAction('version', item.id, 'inspect')}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl border border-slate-300 bg-white px-3 py-2 font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
-                            >
-                              {artifactActionKey === inspectKey ? 'Revisando...' : 'Ver resumen'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => runArtifactAction('version', item.id, 'merge-attendance')}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 font-bold text-amber-800 transition hover:border-amber-400 disabled:opacity-50"
-                            >
-                              {artifactActionKey === mergeKey ? 'Fusionando...' : 'Fusionar asistencia'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => runArtifactAction('version', item.id, 'merge-students')}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 font-bold text-sky-800 transition hover:border-sky-400 disabled:opacity-50"
-                            >
-                              {artifactActionKey === mergeStudentsKey ? 'Fusionando...' : 'Fusionar estudiantes'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => runArtifactAction('version', item.id, 'apply')}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl bg-slate-900 px-3 py-2 font-bold text-white transition hover:bg-slate-800 disabled:opacity-50"
-                            >
-                              {artifactActionKey === applyKey ? 'Cargando...' : 'Usar copia completa'}
-                            </button>
+                        <div key={item.id} className="rounded-2xl border border-emerald-200 bg-white px-3 py-3 shadow-sm">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-emerald-950">{formatArtifactMoment(item.generatedAt || item.createdAt)}</p>
+                              <p className="mt-1 truncate leading-relaxed text-emerald-700">{item.deviceId || 'Equipo no identificado'}</p>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+                              <VersionActionButton
+                                label="Revisando"
+                                title="Ver resumen"
+                                loading={artifactActionKey === inspectKey}
+                                disabled={artifactActionKey !== ''}
+                                tone="border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50"
+                                onClick={() => runArtifactAction('version', item.id, 'inspect')}
+                              >
+                                <EyeIcon />
+                              </VersionActionButton>
+                              <VersionActionButton
+                                label="Fusionando asistencia"
+                                title="Fusionar asistencia"
+                                loading={artifactActionKey === mergeKey}
+                                disabled={artifactActionKey !== ''}
+                                tone="border-amber-300 bg-amber-50 text-amber-800 hover:border-amber-400 hover:bg-amber-100"
+                                onClick={() => runArtifactAction('version', item.id, 'merge-attendance')}
+                              >
+                                <AttendanceMergeIcon />
+                              </VersionActionButton>
+                              <VersionActionButton
+                                label="Fusionando estudiantes"
+                                title="Fusionar estudiantes"
+                                loading={artifactActionKey === mergeStudentsKey}
+                                disabled={artifactActionKey !== ''}
+                                tone="border-sky-300 bg-sky-50 text-sky-800 hover:border-sky-400 hover:bg-sky-100"
+                                onClick={() => runArtifactAction('version', item.id, 'merge-students')}
+                              >
+                                <StudentsMergeIcon />
+                              </VersionActionButton>
+                              <VersionActionButton
+                                label="Restaurando copia"
+                                title="Usar copia completa"
+                                loading={artifactActionKey === applyKey}
+                                disabled={artifactActionKey !== ''}
+                                tone="border-emerald-700 bg-emerald-700 text-white hover:border-emerald-800 hover:bg-emerald-800"
+                                onClick={() => runArtifactAction('version', item.id, 'apply')}
+                              >
+                                <RestoreIcon />
+                              </VersionActionButton>
+                            </div>
                           </div>
+                          <p className="mt-2 leading-relaxed text-emerald-800">{formatEntitySummary(item.summary) || 'Sin resumen disponible.'}</p>
                         </div>
                       );
                     })}
