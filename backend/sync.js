@@ -685,6 +685,26 @@ const fetchCloudArtifact = async ({ artifactId = '', artifactKind = 'version' } 
   return { success: true, data: response.data || null };
 };
 
+const resolveArtifactManifest = (remoteManifest, extractedManifest) => {
+  if (remoteManifest?.files) return remoteManifest;
+  if (remoteManifest?.manifest?.files) return remoteManifest.manifest;
+  if (extractedManifest?.files) return extractedManifest;
+  return remoteManifest || extractedManifest || null;
+};
+
+const resolveCloudConflict = async ({ artifactId = '' } = {}) => {
+  const config = readConfig();
+  const conflictId = String(artifactId || '').trim();
+  if (config.mode !== 'apps_script_drive' || !conflictId) return null;
+
+  return await postAppsScript({
+    action: 'sync_resolve_conflict',
+    syncUserKey: sanitizeUserScope(config.syncUserKey),
+    syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+    conflictId,
+  }, 120000);
+};
+
 export const clearCloudVersionHistory = async () => {
   const config = readConfig();
   if (config.mode !== 'apps_script_drive') {
@@ -1413,7 +1433,7 @@ export const pullCloudArtifact = async (payload = {}) => {
       data: {
         artifactId,
         artifactKind,
-        manifest: response.data?.manifest || extracted.manifest || null,
+        manifest: resolveArtifactManifest(response.data?.manifest, extracted.manifest),
         counts: getSyncEntityCountsFromDump(extracted.dump),
         packageBase64: response.data?.packageBase64 || '',
       },
@@ -1438,12 +1458,15 @@ export const applyCloudArtifact = async (payload = {}) => {
 
   try {
     const extractedManifest = extractSyncPackageToFolder(response.data?.packageBase64, extractRoot);
-    const remoteManifest = response.data?.manifest || extractedManifest;
+    const remoteManifest = resolveArtifactManifest(response.data?.manifest, extractedManifest);
     if (!remoteManifest?.files) {
       return { success: false, message: 'La copia seleccionada no contiene un manifiesto valido.' };
     }
     applyExtractedPackageToLocal(extractRoot, remoteManifest, restoreRoot);
     writeJsonAtomic(localManifestPath, remoteManifest);
+    const resolvedConflict = artifactKind === 'conflict'
+      ? await resolveCloudConflict({ artifactId })
+      : null;
     return {
       success: true,
       data: {
@@ -1453,6 +1476,7 @@ export const applyCloudArtifact = async (payload = {}) => {
         counts: getSyncEntityCounts(),
         frontendState: readJsonFile(frontendStatePath, { keys: {} }),
         restorePoint: restoreRoot,
+        resolvedConflict: resolvedConflict?.success === true,
       },
     };
   } catch (error) {
@@ -1476,12 +1500,13 @@ export const mergeAttendanceFromCloudArtifact = async (payload = {}) => {
   try {
     const { manifest, dump } = extractDatabaseDumpFromPackageBase64(response.data?.packageBase64, extractRoot);
     const mergeStats = mergeAttendanceTablesFromDump(dump);
+    const remoteManifest = resolveArtifactManifest(response.data?.manifest, manifest);
     return {
       success: true,
       data: {
         artifactId,
         artifactKind,
-        manifest: response.data?.manifest || manifest || null,
+        manifest: remoteManifest,
         mergeStats,
         counts: getSyncEntityCounts(),
         restorePoint: restoreRoot,
@@ -1509,12 +1534,13 @@ export const mergeStudentsFromCloudArtifact = async (payload = {}) => {
   try {
     const { manifest, dump } = extractDatabaseDumpFromPackageBase64(response.data?.packageBase64, extractRoot);
     const mergeStats = mergeStudentsTablesFromDump(dump);
+    const remoteManifest = resolveArtifactManifest(response.data?.manifest, manifest);
     return {
       success: true,
       data: {
         artifactId,
         artifactKind,
-        manifest: response.data?.manifest || manifest || null,
+        manifest: remoteManifest,
         mergeStats,
         counts: getSyncEntityCounts(),
         restorePoint: restoreRoot,
