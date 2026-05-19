@@ -1,7 +1,7 @@
 {
   "name": "armi-docente-web",
   "private": true,
-  "version": "11.1.1",
+  "version": "11.1.3",
   "description": "ARMI Docente",
   "author": "ARMI",
   "type": "module",
@@ -10,6 +10,8 @@
     "dev:backend": "node backend/server.js",
     "dev:frontend": "vite",
     "dev": "node scripts/dev.mjs",
+    "dev:stop": "powershell -ExecutionPolicy Bypass -File scripts/dev-stop.ps1",
+    "dev:clean": "powershell -ExecutionPolicy Bypass -Command \"npm run dev:stop; Start-Sleep -Seconds 2; npm run dev\"",
     "prepare:win-icon": "node scripts/prepare-windows-icon.mjs",
     "rebuild:native:node": "node scripts/rebuild-better-sqlite3.mjs node",
     "rebuild:native:electron": "node scripts/rebuild-better-sqlite3.mjs electron",

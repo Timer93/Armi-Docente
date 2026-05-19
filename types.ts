@@ -129,6 +129,7 @@ export interface Student {
   name: string; // Mapeado a 'estudiantes'
   grade: string; // Mapeado a 'grado'
   section: string; // Mapeado a 'secc'
+  fechaNacimiento?: string;
   dni?: string;
   email?: string; // Mapeado a 'gmail'
   microsoft?: string; // Mapeado a 'outlook'

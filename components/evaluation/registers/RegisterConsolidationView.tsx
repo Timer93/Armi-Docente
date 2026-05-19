@@ -4,7 +4,8 @@ import { Select } from '../../Select';
 import type { GeneralData, Student, TeachingAssignment } from '../../../types';
 import { buildBimesterRegisterAggregation, buildUnitRegisterAggregation, inferBimesterLabelFromUnitNumber } from './register-core';
 import type { AggregatedRegisterResult, AggregatedStudentRegister, EvaluationRecordRow, RegisterLevelCode, SessionDetailEntry, SessionSummaryEntry } from './register-types';
-import { normalizeLoose } from '../../sessions-view/shared';
+import { autoResizeTextarea, buildSessionAssessmentModel, extractCapacidades, normalizeLoose, TRANSVERSAL_CAPACITY_MAP } from '../../sessions-view/shared';
+import logoBar from '../../../src/Logo_bar.ico';
 
 interface Props {
   mode: 'unit' | 'bimester';
@@ -21,6 +22,50 @@ type CapacityGroup = {
   capacities: Array<{ key: string; capacityName: string }>;
 };
 
+const PrintMiniIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M7 9V4h10v5" />
+    <rect x="4" y="9" width="16" height="8" rx="2" />
+    <path d="M7 14h10v6H7z" />
+    <path d="M17 12h.01" />
+  </svg>
+);
+
+const TooltipVisibleIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    <path d="M8 9h8" />
+    <path d="M8 13h5" />
+  </svg>
+);
+
+const TooltipHiddenIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  </svg>
+);
+
+const ToggleConclusionIcon = ({ expanded }: { expanded: boolean }) => (
+  <svg
+    viewBox="0 0 24 24"
+    className="h-4 w-4"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    {expanded && (
+      <>
+        <path d="M8 9h8" />
+        <path d="M8 13h5" />
+      </>
+    )}
+  </svg>
+);
+
 const LEVEL_LABEL_MAP: Record<string, string> = { c: 'C', b: 'B', a: 'A', ad: 'AD', ne: 'NE', '': '' };
 const LEVEL_CELL_TONE_MAP: Record<string, string> = {
   c: 'bg-rose-100 text-rose-700',
@@ -28,6 +73,13 @@ const LEVEL_CELL_TONE_MAP: Record<string, string> = {
   a: 'bg-emerald-100 text-emerald-700',
   ad: 'bg-sky-100 text-sky-700',
   ne: 'bg-slate-900 text-white'
+};
+const LEVEL_SOLID_TONE_MAP: Record<string, string> = {
+  c: 'bg-rose-600 text-white',
+  b: 'bg-orange-500 text-white',
+  a: 'bg-emerald-500 text-white',
+  ad: 'bg-sky-500 text-white',
+  ne: 'bg-slate-950 text-white'
 };
 const BIMESTER_ORDER = ['I', 'II', 'III', 'IV'] as const;
 const UNIT_THEME = { tableTone: 'bg-sky-50', headerDark: 'bg-sky-900 text-white', headerMid: 'bg-sky-600 text-white', headerSoft: 'bg-sky-100 text-sky-900', transHeader: 'bg-emerald-700 text-white', transSoft: 'bg-emerald-100 text-emerald-900', summaryHeader: 'bg-cyan-700 text-white' };
@@ -42,6 +94,9 @@ const resolveStudentRowTone = (estadoValue?: string) => {
 };
 
 export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge, accentClassName, description }) => {
+  const [showSessionSources, setShowSessionSources] = useState(false);
+  const [expandedConclusions, setExpandedConclusions] = useState<Record<string, boolean>>({});
+  const [editableConclusions, setEditableConclusions] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
@@ -153,6 +208,28 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
 
   const theme = mode === 'unit' ? UNIT_THEME : BIMESTER_THEME;
   const areaName = areaLabelMap.get(areaId) || areaId || 'Area';
+  const conclusionStorageKey = useMemo(
+    () => `armi_register_conclusions_${mode}_${year}_${areaId}_${grade}_${section}_${mode === 'unit' ? unitNumber : bimesterLabel}`,
+    [mode, year, areaId, grade, section, unitNumber, bimesterLabel]
+  );
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(conclusionStorageKey);
+      setEditableConclusions(stored ? JSON.parse(stored) : {});
+    } catch {
+      setEditableConclusions({});
+    }
+  }, [conclusionStorageKey]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(conclusionStorageKey, JSON.stringify(editableConclusions));
+    } catch {
+      // Ignore localStorage write errors.
+    }
+  }, [conclusionStorageKey, editableConclusions]);
+
   useEffect(() => {
     let cancelled = false;
     const loadCompetencies = async () => {
@@ -187,7 +264,69 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       return Array.from(map.values());
     };
 
-    const buildFromEvaluatedSnapshots = (source: 'primary' | 'transversal') => {
+    const buildFromSessionDefinitions = (source: 'primary' | 'transversal') => {
+      const map = new Map<string, CapacityGroup>();
+      detailedSessions.forEach((session) => {
+        if (source === 'transversal') {
+          const transversalRows = Array.isArray(session?.sessionData?.competenciasTrans)
+            ? session.sessionData.competenciasTrans
+            : [];
+
+          transversalRows.forEach((item: any) => {
+            const competencyName = String(item?.comp || '').trim();
+            const capacities = extractCapacidades(String(item?.cap || '').trim());
+            if (!competencyName || capacities.length === 0) return;
+
+            const competencyKey = `${source}::${normalizeLoose(competencyName)}`;
+            if (!map.has(competencyKey)) {
+              map.set(competencyKey, { competencyKey, competencyName, source, capacities: [] });
+            }
+
+            const group = map.get(competencyKey)!;
+            capacities.forEach((capacityName) => {
+              const capacityKey = `${competencyKey}::${normalizeLoose(capacityName)}`;
+              if (!group.capacities.some((item) => item.key === capacityKey)) {
+                group.capacities.push({ key: capacityKey, capacityName });
+              }
+            });
+          });
+          return;
+        }
+
+        const sessionAssessmentModel = session?.sessionData?.sessionAssessmentModel || buildSessionAssessmentModel(session?.sessionData || {}, {
+          areaId: session.areaId,
+          grade: session.grade,
+          section: session.section,
+          unitNumber: session.unitNumber,
+          sessionNumber: session.sessionNumber,
+          bimester: session.bimesterLabel
+        });
+        const rows = Array.isArray(sessionAssessmentModel?.rows) ? sessionAssessmentModel.rows : [];
+
+        rows.forEach((row: any) => {
+          const rowSource = String(row?.source || 'primary') === 'transversal' ? 'transversal' : 'primary';
+          if (rowSource !== source) return;
+
+          const competencyName = String(row?.competencyName || '').trim();
+          const capacityName = String(row?.capacityName || '').trim();
+          if (!competencyName || !capacityName) return;
+
+          const competencyKey = `${source}::${normalizeLoose(competencyName)}`;
+          if (!map.has(competencyKey)) {
+            map.set(competencyKey, { competencyKey, competencyName, source, capacities: [] });
+          }
+
+          const group = map.get(competencyKey)!;
+          const capacityKey = `${competencyKey}::${normalizeLoose(capacityName)}`;
+          if (!group.capacities.some((item) => item.key === capacityKey)) {
+            group.capacities.push({ key: capacityKey, capacityName });
+          }
+        });
+      });
+      return Array.from(map.values());
+    };
+
+    const buildFromAggregatedSnapshots = (source: 'primary' | 'transversal') => {
       const map = new Map<string, CapacityGroup>();
       (aggregation?.sessions || []).forEach((session) => {
         session.students.forEach((student) => {
@@ -213,11 +352,49 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       return Array.from(map.values());
     };
 
+    const mergedTransversalMap = new Map<string, CapacityGroup>();
+    [...buildFromSessionDefinitions('transversal'), ...buildFromAggregatedSnapshots('transversal')].forEach((group) => {
+      if (!mergedTransversalMap.has(group.competencyKey)) {
+        mergedTransversalMap.set(group.competencyKey, {
+          competencyKey: group.competencyKey,
+          competencyName: group.competencyName,
+          source: group.source,
+          capacities: []
+        });
+      }
+      const target = mergedTransversalMap.get(group.competencyKey)!;
+      group.capacities.forEach((capacity) => {
+        if (!target.capacities.some((item) => item.key === capacity.key)) {
+          target.capacities.push(capacity);
+        }
+      });
+    });
+
+    const normalizedTransversalCapacityMap = new Map<string, string[]>(
+      Object.entries(TRANSVERSAL_CAPACITY_MAP).map(([competencyName, capacities]) => [
+        normalizeLoose(competencyName),
+        capacities
+      ])
+    );
+
+    const transversalGroups = Array.from(mergedTransversalMap.values()).map((group) => {
+      const officialCapacities = normalizedTransversalCapacityMap.get(normalizeLoose(group.competencyName)) || [];
+      if (!officialCapacities.length) return group;
+
+      return {
+        ...group,
+        capacities: officialCapacities.map((capacityName) => ({
+          key: `${group.competencyKey}::${normalizeLoose(capacityName)}`,
+          capacityName
+        }))
+      };
+    });
+
     return [
       ...buildFromRows(areaCompetencyRows, 'primary'),
-      ...buildFromEvaluatedSnapshots('transversal')
+      ...transversalGroups
     ];
-  }, [areaCompetencyRows, aggregation]);
+  }, [areaCompetencyRows, aggregation, detailedSessions]);
   const primaryCapacityGroups = capacityGroups.filter((g) => g.source === 'primary');
   const transversalCapacityGroups = capacityGroups.filter((g) => g.source === 'transversal');
 
@@ -232,13 +409,72 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
     )?.code || '';
   };
   const getUnitCompetencyDisplayCode = (student: AggregatedStudentRegister, competencyKey: string, capacityItems: Array<{ key: string; capacityName: string }>, competencyName?: string) => {
-    if (mode !== 'unit') return getAggregatedCompetencyCode(student, competencyKey);
     const filledCapacityCodes = capacityItems
       .map((capacity) => getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, competencyName || '', capacity.capacityName))
       .filter(Boolean);
-    if (filledCapacityCodes.length <= 1) return '';
+    if (filledCapacityCodes.length === 0) return '';
     return getAggregatedCompetencyCode(student, competencyKey);
   };
+  const isConclusionExpanded = (competencyKey: string) => !!expandedConclusions[competencyKey];
+  const formatCapacityLabelList = (values: string[]) => {
+    if (!values.length) return '';
+    if (values.length === 1) return values[0];
+    if (values.length === 2) return `${values[0]} y ${values[1]}`;
+    return `${values.slice(0, -1).join(', ')} y ${values[values.length - 1]}`;
+  };
+  const getCompetencyConclusion = (
+    student: AggregatedStudentRegister,
+    competencyKey: string,
+    capacityItems: Array<{ key: string; capacityName: string }>,
+    competencyName: string
+  ) => {
+    const competencyCode = getUnitCompetencyDisplayCode(student, competencyKey, capacityItems, competencyName) || 'ne';
+    const evaluatedCaps = capacityItems
+      .map((capacity) => ({
+        name: capacity.capacityName,
+        code: getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, competencyName, capacity.capacityName) || 'ne'
+      }))
+      .filter((item) => item.code && item.code !== 'ne');
+
+    if (!evaluatedCaps.length) {
+      return 'Sin evidencias suficientes para redactar una conclusión descriptiva.';
+    }
+
+    const strengths = evaluatedCaps.filter((item) => item.code === 'a' || item.code === 'ad').map((item) => item.name);
+    const inProgress = evaluatedCaps.filter((item) => item.code === 'b').map((item) => item.name);
+    const needsSupport = evaluatedCaps.filter((item) => item.code === 'c').map((item) => item.name);
+
+    if (competencyCode === 'ad') {
+      return `Destaca en ${competencyName.toLowerCase()}, con desempeño sólido en ${formatCapacityLabelList(strengths || evaluatedCaps.map((item) => item.name))}.`;
+    }
+    if (competencyCode === 'a') {
+      const supportText = inProgress.length || needsSupport.length
+        ? ` Puede seguir fortaleciendo ${formatCapacityLabelList([...inProgress, ...needsSupport])}.`
+        : '';
+      return `Logra satisfactoriamente ${competencyName.toLowerCase()}, evidenciando avance en ${formatCapacityLabelList(strengths.length ? strengths : evaluatedCaps.map((item) => item.name))}.${supportText}`;
+    }
+    if (competencyCode === 'b') {
+      const progressText = strengths.length ? ` Muestra mejor desempeño en ${formatCapacityLabelList(strengths)}.` : '';
+      const supportBase = [...inProgress, ...needsSupport];
+      const supportText = supportBase.length ? ` Requiere acompañamiento en ${formatCapacityLabelList(supportBase)}.` : '';
+      return `Se encuentra en proceso en ${competencyName.toLowerCase()}.${progressText}${supportText}`;
+    }
+    if (competencyCode === 'c') {
+      return `Se encuentra en inicio en ${competencyName.toLowerCase()} y requiere reforzar ${formatCapacityLabelList(needsSupport.length ? needsSupport : evaluatedCaps.map((item) => item.name))}.`;
+    }
+    return 'Sin evidencias suficientes para redactar una conclusión descriptiva.';
+  };
+  const getConclusionKey = (studentId: string, competencyKey: string) => `${studentId}::${competencyKey}`;
+  const getEditableConclusionValue = (
+    student: AggregatedStudentRegister,
+    competencyKey: string,
+    capacityItems: Array<{ key: string; capacityName: string }>,
+    competencyName: string
+  ) => {
+    const key = getConclusionKey(student.studentId, competencyKey);
+    return editableConclusions[key] ?? getCompetencyConclusion(student, competencyKey, capacityItems, competencyName);
+  };
+  const hasExpandedConclusions = Object.values(expandedConclusions).some(Boolean);
   const totals = useMemo(() => {
     const rows = aggregation?.students || [];
     return { enrolled: rows.length, evaluated: rows.filter((r) => r.overallCode !== 'ne').length, notEvaluated: rows.filter((r) => r.overallCode === 'ne').length, approved: rows.filter((r) => r.overallCode === 'a' || r.overallCode === 'ad').length, inProgress: rows.filter((r) => r.overallCode === 'b').length, atStart: rows.filter((r) => r.overallCode === 'c').length };
@@ -252,6 +488,14 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       return '-';
     }
   }, [generalData]);
+  const printInstitutionName = String(generalData?.institution || 'Institución Educativa').trim();
+  const printInstitutionPlace = String(generalData?.lugar || '').trim();
+  const printDistrict = String(generalData?.district || '').trim();
+  const printProvince = String(generalData?.province || '').trim();
+  const printLocationLine = [printDistrict, printProvince].filter(Boolean).join(' - ');
+  const printInstitutionMotto = String(generalData?.motto || generalData?.year_name || areaName || '').trim();
+  const printHeaderDarkCellClass = 'bg-black text-white font-black text-right px-1 py-1 border border-black leading-tight print:text-[8px] print:leading-tight print:outline print:outline-1 print:outline-white print:-outline-offset-1';
+  const printHeaderValueCellClass = 'px-2 py-1 border border-black print:text-[8px] print:leading-tight';
   const sessionCapacityDebugRows = useMemo(() => {
     if (mode !== 'unit' || !aggregation) return [];
     return aggregation.sessions.flatMap((session) => {
@@ -287,25 +531,201 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
     });
   }, [aggregation, mode]);
 
-  const renderLevelCell = (code: RegisterLevelCode | '', extra = '', useSpecialTone = false) => (
-    <td className={`border px-1 py-0.5 text-center text-[10px] font-black ${useSpecialTone ? 'border-white/10 bg-inherit text-inherit' : `${LEVEL_CELL_TONE_MAP[code] || 'bg-slate-50 text-slate-700'} border-slate-300`} ${extra}`}>{LEVEL_LABEL_MAP[code] || 'NE'}</td>
+  const studentCapacitySessionMap = useMemo(() => {
+    const map = new Map<string, string[]>();
+    (aggregation?.sessions || []).forEach((session) => {
+      session.students.forEach((student) => {
+        student.capacities.forEach((capacity) => {
+          if (!capacity.code || capacity.code === 'ne') return;
+          const key = `${student.studentId}::${capacity.key}`;
+          const current = map.get(key) || [];
+          const sessionLabel = `S${session.sessionNumber}`;
+          if (!current.includes(sessionLabel)) current.push(sessionLabel);
+          map.set(key, current);
+        });
+      });
+    });
+    return map;
+  }, [aggregation]);
+
+  const studentCompetencySessionMap = useMemo(() => {
+    const map = new Map<string, string[]>();
+    (aggregation?.sessions || []).forEach((session) => {
+      session.students.forEach((student) => {
+        student.competencies.forEach((competency) => {
+          if (!competency.code || competency.code === 'ne') return;
+          const key = `${student.studentId}::${competency.key}`;
+          const current = map.get(key) || [];
+          const sessionLabel = `S${session.sessionNumber}`;
+          if (!current.includes(sessionLabel)) current.push(sessionLabel);
+          map.set(key, current);
+        });
+      });
+    });
+    return map;
+  }, [aggregation]);
+
+  const formatSessionSources = (sources: string[]) => {
+    if (!sources.length) return 'Sin sesiones con evaluación registrada';
+    if (sources.length === 1) return sources[0];
+    if (sources.length === 2) return `${sources[0]} y ${sources[1]}`;
+    return `${sources.slice(0, -1).join(', ')} y ${sources[sources.length - 1]}`;
+  };
+
+  const getCapacitySessionSources = (studentId: string, capacityKey: string) =>
+    studentCapacitySessionMap.get(`${studentId}::${capacityKey}`) || [];
+
+  const getCompetencySessionSources = (studentId: string, competencyKey: string) =>
+    studentCompetencySessionMap.get(`${studentId}::${competencyKey}`) || [];
+
+  const renderPrintHeader = (subtitle: string) => (
+    <div className="hidden print:block session-register-page-header print:pb-1">
+      <div className="session-register-print-masthead">
+        <div className="session-register-print-mark">
+          {generalData?.insignia ? (
+            <img src={generalData.insignia} alt="Insignia IE" className="session-register-print-mark-image" />
+          ) : (
+            <span className="session-register-print-mark-fallback">INSIGNIA</span>
+          )}
+        </div>
+        <div className="text-center">
+          <div className="session-register-print-school">
+            {`Institución Educativa ${printInstitutionName || 'Institución Educativa'}${printInstitutionPlace ? ` - ${printInstitutionPlace}` : ''}`}
+          </div>
+          <div className="session-register-print-location">{printLocationLine || '-'}</div>
+          <div className="session-register-print-motto">{printInstitutionMotto || areaName}</div>
+          <div className="session-register-print-title">{subtitle}</div>
+        </div>
+        <div className="session-register-print-mark">
+          <img src={generalData?.logo || logoBar} alt="Logo JEC" className="session-register-print-mark-image" />
+        </div>
+      </div>
+      <div className="border border-black bg-white rounded-xl overflow-hidden">
+        <table className="w-full border-collapse text-[10px] print:text-[8px]">
+          <tbody>
+            <tr>
+              <td className={`${printHeaderDarkCellClass} w-[88px]`}>Nivel:</td>
+              <td className={`${printHeaderValueCellClass} w-[64px]`}>{generalData?.level || '-'}</td>
+              <td className={`${printHeaderDarkCellClass} w-[72px]`}>Grado:</td>
+              <td className={`${printHeaderValueCellClass} w-[52px]`}>{grade || '-'}</td>
+              <td className={`${printHeaderDarkCellClass} w-[72px]`}>Unidad:</td>
+              <td className={`${printHeaderValueCellClass} w-[64px]`}>N° {unitNumber || '-'}</td>
+              <td className={`${printHeaderDarkCellClass} w-[72px]`}>Registro:</td>
+              <td className={printHeaderValueCellClass}>{title}</td>
+            </tr>
+            <tr>
+              <td className={printHeaderDarkCellClass}>Área Curricular:</td>
+              <td className={`${printHeaderValueCellClass} whitespace-nowrap`}>{areaName || '-'}</td>
+              <td className={printHeaderDarkCellClass}>Sección:</td>
+              <td className={printHeaderValueCellClass}>{section || '-'}</td>
+              <td className={printHeaderDarkCellClass}>Bimestre:</td>
+              <td className={printHeaderValueCellClass}>{bimesterLabel || inferBimesterLabelFromUnitNumber(unitNumber || '') || '-'}</td>
+              <td className={printHeaderDarkCellClass}>Modalidad:</td>
+              <td className={printHeaderValueCellClass}>{mode === 'unit' ? 'Consolidado por unidad' : 'Consolidado por bimestre'}</td>
+            </tr>
+            <tr>
+              <td className={printHeaderDarkCellClass}>Docente:</td>
+              <td className={`${printHeaderValueCellClass} whitespace-nowrap`}>{teacherName || '-'}</td>
+              <td className={printHeaderDarkCellClass}>Año:</td>
+              <td className={printHeaderValueCellClass}>{year || '-'}</td>
+              <td className={printHeaderDarkCellClass}>Estudiantes:</td>
+              <td className={printHeaderValueCellClass}>{totals.enrolled}</td>
+              <td className={printHeaderDarkCellClass}>Evaluados:</td>
+              <td className={printHeaderValueCellClass}>{totals.evaluated}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  const renderPrintFooter = () => (
+    <div className="session-register-print-footer hidden print:grid">
+      <span className="justify-self-start">{areaName || 'Área curricular'}</span>
+      <span className="justify-self-center">{mode === 'unit' ? `Unidad ${unitNumber || '-'}` : `Bimestre ${bimesterLabel || '-'}`}</span>
+      <span className="justify-self-end">{teacherName || 'Docente'}</span>
+    </div>
+  );
+
+  const renderLevelCell = (
+    code: RegisterLevelCode | '',
+    extra = '',
+    useSpecialTone = false,
+    variant: 'detail' | 'logro' = 'detail',
+    tooltipText = ''
+  ) => {
+    const baseTone = variant === 'detail'
+      ? (LEVEL_CELL_TONE_MAP[code] || 'bg-slate-50 text-slate-700')
+      : (LEVEL_SOLID_TONE_MAP[code] || 'bg-slate-700 text-white');
+
+    return (
+      <td className={`group relative border px-1 py-0.5 text-center text-[10px] font-black ${useSpecialTone ? 'border-white/10 bg-inherit text-inherit shadow-none' : `${baseTone} border-slate-300`} ${extra}`}>
+        {LEVEL_LABEL_MAP[code] || 'NE'}
+        {showSessionSources && tooltipText && !useSpecialTone && (
+          <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-48 -translate-x-1/2 rounded-xl bg-slate-950 px-3 py-2 text-[10px] font-medium normal-case text-white shadow-2xl group-hover:block print:hidden">
+            <div className="mb-1 text-[9px] font-black uppercase tracking-wide text-emerald-300">Sesiones origen</div>
+            <div className="leading-tight">{tooltipText}</div>
+          </div>
+        )}
+      </td>
+    );
+  };
+
+  const renderLevelCellWithSources = (
+    code: RegisterLevelCode | '',
+    extra = '',
+    useSpecialTone = false,
+    variant: 'detail' | 'logro' = 'detail',
+    tooltipText = ''
+  ) => (
+    renderLevelCell(code, extra, useSpecialTone, variant, tooltipText)
   );
 
   return (
     <div className="space-y-6">
-      <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-xl overflow-hidden">
-        <div className={`h-2 ${accentClassName}`}></div>
-        <div className="p-8 space-y-6">
-          <div className="flex items-start gap-4">
-            <div className={`rounded-3xl px-4 py-3 text-sm font-black text-white shadow-lg ${accentClassName}`}>{badge}</div>
-            <div>
-              <h2 className="text-2xl font-black italic uppercase tracking-tight text-slate-800">{title}</h2>
-              <p className="mt-2 max-w-3xl text-sm font-medium leading-relaxed text-slate-500">{description}</p>
+      <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-xl overflow-hidden print:rounded-none print:border-none print:shadow-none">
+        <div className={`h-2 ${accentClassName} print:hidden`}></div>
+        <div className="p-8 space-y-6 print:p-0">
+          <div className="flex items-start justify-between gap-4 print:hidden">
+            <div className="flex items-start gap-4">
+              <div className={`rounded-3xl px-4 py-3 text-sm font-black text-white shadow-lg ${accentClassName}`}>{badge}</div>
+              <div>
+                <h2 className="text-2xl font-black italic uppercase tracking-tight text-slate-800">{title}</h2>
+                <p className="mt-2 max-w-3xl text-sm font-medium leading-relaxed text-slate-500">{description}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSessionSources((prev) => !prev)}
+                title={showSessionSources ? 'Ocultar sesiones origen' : 'Mostrar sesiones origen'}
+                aria-label={showSessionSources ? 'Ocultar sesiones origen' : 'Mostrar sesiones origen'}
+                aria-pressed={showSessionSources}
+                className={`inline-flex h-11 w-11 items-center justify-center rounded-2xl border text-lg font-black leading-none transition ${
+                  showSessionSources
+                    ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                    : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100'
+                }`}
+              >
+                {showSessionSources ? <TooltipVisibleIcon /> : <TooltipHiddenIcon />}
+              </button>
+              <button
+                onClick={() => window.print()}
+                title="Imprimir registro"
+                aria-label="Imprimir registro"
+                className="inline-flex h-11 w-11 items-center justify-center rounded-2xl text-lg text-white font-black leading-none bg-slate-900 hover:bg-slate-800"
+              >
+                <PrintMiniIcon />
+              </button>
             </div>
           </div>
 
+          <div className="hidden print:block print:px-8 print:pt-4">
+            {renderPrintHeader(title)}
+          </div>
+
           {mode === 'unit' ? (
-            <div className="flex flex-wrap items-end gap-3">
+            <div className="flex flex-wrap items-end gap-3 print:hidden">
               <div className="w-[84px]"><Select label="Anio" name="year" value={year} onChange={(e) => setYear(String(e.target.value || ''))} options={years.map((v) => ({ value: v, label: v }))} variant="compact" /></div>
               <div className="w-[220px]"><Select label="Area" name="areaId" value={areaId} onChange={(e) => setAreaId(String(e.target.value || ''))} options={areaIds.map((v) => ({ value: v, label: areaLabelMap.get(v) || v }))} variant="compact" searchable /></div>
               <div className="w-[88px]"><Select label="Grado" name="grade" value={grade} onChange={(e) => setGrade(String(e.target.value || ''))} options={grades.map((v) => ({ value: v, label: v }))} variant="compact" /></div>
@@ -313,7 +733,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
               <div className="w-[86px]"><Select label="Unidad" name="unitNumber" value={unitNumber} onChange={(e) => setUnitNumber(String(e.target.value || ''))} options={units.map((v) => ({ value: v, label: `U${v}` }))} variant="compact" /></div>
             </div>
           ) : (
-            <div className="flex flex-wrap items-end gap-3">
+            <div className="flex flex-wrap items-end gap-3 print:hidden">
               <div className="w-[84px]"><Select label="Anio" name="year" value={year} onChange={(e) => setYear(String(e.target.value || ''))} options={years.map((v) => ({ value: v, label: v }))} variant="compact" /></div>
               <div className="w-[220px]"><Select label="Area" name="areaId" value={areaId} onChange={(e) => setAreaId(String(e.target.value || ''))} options={areaIds.map((v) => ({ value: v, label: areaLabelMap.get(v) || v }))} variant="compact" searchable /></div>
               <div className="w-[88px]"><Select label="Grado" name="grade" value={grade} onChange={(e) => setGrade(String(e.target.value || ''))} options={grades.map((v) => ({ value: v, label: v }))} variant="compact" /></div>
@@ -327,8 +747,8 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
           ) : !aggregation ? (
             <div className="rounded-[2rem] border border-dashed border-slate-300 bg-slate-50/80 px-6 py-10 text-center"><p className="text-sm font-bold text-slate-500">No se encontraron sesiones con datos suficientes para esta combinacion.</p></div>
           ) : (
-            <div className={`rounded-[2rem] border border-slate-200 ${theme.tableTone} p-4 shadow-sm`}>
-              <div className="overflow-hidden rounded-[1.5rem] border border-slate-300 bg-white">
+            <div className={`rounded-[2rem] border border-slate-200 ${theme.tableTone} p-4 shadow-sm print:rounded-none print:border-none print:bg-white print:p-2 print:pt-0 print:shadow-none`}>
+              <div className="overflow-hidden rounded-[1.5rem] border border-slate-300 bg-white print:hidden">
                 <table className="w-full table-fixed border-collapse text-[9px]">
                   <thead>
                     <tr>
@@ -357,28 +777,56 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                 </table>
               </div>
 
-              <div className="mt-4 overflow-hidden rounded-[1.5rem] border border-slate-300 bg-white">
-                <table className="w-full table-fixed border-collapse text-[8px]">
+              <div className="mt-4 overflow-x-auto rounded-[1.5rem] border border-slate-300 bg-white print:mt-1 print:overflow-visible">
+                <table className={`${hasExpandedConclusions ? 'min-w-[2200px] table-auto' : 'w-full table-fixed'} border-collapse text-[8px]`}>
                   <thead>
                     <tr>
                       <th rowSpan={2} className={`w-[24px] border border-slate-300 px-0.5 py-1 text-center font-black uppercase ${theme.headerMid}`}>N°</th>
                       <th rowSpan={2} className={`w-[230px] border border-slate-300 px-1 py-1 text-center font-black uppercase ${theme.headerMid}`}>Apellidos y nombres</th>
-                      {primaryCapacityGroups.map((group: any) => <th key={group.competencyKey} colSpan={group.capacities.length + 1} className={`border border-slate-300 px-2 py-1 text-center font-black uppercase ${theme.headerDark}`}>{group.competencyName}</th>)}
-                      <th className={`border border-slate-300 px-2 py-1 text-center font-black uppercase ${theme.summaryHeader}`}>Resumen</th>
-                      {transversalCapacityGroups.map((group: any) => <th key={group.competencyKey} colSpan={group.capacities.length + 1} className={`border border-slate-300 px-2 py-1 text-center font-black uppercase ${theme.transHeader}`}>{group.competencyName}</th>)}
+                      {primaryCapacityGroups.map((group: any) => <th key={group.competencyKey} colSpan={isConclusionExpanded(group.competencyKey) ? 2 : group.capacities.length + 1} className={`border border-slate-300 px-2 py-1 text-center font-black uppercase ${theme.headerDark}`}>{group.competencyName}</th>)}
+                      {transversalCapacityGroups.map((group: any) => <th key={group.competencyKey} colSpan={isConclusionExpanded(group.competencyKey) ? 2 : group.capacities.length + 1} className={`border border-slate-300 px-2 py-1 text-center font-black uppercase ${theme.transHeader}`}>{group.competencyName}</th>)}
                     </tr>
                     <tr>
                       {primaryCapacityGroups.map((group: any) => (
                         <React.Fragment key={`label-${group.competencyKey}`}>
-                          {group.capacities.map((capacity: any) => <th key={`${capacity.key}-label`} className="border border-slate-300 px-0.5 py-0.5 text-center text-[7px] font-semibold leading-tight text-slate-500 break-words">{capacity.capacityName}</th>)}
-                          <th className={`w-[44px] border border-slate-300 px-0.5 py-0.5 text-center text-[7px] font-semibold uppercase ${theme.headerMid}`}>Logro</th>
+                          {!isConclusionExpanded(group.competencyKey) ? group.capacities.map((capacity: any) => <th key={`${capacity.key}-label`} className="border border-slate-300 px-0.5 py-0.5 text-center text-[7px] font-semibold leading-tight text-slate-500 break-words">{capacity.capacityName}</th>) : null}
+                          <th className={`w-[44px] border border-slate-300 px-0.5 py-0.5 text-center text-[7px] font-semibold uppercase ${theme.headerMid}`}>
+                            <div className="flex flex-col items-center gap-1">
+                              <span>Logro</span>
+                              <button
+                                type="button"
+                                onClick={() => setExpandedConclusions((prev) => ({ ...prev, [group.competencyKey]: !prev[group.competencyKey] }))}
+                                className="inline-flex items-center justify-center rounded bg-white/15 px-1.5 py-0.5 text-[10px] font-black leading-none hover:bg-white/25 print:hidden"
+                                title={isConclusionExpanded(group.competencyKey) ? 'Ocultar conclusión' : 'Mostrar conclusión'}
+                              >
+                                <ToggleConclusionIcon expanded={isConclusionExpanded(group.competencyKey)} />
+                              </button>
+                            </div>
+                          </th>
+                          {isConclusionExpanded(group.competencyKey) ? (
+                            <th className={`w-[520px] min-w-[520px] border border-slate-300 px-1 py-0.5 text-left text-[7px] font-semibold uppercase ${theme.headerMid}`}>Conclusión</th>
+                          ) : null}
                         </React.Fragment>
                       ))}
-                      <th className={`border border-slate-300 px-1 py-1 text-center text-[8px] font-semibold uppercase ${theme.summaryHeader}`}>Final</th>
                       {transversalCapacityGroups.map((group: any) => (
                         <React.Fragment key={`tlabel-${group.competencyKey}`}>
-                          {group.capacities.map((capacity: any) => <th key={`${capacity.key}-tlabel`} className="border border-slate-300 px-0.5 py-0.5 text-center text-[7px] font-semibold leading-tight text-slate-500 break-words">{capacity.capacityName}</th>)}
-                          <th className={`w-[44px] border border-slate-300 px-0.5 py-0.5 text-center text-[7px] font-semibold uppercase ${theme.transHeader}`}>Logro</th>
+                          {!isConclusionExpanded(group.competencyKey) ? group.capacities.map((capacity: any) => <th key={`${capacity.key}-tlabel`} className="border border-slate-300 px-0.5 py-0.5 text-center text-[7px] font-semibold leading-tight text-slate-500 break-words">{capacity.capacityName}</th>) : null}
+                          <th className={`w-[44px] border border-slate-300 px-0.5 py-0.5 text-center text-[7px] font-semibold uppercase ${theme.transHeader}`}>
+                            <div className="flex flex-col items-center gap-1">
+                              <span>Logro</span>
+                              <button
+                                type="button"
+                                onClick={() => setExpandedConclusions((prev) => ({ ...prev, [group.competencyKey]: !prev[group.competencyKey] }))}
+                                className="inline-flex items-center justify-center rounded bg-white/15 px-1.5 py-0.5 text-[10px] font-black leading-none hover:bg-white/25 print:hidden"
+                                title={isConclusionExpanded(group.competencyKey) ? 'Ocultar conclusión' : 'Mostrar conclusión'}
+                              >
+                                <ToggleConclusionIcon expanded={isConclusionExpanded(group.competencyKey)} />
+                              </button>
+                            </div>
+                          </th>
+                          {isConclusionExpanded(group.competencyKey) ? (
+                            <th className={`w-[520px] min-w-[520px] border border-slate-300 px-1 py-0.5 text-left text-[7px] font-semibold uppercase ${theme.transHeader}`}>Conclusión</th>
+                          ) : null}
                         </React.Fragment>
                       ))}
                     </tr>
@@ -393,15 +841,64 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                         <td className={`border px-1 py-0.5 font-medium uppercase text-[8px] leading-tight ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-300 text-slate-800'}`}>{student.studentName}</td>
                         {primaryCapacityGroups.map((group: any) => (
                           <React.Fragment key={`row-${student.studentId}-${group.competencyKey}`}>
-                            {group.capacities.map((capacity: any) => renderLevelCell(getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, group.competencyName, capacity.capacityName), '', hasSpecialRow))}
-                            {renderLevelCell(getUnitCompetencyDisplayCode(student, group.competencyKey, group.capacities, group.competencyName), 'border-l-2 border-l-slate-500', hasSpecialRow)}
+                            {!isConclusionExpanded(group.competencyKey) ? group.capacities.map((capacity: any) => renderLevelCellWithSources(
+                              getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, group.competencyName, capacity.capacityName),
+                              '',
+                              hasSpecialRow,
+                              'detail',
+                              formatSessionSources(getCapacitySessionSources(student.studentId, capacity.key))
+                            )) : null}
+                            {renderLevelCellWithSources(
+                              getUnitCompetencyDisplayCode(student, group.competencyKey, group.capacities, group.competencyName),
+                              'border-l-2 border-l-slate-500',
+                              hasSpecialRow,
+                              'logro',
+                              formatSessionSources(getCompetencySessionSources(student.studentId, group.competencyKey))
+                            )}
+                            {isConclusionExpanded(group.competencyKey) ? (
+                              <td className={`w-[520px] min-w-[520px] border px-2 py-1 align-top ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-300 bg-white/80'}`}>
+                                <textarea
+                                  className={`w-full min-h-[84px] resize-none rounded-lg border px-2 py-1 text-[8px] leading-tight outline-none ${hasSpecialRow ? 'border-white/20 bg-white/10 text-inherit placeholder:text-white/60' : 'border-slate-200 bg-white text-slate-700 focus:border-sky-300'}`}
+                                  value={getEditableConclusionValue(student, group.competencyKey, group.capacities, group.competencyName)}
+                                  onInput={(e) => autoResizeTextarea(e.currentTarget)}
+                                  onChange={(e) => setEditableConclusions((prev) => ({
+                                    ...prev,
+                                    [getConclusionKey(student.studentId, group.competencyKey)]: e.target.value
+                                  }))}
+                                />
+                              </td>
+                            ) : null}
                           </React.Fragment>
                         ))}
-                        {renderLevelCell(student.overallCode, 'border-l-2 border-l-slate-700', hasSpecialRow)}
                         {transversalCapacityGroups.map((group: any) => (
                           <React.Fragment key={`trow-${student.studentId}-${group.competencyKey}`}>
-                            {group.capacities.map((capacity: any) => renderLevelCell(getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, group.competencyName, capacity.capacityName), '', hasSpecialRow))}
-                            {renderLevelCell(getUnitCompetencyDisplayCode(student, group.competencyKey, group.capacities, group.competencyName), 'border-l-2 border-l-emerald-700', hasSpecialRow)}
+                            {!isConclusionExpanded(group.competencyKey) ? group.capacities.map((capacity: any) => renderLevelCellWithSources(
+                              getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, group.competencyName, capacity.capacityName),
+                              '',
+                              hasSpecialRow,
+                              'detail',
+                              formatSessionSources(getCapacitySessionSources(student.studentId, capacity.key))
+                            )) : null}
+                            {renderLevelCellWithSources(
+                              getUnitCompetencyDisplayCode(student, group.competencyKey, group.capacities, group.competencyName),
+                              'border-l-2 border-l-emerald-700',
+                              hasSpecialRow,
+                              'logro',
+                              formatSessionSources(getCompetencySessionSources(student.studentId, group.competencyKey))
+                            )}
+                            {isConclusionExpanded(group.competencyKey) ? (
+                              <td className={`w-[520px] min-w-[520px] border px-2 py-1 align-top ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-300 bg-white/80'}`}>
+                                <textarea
+                                  className={`w-full min-h-[84px] resize-none rounded-lg border px-2 py-1 text-[8px] leading-tight outline-none ${hasSpecialRow ? 'border-white/20 bg-white/10 text-inherit placeholder:text-white/60' : 'border-slate-200 bg-white text-slate-700 focus:border-emerald-300'}`}
+                                  value={getEditableConclusionValue(student, group.competencyKey, group.capacities, group.competencyName)}
+                                  onInput={(e) => autoResizeTextarea(e.currentTarget)}
+                                  onChange={(e) => setEditableConclusions((prev) => ({
+                                    ...prev,
+                                    [getConclusionKey(student.studentId, group.competencyKey)]: e.target.value
+                                  }))}
+                                />
+                              </td>
+                            ) : null}
                           </React.Fragment>
                         ))}
                       </tr>
@@ -410,7 +907,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                 </table>
               </div>
 
-              <div className="mt-4 flex flex-wrap gap-3">
+              <div className="mt-4 flex flex-wrap gap-3 print:hidden">
                 <div className="rounded-xl bg-slate-900 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white">Matriculados: {totals.enrolled}</div>
                 <div className="rounded-xl bg-sky-700 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white">Evaluados: {totals.evaluated}</div>
                 <div className="rounded-xl bg-violet-700 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white">No evaluados: {totals.notEvaluated}</div>
@@ -418,11 +915,15 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                 <div className="rounded-xl bg-orange-600 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white">En proceso: {totals.inProgress}</div>
                 <div className="rounded-xl bg-rose-600 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white">En inicio: {totals.atStart}</div>
               </div>
+
+              <div className="hidden print:block print:px-1 print:pt-3">
+                {renderPrintFooter()}
+              </div>
             </div>
           )}
 
           {mode === 'unit' && !!sessionCapacityDebugRows.length && (
-            <div className="rounded-[2rem] border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="rounded-[2rem] border border-slate-200 bg-white p-5 shadow-sm print:hidden">
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">Modo de prueba</p>

@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "provider": "local-restore-point",
+  "storageMode": "local",
+  "generatedAt": "2026-05-17T06:38:15.357Z",
+  "digest": "be4b697789cfa775b16768e34958ad73a0b508197b16635aa1bda78b8d93eb6d",
+  "summary": {
+    "entities": {
+      "programaciones": 4,
+      "unidades": 8,
+      "sesiones": 28,
+      "estudiantes": 167,
+      "egresados": 32,
+      "asistencias": 1239,
+      "rostros": 11
+    },
+    "includesAttendance": true,
+    "includesFaceProfiles": true
+  },
+  "files": [
+    {
+      "relativePath": "database/database-dump.json",
+      "scope": "database",
+      "size": 4782495,
+      "mtimeMs": 1778999895257.0098,
+      "checksum": "b5d84f32d0437748cdd591c463898c7bbb81de0e7c00cf332e76e1310386c2d4"
+    },
+    {
+      "relativePath": "state/frontend-local-storage.json",
+      "scope": "frontend-state",
+      "size": 42763,
+      "mtimeMs": 1778999886238.755,
+      "checksum": "da4143d1d461672c5eb2a114bc115645443187f7f8fc4388e656b52dc25ce5c9"
+    },
+    {
+      "relativePath": "uploads/user-assets/profiles/armi_profile_image/profile.png",
+      "scope": "uploads",
+      "size": 1344767,
+      "mtimeMs": 1778998132648.1228,
+      "checksum": "23274457490f3fdb051973ad1e5115e9a2ed937d443835724c1411ad7d2cef19"
+    }
+  ]
+}

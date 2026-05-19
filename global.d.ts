@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 declare module '*.css';
+declare const __APP_VERSION__: string;
 
 declare global {
   interface Window {

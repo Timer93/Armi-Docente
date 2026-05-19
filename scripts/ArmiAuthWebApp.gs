@@ -293,16 +293,25 @@ function SyncStatus_(params) {
   try {
     var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
     var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
-    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
-    var manifest = readJsonFileFromFolder_(folderInfo.currentFolder, 'manifest.json');
-    var conflicts = summarizeSyncManifestFolder_(folderInfo.conflictsFolder, 'conflict');
-    var versions = summarizeSyncManifestFolder_(folderInfo.versionsFolder, 'version');
+    var folderInfo = resolveSyncUserFolderFromParams_(params, false);
+    if (!folderInfo) {
+      return jsonResponse_({
+        success: false,
+        message: 'No encontre la carpeta historica de este usuario en Drive. Verifica la raiz de sincronizacion o la cuenta conectada.'
+      });
+    }
+    var currentCopy = resolveCurrentCloudCopy_(folderInfo);
+    var manifest = currentCopy && currentCopy.manifest ? currentCopy.manifest : null;
+    var config = getConfig_();
+    var conflicts = summarizeSyncManifestFolder_(folderInfo.conflictsFolder, 'conflict', parsePositiveInteger_(getConfigValue_(config, 'SYNC_KEEP_CONFLICTS', config.syncKeepConflicts), ARMI_DEFAULTS.syncKeepConflicts));
+    var versions = summarizeSyncManifestFolder_(folderInfo.versionsFolder, 'version', parsePositiveInteger_(getConfigValue_(config, 'SYNC_KEEP_VERSIONS', config.syncKeepVersions), ARMI_DEFAULTS.syncKeepVersions));
     return jsonResponse_({
       success: true,
       data: {
         user: publicSyncFolderInfo_(folderInfo),
         manifest: manifest,
         hasCloudCopy: !!manifest,
+        currentSource: currentCopy ? currentCopy.source : '',
         activity: {
           conflicts: conflicts,
           versions: versions
@@ -326,7 +335,7 @@ function SyncPush_(params) {
     if (!packageBase64) throw new Error('No se recibio el paquete de sincronizacion.');
     if (!manifest || !manifest.digest) throw new Error('No se recibio un manifiesto valido.');
 
-    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
+    var folderInfo = resolveSyncUserFolderFromParams_(params, true) || ensureSyncUserFolder_(userKey, userLabel);
     var currentManifest = readJsonFileFromFolder_(folderInfo.currentFolder, 'manifest.json');
     var currentVersion = normalizeText_(currentManifest && currentManifest.cloudVersion);
     var localDigest = normalizeText_(manifest.digest);
@@ -407,23 +416,24 @@ function SyncPush_(params) {
 
 function SyncPull_(params) {
   try {
-    var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
-    var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
-    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
-    var manifest = readJsonFileFromFolder_(folderInfo.currentFolder, 'manifest.json');
-    if (!manifest) {
+    var folderInfo = resolveSyncUserFolderFromParams_(params, false);
+    if (!folderInfo) {
+      return jsonResponse_({ success: false, message: 'No encontre la carpeta historica de este usuario en Drive. Verifica la raiz de sincronizacion o la cuenta conectada.' });
+    }
+    var currentCopy = resolveCurrentCloudCopy_(folderInfo);
+    if (!currentCopy || !currentCopy.manifest) {
       return jsonResponse_({ success: false, message: 'Este usuario todavia no tiene copia en Drive.' });
     }
-    var file = getFirstFileByName_(folderInfo.currentFolder, 'snapshot.zip');
-    if (!file) {
+    if (!currentCopy.file) {
       return jsonResponse_({ success: false, message: 'La copia actual no tiene paquete snapshot.zip.' });
     }
     return jsonResponse_({
       success: true,
       data: {
         user: publicSyncFolderInfo_(folderInfo),
-        manifest: manifest,
-        packageBase64: Utilities.base64Encode(file.getBlob().getBytes())
+        manifest: currentCopy.manifest,
+        currentSource: currentCopy.source,
+        packageBase64: Utilities.base64Encode(currentCopy.file.getBlob().getBytes())
       }
     });
   } catch (error) {
@@ -433,11 +443,12 @@ function SyncPull_(params) {
 
 function SyncPullArtifact_(params) {
   try {
-    var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
-    var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
     var artifactId = normalizeText_(params.artifactId || params.id);
     var artifactKind = normalizeText_(params.artifactKind || params.kind, 'version');
-    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
+    var folderInfo = resolveSyncUserFolderFromParams_(params, false);
+    if (!folderInfo) {
+      return jsonResponse_({ success: false, message: 'No encontre la carpeta historica de este usuario en Drive. Verifica la raiz de sincronizacion o la cuenta conectada.' });
+    }
     var folder = artifactKind === 'conflict'
       ? folderInfo.conflictsFolder
       : artifactKind === 'current'
@@ -468,13 +479,15 @@ function SyncPullArtifact_(params) {
 function SyncResolveConflict_(params) {
   try {
     var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
-    var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
     var conflictId = normalizeText_(params.conflictId || params.artifactId || params.id);
     if (!conflictId) {
       return jsonResponse_({ success: false, message: 'Falta indicar el conflicto que deseas marcar como solucionado.' });
     }
 
-    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
+    var folderInfo = resolveSyncUserFolderFromParams_(params, false);
+    if (!folderInfo) {
+      return jsonResponse_({ success: false, message: 'No encontre la carpeta historica de este usuario en Drive. Verifica la raiz de sincronizacion o la cuenta conectada.' });
+    }
     var resolvedFolder = folderInfo.resolvedConflictsFolder;
     var zipName = conflictId + '.zip';
     var manifestName = conflictId + '-manifest.json';
@@ -510,9 +523,10 @@ function SyncResolveConflict_(params) {
 
 function SyncClearVersions_(params) {
   try {
-    var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
-    var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
-    var folderInfo = ensureSyncUserFolder_(userKey, userLabel);
+    var folderInfo = resolveSyncUserFolderFromParams_(params, false);
+    if (!folderInfo) {
+      return jsonResponse_({ success: false, message: 'No encontre la carpeta historica de este usuario en Drive. Verifica la raiz de sincronizacion o la cuenta conectada.' });
+    }
     var moved = moveFolderContents_(folderInfo.versionsFolder, folderInfo.archivedVersionsFolder);
 
     return jsonResponse_({
@@ -956,6 +970,132 @@ function ensureSyncUserFolder_(userKey, userLabel) {
   };
 }
 
+function resolveSyncUserFolderFromParams_(params, allowCreate) {
+  var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
+  var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
+  var folderId = extractDriveId_(params.folderId || params.userFolderId || params.driveFolderId);
+
+  if (folderId) {
+    var resolvedById = getSyncUserFolderByIds_(folderId, userKey, userLabel, params, allowCreate);
+    if (resolvedById) return resolvedById;
+  }
+
+  return allowCreate
+    ? ensureSyncUserFolder_(userKey, userLabel)
+    : getExistingSyncUserFolder_(userKey, userLabel);
+}
+
+function getExistingSyncUserFolder_(userKey, userLabel) {
+  var config = getConfig_();
+  var rootId = normalizeText_(config.syncRootFolderId);
+  if (!rootId) {
+    throw new Error('Falta configurar SYNC_ROOT_FOLDER_ID en la hoja Admin.');
+  }
+
+  var normalizedKey = sanitizeSyncUserKey_(userKey);
+  var normalizedLabel = sanitizeDriveName_(userLabel);
+  var root = DriveApp.getFolderById(rootId);
+  var targetName = normalizedKey + ' - ' + normalizedLabel;
+  var userFolder = getFolderByName_(root, targetName);
+
+  if (!userFolder) {
+    userFolder = findSyncUserFolderByKey_(root, normalizedKey);
+  }
+  if (!userFolder) return null;
+
+  var currentFolder = getFolderByName_(userFolder, 'current');
+  var versionsFolder = getFolderByName_(userFolder, 'versions');
+  var conflictsFolder = getFolderByName_(userFolder, 'conflicts');
+  var resolvedConflictsFolder = getFolderByName_(userFolder, 'resolved-conflicts');
+  var archivedVersionsFolder = getFolderByName_(userFolder, 'archived-versions');
+
+  return {
+    syncUserKey: normalizedKey,
+    syncUserLabel: normalizeText_(userLabel, userKey),
+    folderId: userFolder.getId(),
+    folderName: userFolder.getName(),
+    folderUrl: userFolder.getUrl(),
+    currentFolder: currentFolder,
+    versionsFolder: versionsFolder,
+    conflictsFolder: conflictsFolder,
+    resolvedConflictsFolder: resolvedConflictsFolder,
+    archivedVersionsFolder: archivedVersionsFolder,
+    currentFolderId: currentFolder ? currentFolder.getId() : '',
+    versionsFolderId: versionsFolder ? versionsFolder.getId() : '',
+    conflictsFolderId: conflictsFolder ? conflictsFolder.getId() : '',
+    resolvedConflictsFolderId: resolvedConflictsFolder ? resolvedConflictsFolder.getId() : '',
+    archivedVersionsFolderId: archivedVersionsFolder ? archivedVersionsFolder.getId() : ''
+  };
+}
+
+function getSyncUserFolderByIds_(folderId, userKey, userLabel, params, allowCreate) {
+  try {
+    var userFolder = DriveApp.getFolderById(folderId);
+    return buildSyncFolderInfoFromFolder_(
+      userFolder,
+      userKey,
+      userLabel,
+      {
+        currentFolderId: params.currentFolderId,
+        versionsFolderId: params.versionsFolderId,
+        conflictsFolderId: params.conflictsFolderId,
+        resolvedConflictsFolderId: params.resolvedConflictsFolderId,
+        archivedVersionsFolderId: params.archivedVersionsFolderId
+      },
+      allowCreate
+    );
+  } catch (error) {
+    return null;
+  }
+}
+
+function buildSyncFolderInfoFromFolder_(userFolder, userKey, userLabel, folderIds, allowCreate) {
+  if (!userFolder) return null;
+
+  var currentFolder = resolveNamedChildFolder_(userFolder, 'current', folderIds && folderIds.currentFolderId, allowCreate);
+  var versionsFolder = resolveNamedChildFolder_(userFolder, 'versions', folderIds && folderIds.versionsFolderId, allowCreate);
+  var conflictsFolder = resolveNamedChildFolder_(userFolder, 'conflicts', folderIds && folderIds.conflictsFolderId, allowCreate);
+  var resolvedConflictsFolder = resolveNamedChildFolder_(userFolder, 'resolved-conflicts', folderIds && folderIds.resolvedConflictsFolderId, allowCreate);
+  var archivedVersionsFolder = resolveNamedChildFolder_(userFolder, 'archived-versions', folderIds && folderIds.archivedVersionsFolderId, allowCreate);
+
+  return {
+    syncUserKey: sanitizeSyncUserKey_(userKey),
+    syncUserLabel: normalizeText_(userLabel, userKey),
+    folderId: userFolder.getId(),
+    folderName: userFolder.getName(),
+    folderUrl: userFolder.getUrl(),
+    currentFolder: currentFolder,
+    versionsFolder: versionsFolder,
+    conflictsFolder: conflictsFolder,
+    resolvedConflictsFolder: resolvedConflictsFolder,
+    archivedVersionsFolder: archivedVersionsFolder,
+    currentFolderId: currentFolder ? currentFolder.getId() : '',
+    versionsFolderId: versionsFolder ? versionsFolder.getId() : '',
+    conflictsFolderId: conflictsFolder ? conflictsFolder.getId() : '',
+    resolvedConflictsFolderId: resolvedConflictsFolder ? resolvedConflictsFolder.getId() : '',
+    archivedVersionsFolderId: archivedVersionsFolder ? archivedVersionsFolder.getId() : ''
+  };
+}
+
+function resolveNamedChildFolder_(parentFolder, name, folderId, allowCreate) {
+  var byName = getFolderByName_(parentFolder, name);
+  if (byName) return byName;
+
+  var explicitId = extractDriveId_(folderId);
+  if (explicitId) {
+    try {
+      var explicitFolder = DriveApp.getFolderById(explicitId);
+      if (normalizeText_(explicitFolder.getName()) === normalizeText_(name)) {
+        return explicitFolder;
+      }
+    } catch (error) {}
+  }
+  if (allowCreate) {
+    return getOrCreateFolder_(parentFolder, name);
+  }
+  return null;
+}
+
 function publicSyncFolderInfo_(folderInfo) {
   if (!folderInfo) return null;
   return {
@@ -983,12 +1123,32 @@ function getOrCreateFolder_(parentFolder, name) {
   return parentFolder.createFolder(name);
 }
 
+function getFolderByName_(parentFolder, name) {
+  var folders = parentFolder.getFoldersByName(name);
+  return folders.hasNext() ? folders.next() : null;
+}
+
+function findSyncUserFolderByKey_(rootFolder, normalizedKey) {
+  var folders = rootFolder.getFolders();
+  var prefix = normalizedKey + ' - ';
+  while (folders.hasNext()) {
+    var folder = folders.next();
+    var folderName = normalizeText_(folder.getName());
+    if (folderName.indexOf(prefix) === 0) {
+      return folder;
+    }
+  }
+  return null;
+}
+
 function getFirstFileByName_(folder, name) {
+  if (!folder) return null;
   var files = folder.getFilesByName(name);
   return files.hasNext() ? files.next() : null;
 }
 
 function clearFolder_(folder) {
+  if (!folder) return;
   var files = folder.getFiles();
   while (files.hasNext()) {
     files.next().setTrashed(true);
@@ -996,6 +1156,7 @@ function clearFolder_(folder) {
 }
 
 function createOrReplaceJsonFile_(folder, name, payload) {
+  if (!folder) throw new Error('No se encontro la carpeta de Drive donde debia guardarse el archivo JSON.');
   var existing = folder.getFilesByName(name);
   while (existing.hasNext()) existing.next().setTrashed(true);
   var blob = Utilities.newBlob(JSON.stringify(payload || {}, null, 2), 'application/json', name);
@@ -1003,6 +1164,7 @@ function createOrReplaceJsonFile_(folder, name, payload) {
 }
 
 function createOrReplaceBase64File_(folder, name, base64, mimeType) {
+  if (!folder) throw new Error('No se encontro la carpeta de Drive donde debia guardarse el archivo ZIP.');
   var existing = folder.getFilesByName(name);
   while (existing.hasNext()) existing.next().setTrashed(true);
   var bytes = Utilities.base64Decode(base64);
@@ -1011,12 +1173,63 @@ function createOrReplaceBase64File_(folder, name, base64, mimeType) {
 }
 
 function readJsonFileFromFolder_(folder, name) {
+  if (!folder) return null;
   var file = getFirstFileByName_(folder, name);
   if (!file) return null;
   return readJsonFileFromFile_(file);
 }
 
+function resolveCurrentCloudCopy_(folderInfo) {
+  if (!folderInfo) return null;
+
+  var currentManifest = readJsonFileFromFolder_(folderInfo.currentFolder, 'manifest.json');
+  var currentZip = getFirstFileByName_(folderInfo.currentFolder, 'snapshot.zip');
+  if (currentManifest && currentZip) {
+    return {
+      manifest: currentManifest,
+      file: currentZip,
+      source: 'current'
+    };
+  }
+
+  var latestVersion = getLatestVersionCloudCopy_(folderInfo.versionsFolder);
+  if (latestVersion) {
+    return {
+      manifest: latestVersion.manifest,
+      file: latestVersion.file,
+      source: 'versions-fallback'
+    };
+  }
+
+  return {
+    manifest: currentManifest,
+    file: currentZip,
+    source: currentManifest || currentZip ? 'current-incomplete' : ''
+  };
+}
+
+function getLatestVersionCloudCopy_(versionsFolder) {
+  if (!versionsFolder) return null;
+  var items = listFolderFilesBySuffix_(versionsFolder, '-manifest.json');
+  for (var i = 0; i < items.length; i += 1) {
+    var item = items[i];
+    var manifest = readJsonFileFromFile_(item.file);
+    if (!manifest) continue;
+    var zipName = item.name.replace(/-manifest\.json$/i, '.zip');
+    var zipFile = getFirstFileByName_(versionsFolder, zipName);
+    if (!zipFile) continue;
+    return {
+      manifest: manifest,
+      file: zipFile,
+      manifestName: item.name,
+      zipName: zipName
+    };
+  }
+  return null;
+}
+
 function moveFolderContents_(sourceFolder, targetFolder) {
+  if (!sourceFolder || !targetFolder) return 0;
   var moved = 0;
   var files = sourceFolder.getFiles();
   while (files.hasNext()) {
@@ -1040,7 +1253,16 @@ function buildDriveFolderUrl_(folderId) {
   return 'https://drive.google.com/drive/folders/' + id;
 }
 
-function summarizeSyncManifestFolder_(folder, kind) {
+function summarizeSyncManifestFolder_(folder, kind, limit) {
+  if (!folder) {
+    return {
+      count: 0,
+      latestAt: '',
+      latestId: '',
+      latestUrl: '',
+      items: []
+    };
+  }
   var files = folder.getFiles();
   var items = [];
 
@@ -1087,11 +1309,12 @@ function summarizeSyncManifestFolder_(folder, kind) {
     latestAt: items.length ? items[0].generatedAt : '',
     latestId: items.length ? items[0].id : '',
     latestUrl: items.length ? items[0].url : '',
-    items: items.slice(0, 5)
+    items: items.slice(0, Math.max(parsePositiveInteger_(limit, 5), 1))
   };
 }
 
 function pruneVersionArtifacts_(folder, keepCount, mode) {
+  if (!folder) return;
   var count = Math.max(parsePositiveInteger_(keepCount, 1), 1);
   var manifestFiles = listFolderFilesBySuffix_(folder, '-manifest.json');
   if (manifestFiles.length <= count) return;
@@ -1105,6 +1328,7 @@ function pruneVersionArtifacts_(folder, keepCount, mode) {
 }
 
 function listFolderFilesBySuffix_(folder, suffix) {
+  if (!folder) return [];
   var files = folder.getFiles();
   var items = [];
   while (files.hasNext()) {

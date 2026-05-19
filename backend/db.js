@@ -199,6 +199,7 @@ const initDb = () => {
                 estudiantes TEXT,
                 grado TEXT,
                 secc TEXT,
+                fecha_nacimiento TEXT,
                 gmail TEXT,
                 outlook TEXT,
                 estado TEXT DEFAULT 'A',
@@ -216,6 +217,7 @@ const initDb = () => {
                 estudiantes TEXT,
                 grado TEXT,
                 secc TEXT,
+                fecha_nacimiento TEXT,
                 gmail TEXT,
                 outlook TEXT,
                 estado TEXT,
@@ -397,6 +399,8 @@ const initDb = () => {
         checkAndAdd('resultados_diagnóstico', 'nivel', 'TEXT');
         checkAndAdd('resultados_diagnóstico', 'estudiante_nombre', 'TEXT');
         checkAndAdd('programacion_anual', 'metas_datos', 'TEXT');
+        checkAndAdd('db_estudiantes', 'fecha_nacimiento', 'TEXT');
+        checkAndAdd('db_egresados', 'fecha_nacimiento', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'year', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'area_id', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'grade', 'TEXT');
@@ -432,11 +436,15 @@ const resolveDumpTables = (options = {}) => {
 
 const dumpDatabase = (options = {}) => {
     const tables = resolveDumpTables(options);
+    const includeExportedAt = options.includeExportedAt !== false;
     const snapshot = {
-        exportedAt: new Date().toISOString(),
         tables: {},
         sqliteSequence: [],
     };
+
+    if (includeExportedAt) {
+        snapshot.exportedAt = new Date().toISOString();
+    }
 
     tables.forEach((table) => {
         snapshot.tables[table] = db.prepare(`SELECT * FROM "${table}"`).all();

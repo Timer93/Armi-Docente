@@ -91,6 +91,42 @@ const getAverageLevel = (
   return 'c';
 };
 
+const getAverageLevelFromZeroBasedScale = (codes: Array<RegisterLevelCode | ''>): RegisterLevelCode => {
+  const validCodes = codes.filter((code): code is Exclude<RegisterLevelCode, 'ne'> => SESSION_LEVEL_ORDER.includes(code as Exclude<RegisterLevelCode, 'ne'>));
+  if (!validCodes.length) return 'ne';
+
+  const average = validCodes.reduce((sum, code) => sum + OVERALL_SCORE_MAP[code], 0) / validCodes.length;
+  if (average >= 2.5) return 'ad';
+  if (average >= 1.5) return 'a';
+  if (average >= 0.5) return 'b';
+  return 'c';
+};
+
+const buildCompetenciesFromCapacities = (
+  capacities: RegisterCapacityResult[],
+  inactiveCode: RegisterLevelCode | null
+): RegisterCompetencyResult[] => {
+  const competencyBuckets = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; codes: RegisterLevelCode[] }>();
+
+  capacities.forEach((capacity) => {
+    if (!competencyBuckets.has(capacity.key.split('::').slice(0, 2).join('::'))) {
+      competencyBuckets.set(capacity.key.split('::').slice(0, 2).join('::'), {
+        source: capacity.source,
+        competencyName: capacity.competencyName,
+        codes: []
+      });
+    }
+    competencyBuckets.get(capacity.key.split('::').slice(0, 2).join('::'))!.codes.push(capacity.code);
+  });
+
+  return Array.from(competencyBuckets.entries()).map(([key, bucket]) => ({
+    key,
+    source: bucket.source,
+    competencyName: bucket.competencyName,
+    code: inactiveCode || getAverageLevelFromZeroBasedScale(bucket.codes)
+  }));
+};
+
 const getRecordMap = (records: EvaluationRecordRow[]) => {
   const map = new Map<string, EvaluationRecordRow>();
   records.forEach((record) => {
@@ -296,19 +332,23 @@ const buildUnitSnapshotsFromSessionSnapshots = (
 
         return {
           studentId: String(student.id),
-          competencies: Array.from(competencyMap.entries()).map(([key, item]) => ({
-            key,
-            source: item.source,
-            competencyName: item.competencyName,
-            code: getAverageLevel(item.codes, UNIT_SCORE_MAP)
-          })),
           capacities: Array.from(capacityMap.entries()).map(([key, item]) => ({
             key,
             source: item.source,
             competencyName: item.competencyName,
             capacityName: item.capacityName,
             code: getAverageLevel(item.codes, UNIT_SCORE_MAP)
-          }))
+          })),
+          competencies: buildCompetenciesFromCapacities(
+            Array.from(capacityMap.entries()).map(([key, item]) => ({
+              key,
+              source: item.source,
+              competencyName: item.competencyName,
+              capacityName: item.capacityName,
+              code: getAverageLevel(item.codes, UNIT_SCORE_MAP)
+            })),
+            null
+          )
         };
       });
 
@@ -356,13 +396,6 @@ export const buildUnitRegisterAggregation = ({ sessions, students, records }: Re
       });
     });
 
-    const competencies = Array.from(competencyKeyMap.entries()).map(([key, bucket]) => ({
-      key,
-      source: bucket.source,
-      competencyName: bucket.competencyName,
-      code: inactiveCode || getAverageLevel(bucket.codes, UNIT_SCORE_MAP)
-    }));
-
     const capacities = Array.from(capacityKeyMap.entries()).map(([key, bucket]) => ({
       key,
       source: bucket.source,
@@ -370,6 +403,8 @@ export const buildUnitRegisterAggregation = ({ sessions, students, records }: Re
       capacityName: bucket.capacityName,
       code: inactiveCode || getAverageLevel(bucket.codes, UNIT_SCORE_MAP)
     }));
+
+    const competencies = buildCompetenciesFromCapacities(capacities, inactiveCode);
 
     const primaryCompetencyCodes = competencies
       .filter((item) => item.source === 'primary')
@@ -441,13 +476,6 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
       });
     });
 
-    const competencies = Array.from(competencyKeyMap.entries()).map(([key, bucket]) => ({
-      key,
-      source: bucket.source,
-      competencyName: bucket.competencyName,
-      code: inactiveCode || getAverageLevel(bucket.codes, UNIT_SCORE_MAP)
-    }));
-
     const capacities = Array.from(capacityKeyMap.entries()).map(([key, bucket]) => ({
       key,
       source: bucket.source,
@@ -455,6 +483,8 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
       capacityName: bucket.capacityName,
       code: inactiveCode || getAverageLevel(bucket.codes, UNIT_SCORE_MAP)
     }));
+
+    const competencies = buildCompetenciesFromCapacities(capacities, inactiveCode);
 
     const primaryCompetencyCodes = competencies
       .filter((item) => item.source === 'primary')

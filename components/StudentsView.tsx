@@ -41,10 +41,29 @@ const NIVEL_OPTIONS = [
 
 const GRADE_ORDER = ['1ro', '2do', '3ro', '4to', '5to'];
 
+const normalizeBirthDate = (value?: string | null) => {
+    const raw = String(value || '').trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
+};
+
+const calculateAgeFromBirthDate = (birthDate?: string | null) => {
+    const normalized = normalizeBirthDate(birthDate);
+    if (!normalized) return '';
+    const parsed = new Date(`${normalized}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return '';
+    const today = new Date();
+    let age = today.getFullYear() - parsed.getFullYear();
+    const monthDiff = today.getMonth() - parsed.getMonth();
+    const dayDiff = today.getDate() - parsed.getDate();
+    if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) age -= 1;
+    return age >= 0 ? String(age) : '';
+};
+
 export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [students, setStudents] = useState<Student[]>([]);
     const [graduates, setGraduates] = useState<Student[]>([]);
     const [originalStudents, setOriginalStudents] = useState<Student[]>([]); 
+    const [savingStudentIds, setSavingStudentIds] = useState<Array<string | number>>([]);
     const [generalData, setGeneralData] = useState<GeneralData>(INITIAL_GENERAL_DATA);
     const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
     
@@ -58,12 +77,14 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [formMicrosoft, setFormMicrosoft] = useState('');
     const [formGroup, setFormGroup] = useState('');
     const [formSexo, setFormSexo] = useState('M');
+    const [formBirthDate, setFormBirthDate] = useState('');
     const [formEdad, setFormEdad] = useState('');
 
     const [filters, setFilters] = useState({ name: '', estado: '', group: '', email: '', microsoft: '', dni: '', nivel: '', sexo: '', edad: '' });
     const [activeFilterField, setActiveFilterField] = useState<string | null>(null);
     const tableContainerRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const autoSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
     const [rtGrade, setRtGrade] = useState('');
     const [rtSection, setRtSection] = useState('');
@@ -151,6 +172,19 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             return () => clearTimeout(timer);
         }
     }, [toast]);
+
+    useEffect(() => {
+        return () => {
+            Object.values(autoSaveTimersRef.current).forEach((timer) => clearTimeout(timer));
+        };
+    }, []);
+
+    useEffect(() => {
+        const nextAge = calculateAgeFromBirthDate(formBirthDate);
+        if (nextAge) {
+            setFormEdad(nextAge);
+        }
+    }, [formBirthDate]);
 
     useEffect(() => {
         if (activeSection === 'egresados') {
@@ -403,17 +437,40 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, [activeFilterField]);
 
-    const handleSaveRow = async (id: string | number) => {
-        const studentToSave = students.find(s => s.id === id);
-        if (!studentToSave) return;
-        const res = await saveEstudiante(studentToSave);
+    const persistStudentRow = async (studentToSave: Student, options?: { silent?: boolean }) => {
+        const idKey = String(studentToSave.id);
+        setSavingStudentIds((prev) => prev.includes(studentToSave.id) ? prev : [...prev, studentToSave.id]);
+        const payload: Student = {
+            ...studentToSave,
+            fechaNacimiento: normalizeBirthDate(studentToSave.fechaNacimiento),
+            edad: studentToSave.fechaNacimiento
+                ? calculateAgeFromBirthDate(studentToSave.fechaNacimiento) || studentToSave.edad
+                : studentToSave.edad,
+        };
+        const res = await saveEstudiante(payload);
         if (res.success) {
-            loadStudents();
-            setSelectedStudentId(null);
-            showToast('Estudiante actualizado en SQL', 'success');
+            setStudents((prev) => prev.map((student) => student.id === studentToSave.id ? payload : student));
+            setOriginalStudents((prev) => {
+                const exists = prev.some((student) => student.id === studentToSave.id);
+                if (!exists) return [...prev, payload];
+                return prev.map((student) => student.id === studentToSave.id ? payload : student);
+            });
+            if (!options?.silent) showToast('Estudiante actualizado en SQL', 'success');
         } else {
             showToast('Error al sincronizar con SQL', 'error');
         }
+        delete autoSaveTimersRef.current[idKey];
+        setSavingStudentIds((prev) => prev.filter((item) => item !== studentToSave.id));
+    };
+
+    const scheduleStudentAutoSave = (studentToSave: Student) => {
+        const idKey = String(studentToSave.id);
+        if (autoSaveTimersRef.current[idKey]) {
+            clearTimeout(autoSaveTimersRef.current[idKey]);
+        }
+        autoSaveTimersRef.current[idKey] = setTimeout(() => {
+            void persistStudentRow(studentToSave, { silent: true });
+        }, 700);
     };
 
     const handleAddStudent = async () => {
@@ -427,12 +484,13 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             name: formName, 
             grade: formGrade,
             section: formSection,
+            fechaNacimiento: normalizeBirthDate(formBirthDate),
             dni: formDni,
             email: formEmail,
             microsoft: formMicrosoft,
             group: formGroup.toUpperCase(),
             sexo: formSexo,
-            edad: formEdad,
+            edad: calculateAgeFromBirthDate(formBirthDate) || formEdad,
             estado: 'A' 
         };
         const res = await saveEstudiante(newStudent);
@@ -557,13 +615,14 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     name: String(row['Estudiante'] || row['Nombre'] || row['Nombres'] || row['Apellidos y Nombres'] || ''),
                     grade: row['Grado'] || formGrade,
                     section: row['Sección'] || row['Seccion'] || formSection,
+                    fechaNacimiento: normalizeBirthDate(row['Fecha de Nacimiento'] || row['Fecha Nacimiento'] || row['Nacimiento'] || row['F. Nacimiento'] || ''),
                     dni: String(row['DNI'] || row['Documento'] || '').replace(/\D/g, '').substring(0, 8),
                     email: row['Gmail'] || row['Correo'] || row['Email'] || '',
                     microsoft: row['Microsoft'] || row['Outlook'] || row['Hotmail'] || '',
                     group: (row['Grupo'] || row['Equipo'] || '').toUpperCase(),
                     estado: row['Estado'] || row['EST.'] || 'A',
                     sexo: row['Sexo'] || 'M',
-                    edad: row['Edad'] || ''
+                    edad: row['Edad'] || calculateAgeFromBirthDate(row['Fecha de Nacimiento'] || row['Fecha Nacimiento'] || row['Nacimiento'] || row['F. Nacimiento'] || '')
                 };
                 if (s.name) await saveEstudiante(s);
             }
@@ -575,12 +634,25 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const handleClearForm = () => {
-        setFormName(''); setFormEmail(''); setFormMicrosoft(''); setFormGroup(''); setFormDni(''); setFormEdad(''); setFormSexo('M'); setSelectedStudentId(null);
+        setFormName(''); setFormEmail(''); setFormMicrosoft(''); setFormGroup(''); setFormDni(''); setFormBirthDate(''); setFormEdad(''); setFormSexo('M'); setSelectedStudentId(null);
     };
 
     const handleStudentUpdate = (id: string | number, field: keyof Student, value: string) => {
         if (field === 'dni') value = value.replace(/\D/g, '').substring(0, 8);
-        setStudents(students.map(s => s.id === id ? { ...s, [field]: value } : s));
+        let updatedStudent: Student | null = null;
+        setStudents(students.map((s) => {
+            if (s.id !== id) return s;
+            const nextStudent: Student = { ...s, [field]: value };
+            if (field === 'fechaNacimiento') {
+                nextStudent.fechaNacimiento = normalizeBirthDate(value);
+                nextStudent.edad = calculateAgeFromBirthDate(nextStudent.fechaNacimiento) || '';
+            }
+            updatedStudent = nextStudent;
+            return nextStudent;
+        }));
+        if (updatedStudent) {
+            scheduleStudentAutoSave(updatedStudent);
+        }
     };
 
     const handleDeleteRequest = (id: string | number) => {
@@ -616,8 +688,9 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             const dniOk = String(s.dni ?? '').toLowerCase().includes(filters.dni.toLowerCase());
             const nivelOk = (s.nivel || '').toLowerCase().includes(filters.nivel.toLowerCase());
             const sexoOk = (s.sexo || '').toLowerCase().includes(filters.sexo.toLowerCase());
+            const edadOk = String(s.edad ?? '').toLowerCase().includes(filters.edad.toLowerCase());
             
-            return gradeOk && sectionOk && nameOk && estadoOk && groupOk && emailOk && microOk && dniOk && nivelOk && sexoOk;
+            return gradeOk && sectionOk && nameOk && estadoOk && groupOk && emailOk && microOk && dniOk && nivelOk && sexoOk && edadOk;
         });
     }, [students, formGrade, formSection, filters]);
 
@@ -843,6 +916,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                     <th className="p-3">Estudiante</th>
                                     <th className="p-3 w-20 text-center">Grado</th>
                                     <th className="p-3 w-20 text-center">Secc.</th>
+                                    <th className="p-3 w-32 text-center">F. Nac.</th>
                                     <th className="p-3 w-20 text-center">Sexo</th>
                                     <th className="p-3 w-20 text-center">Edad</th>
                                     <th className="p-3 w-32 text-center">Egreso</th>
@@ -851,7 +925,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                             <tbody className="divide-y divide-slate-100">
                                 {graduates.length === 0 ? (
                                     <tr>
-                                        <td colSpan={8} className="p-16 text-center text-slate-400 font-bold bg-slate-50 italic uppercase tracking-widest text-[9px]">
+                                        <td colSpan={9} className="p-16 text-center text-slate-400 font-bold bg-slate-50 italic uppercase tracking-widest text-[9px]">
                                             No hay egresados para la búsqueda actual
                                         </td>
                                     </tr>
@@ -863,6 +937,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                             <td className="p-3 font-black uppercase text-slate-800">{student.name || '-'}</td>
                                             <td className="p-3 text-center font-bold text-slate-600">{student.grade || '-'}</td>
                                             <td className="p-3 text-center font-bold text-slate-600">{student.section || '-'}</td>
+                                            <td className="p-3 text-center font-bold text-slate-600">{student.fechaNacimiento || '-'}</td>
                                             <td className="p-3 text-center font-bold text-slate-600">{student.sexo || '-'}</td>
                                             <td className="p-3 text-center font-bold text-slate-600">{String(student.edad || '-')}</td>
                                             <td className="p-3 text-center font-bold text-slate-500">{(student as any).egresadoAt ? String((student as any).egresadoAt).slice(0, 10) : '-'}</td>
@@ -1262,7 +1337,11 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                         <label className={commonLabelClass}>Grupo</label>
                         <input className={`${commonInputClass} text-center uppercase`} placeholder="A..." value={formGroup} onChange={e => setFormGroup(e.target.value)} />
                     </div>
-                    <div className="col-span-3 flex justify-end gap-2 border-l pl-4 border-slate-100">
+                    <div className="col-span-2">
+                        <label className={commonLabelClass}>F. Nacimiento</label>
+                        <input className={commonInputClass} type="date" value={formBirthDate} onChange={e => setFormBirthDate(e.target.value)} />
+                    </div>
+                    <div className="col-span-2 flex justify-end gap-2 border-l pl-4 border-slate-100">
                          <button onClick={handleAddStudent} title="Registrar Estudiante" className="btn-3d-orange scale-75">
                              <span>+</span>
                          </button>
@@ -1339,9 +1418,9 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                  </div>
                                  {activeFilterField === 'microsoft' && <FilterInput field="microsoft" placeholder="Outlook..." />}
                              </th>
+                             <th className="py-1 px-3 w-32 text-center">F. NAC.</th>
                              <th className="py-1 px-3 w-16 text-center">GRUPO</th>
                              <th className="py-1 px-3 w-16 text-center">EDAD</th>
-                             <th className="py-1 px-3 w-20 text-center">Acción</th>
                          </tr>
                      </thead>
                      <tbody className="divide-y divide-slate-100">
@@ -1349,8 +1428,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                              <tr><td colSpan={11} className="p-20 text-center text-slate-400 font-bold bg-slate-50 italic uppercase tracking-widest text-[9px]">Sin registros encontrados</td></tr>
                          ) : (
                              filteredStudents.map((student, index) => {
-                                 const changed = isRowChanged(student);
-                                 const isSelected = selectedStudentId === student.id;
+                                 const isSaving = savingStudentIds.includes(student.id);
                                  return (
                                      <tr key={student.id} onClick={() => setSelectedStudentId(student.id)} className={getRowStyle(student) + " h-[18px]"}>
                                          {/* 
@@ -1362,7 +1440,10 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                              -------------------------------------------------------------------------
                                          */}
                                          <td className="py-0 px-2 text-center font-black opacity-30 border-r border-slate-100/10 select-none cursor-default h-[18px]">
-                                             <span className="leading-none block h-full flex items-center justify-center">{index + 1}</span>
+                                             <span className="leading-none block h-full flex items-center justify-center gap-1">
+                                                 <span>{index + 1}</span>
+                                                 {isSaving ? <span className="text-[8px] text-amber-500">●</span> : null}
+                                             </span>
                                          </td>
                                          <td className="py-0 px-2 border-r border-slate-100/10 h-[18px]">
                                              <select className="w-full bg-transparent border-0 font-bold outline-none text-[9px] py-0 h-full leading-none m-0 appearance-none" value={student.nivel || 'Secundaria'} onChange={e => handleStudentUpdate(student.id, 'nivel', e.target.value)}>
@@ -1392,22 +1473,13 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                              <input className={`w-full bg-transparent border-0 font-medium outline-none focus:bg-white/60 rounded px-1 transition-all py-0 h-full leading-none m-0`} value={student.microsoft || ''} onChange={e => handleStudentUpdate(student.id, 'microsoft', e.target.value)} placeholder="outlook..." />
                                          </td>
                                          <td className="py-0 px-2 text-center border-r border-slate-100/10 h-[18px]">
+                                             <input className="w-full bg-transparent border-0 text-center font-bold outline-none py-0 h-full leading-none m-0" type="date" value={student.fechaNacimiento || ''} onChange={e => handleStudentUpdate(student.id, 'fechaNacimiento', e.target.value)} />
+                                         </td>
+                                         <td className="py-0 px-2 text-center border-r border-slate-100/10 h-[18px]">
                                              <input className="w-full bg-transparent border-0 text-center font-black uppercase outline-none py-0 h-full leading-none m-0" value={student.group || ''} onChange={e => handleStudentUpdate(student.id, 'group', e.target.value.toUpperCase())} placeholder="-" />
                                          </td>
                                          <td className="py-0 px-1 text-center border-r border-slate-100/10 h-[18px]">
                                              <input className="w-full bg-transparent border-0 text-center font-black outline-none py-0 h-full leading-none m-0" value={String(student.edad || '')} maxLength={2} onChange={e => handleStudentUpdate(student.id, 'edad', e.target.value)} placeholder="-" />
-                                         </td>
-                                         <td className="py-0 px-2 text-center h-[18px]">
-                                             <div className="flex justify-center gap-1.5 h-full items-center">
-                                                 {changed && (
-                                                     <button onClick={(e) => { e.stopPropagation(); handleSaveRow(student.id); }} className="btn-3d-orange btn-3d-mini" title="Actualizar registro SQL">
-                                                         <span>↻</span>
-                                                     </button>
-                                                 )}
-                                                 <button onClick={(e) => { e.stopPropagation(); handleDeleteRequest(student.id); }} className="btn-3d-grey btn-3d-mini opacity-0 group-hover:opacity-100 transition-all" title="Eliminar de SQL">
-                                                     <span>-</span>
-                                                 </button>
-                                             </div>
                                          </td>
                                      </tr>
                                  );

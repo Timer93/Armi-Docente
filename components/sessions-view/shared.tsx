@@ -1032,6 +1032,7 @@ const buildSessionAssessmentRowsFromData = (data: any): SessionAssessmentCriteri
                 evidenceText: String(item?.evidence || '').trim(),
                 fieldText: String(item?.field || '').trim(),
                 instrumentLabel: String(item?.inst || '').trim(),
+                rowColor: String(item?.rowColor || '').trim(),
                 order: primaryRows.length + transIdx + criterionIdx + 1
             }));
         })
@@ -1124,6 +1125,7 @@ const buildSessionInstrumentRows = (template: any, sessionAssessmentModel: Sessi
             a: String(rowLevelDescriptors.a || '').trim(),
             ad: String(rowLevelDescriptors.ad || '').trim(),
             source: String(row?.source || '').trim() || 'primary',
+            rowColor: String(current?.rowColor || row?.rowColor || '').trim(),
             instrumentType: templateType
         });
         return acc;

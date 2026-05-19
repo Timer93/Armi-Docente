@@ -1,9 +1,63 @@
-import React from 'react';
+﻿import React from 'react';
 import { ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar, CartesianGrid, XAxis, YAxis, Tooltip, LabelList } from 'recharts';
 import logoBar from '../../src/Logo_bar.ico';
+import { deleteEvaluacionEvidencia, getEvaluacionEvidencias, saveEvaluacionEvidencia } from '../../services/apiService';
 import { autoResizeTextarea, normalizeLoose } from './shared';
 
 type GradingRecord = { level: string; observation: string };
+type SessionEvidenceItem = {
+    id: string | number;
+    fileName: string;
+    fileSize: number;
+    fileType: string;
+    fileUrl: string;
+    uploadedAt: string;
+    previewKind: 'image' | 'video' | 'pdf' | 'doc' | 'sheet' | 'slides' | 'custom' | 'generic';
+};
+
+const EVIDENCE_ACCEPT = '.jpg,.jpeg,.png,.gif,.webp,.bmp,.svg,.mp4,.webm,.mov,.avi,.mkv,.m4v,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.armi';
+const VALID_EVIDENCE_EXTENSIONS = new Set([
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg',
+    'mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v',
+    'pdf',
+    'doc', 'docx', 'odt',
+    'xls', 'xlsx', 'ods',
+    'ppt', 'pptx', 'odp',
+    'armi'
+]);
+
+const getFileExtension = (fileName: string) => {
+    const parts = String(fileName || '').split('.');
+    return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : '';
+};
+
+const getPreviewKind = (extension: string): SessionEvidenceItem['previewKind'] => {
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(extension)) return 'image';
+    if (['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v'].includes(extension)) return 'video';
+    if (extension === 'pdf') return 'pdf';
+    if (['doc', 'docx', 'odt'].includes(extension)) return 'doc';
+    if (['xls', 'xlsx', 'ods'].includes(extension)) return 'sheet';
+    if (['ppt', 'pptx', 'odp'].includes(extension)) return 'slides';
+    if (extension === 'armi') return 'custom';
+    return 'generic';
+};
+
+const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} KB`;
+    return `${Math.round(bytes / 104857.6) / 10} MB`;
+};
+
+const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
+    reader.readAsDataURL(file);
+});
+
+const canOpenInline = (previewKind: SessionEvidenceItem['previewKind']) => (
+    previewKind === 'image' || previewKind === 'video' || previewKind === 'pdf'
+);
 
 interface SessionRegisterPanelProps {
     bimesterLabel: string;
@@ -30,6 +84,51 @@ interface SessionRegisterPanelProps {
     getGradingKey: (studentId: string | number, criteriaId: string | number) => string;
 }
 
+const PrintMiniIcon = () => (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M7 9V4h10v5" />
+        <rect x="4" y="9" width="16" height="8" rx="2" />
+        <path d="M7 14h10v6H7z" />
+        <path d="M17 12h.01" />
+    </svg>
+);
+
+const TooltipVisibleIcon = () => (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        <path d="M8 9h8" />
+        <path d="M8 13h5" />
+    </svg>
+);
+
+const TooltipHiddenIcon = () => (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+);
+
+const ToggleConclusionIcon = ({ expanded }: { expanded: boolean }) => (
+    <svg
+        viewBox="0 0 24 24"
+        className="h-4 w-4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+    >
+        <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+
+        {expanded && (
+            <>
+                <path d="M8 9h8" />
+                <path d="M8 13h5" />
+            </>
+        )}
+    </svg>
+);
+
 export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
     bimesterLabel,
     filteredStudents,
@@ -54,6 +153,173 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
     updateGradingRecord,
     getGradingKey
 }) => {
+    const [showCellDescriptors, setShowCellDescriptors] = React.useState(true);
+    const [evidenceModal, setEvidenceModal] = React.useState<null | {
+        studentId: string | number;
+        studentName: string;
+        competency: any;
+        summaryId: string;
+        summaryLabel: string;
+    }>(null);
+    const [sessionEvidences, setSessionEvidences] = React.useState<SessionEvidenceItem[]>([]);
+    const [evidenceBusy, setEvidenceBusy] = React.useState(false);
+    const [evidenceMessage, setEvidenceMessage] = React.useState('');
+    const evidenceInputRef = React.useRef<HTMLInputElement | null>(null);
+
+    const currentYear = String(generalData?.year || new Date().getFullYear());
+    const currentAreaId = String(sessionData?.sessionAssessmentModel?.scope?.areaId || sessionData?.areaId || selArea || '').trim();
+
+    const loadSessionEvidences = React.useCallback(async (target?: typeof evidenceModal | null) => {
+        const active = target || evidenceModal;
+        if (!active || !currentAreaId || !selGrade || !selSection || !unitNumber || !sessionNumber) {
+            setSessionEvidences([]);
+            return;
+        }
+        setEvidenceBusy(true);
+        const res = await getEvaluacionEvidencias({
+            year: currentYear,
+            areaId: currentAreaId,
+            grade: selGrade,
+            section: selSection,
+            bimester: bimesterLabel,
+            unitNumber,
+            sessionNumber,
+            studentId: String(active.studentId),
+            criteriaId: active.summaryId
+        });
+        if (!res.success) {
+            setEvidenceMessage(res.message || 'No se pudieron cargar las evidencias.');
+            setSessionEvidences([]);
+            setEvidenceBusy(false);
+            return;
+        }
+        setSessionEvidences((res.data || []).map((item: any) => {
+            const extension = getFileExtension(item.fileName || '');
+            return {
+                id: item.id,
+                fileName: item.fileName || 'Archivo',
+                fileSize: Number(item.fileSize || 0),
+                fileType: item.fileType || '',
+                fileUrl: item.fileUrl || '',
+                uploadedAt: item.updatedAt || '',
+                previewKind: getPreviewKind(extension)
+            };
+        }));
+        setEvidenceMessage('');
+        setEvidenceBusy(false);
+    }, [bimesterLabel, currentAreaId, currentYear, evidenceModal, selGrade, selSection, sessionNumber, unitNumber]);
+
+    const uploadEvidenceFiles = React.useCallback(async (files: File[]) => {
+        if (!evidenceModal || files.length === 0) return;
+        const accepted = files.filter((file) => VALID_EVIDENCE_EXTENSIONS.has(getFileExtension(file.name)));
+        if (accepted.length === 0) {
+            setEvidenceMessage('Formato no valido. Usa imagenes, Office, PDF o .armi.');
+            return;
+        }
+        setEvidenceBusy(true);
+        setEvidenceMessage('');
+        for (const file of accepted) {
+            const dataUrl = await readFileAsDataUrl(file);
+            const res = await saveEvaluacionEvidencia({
+                year: currentYear,
+                areaId: currentAreaId,
+                grade: selGrade,
+                section: selSection,
+                bimester: bimesterLabel,
+                unitNumber,
+                sessionNumber,
+                studentIds: [evidenceModal.studentId],
+                studentNames: [evidenceModal.studentName],
+                criteriaId: evidenceModal.summaryId,
+                observation: `Evidencia asociada al nivel de logro ${evidenceModal.summaryLabel}`,
+                fileName: file.name,
+                fileType: file.type || getFileExtension(file.name) || 'application/octet-stream',
+                fileSize: file.size,
+                dataUrl
+            });
+            if (!res.success) {
+                setEvidenceBusy(false);
+                setEvidenceMessage(res.message || 'No se pudo guardar la evidencia.');
+                return;
+            }
+        }
+        await loadSessionEvidences(evidenceModal);
+        setEvidenceBusy(false);
+        setEvidenceMessage('Evidencia guardada correctamente.');
+    }, [bimesterLabel, currentAreaId, currentYear, evidenceModal, loadSessionEvidences, selGrade, selSection, sessionNumber, unitNumber]);
+
+    React.useEffect(() => {
+        if (!evidenceModal) return;
+        loadSessionEvidences(evidenceModal);
+    }, [evidenceModal, loadSessionEvidences]);
+
+    React.useEffect(() => {
+        if (!evidenceModal) return;
+        const onPaste = (event: ClipboardEvent) => {
+            const items = Array.from(event.clipboardData?.items || []);
+            const imageItem = items.find((item) => item.type.startsWith('image/'));
+            if (!imageItem) return;
+            const blob = imageItem.getAsFile();
+            if (!blob) return;
+            event.preventDefault();
+            const ext = blob.type.includes('png') ? 'png' : (blob.type.split('/')[1] || 'png');
+            const pastedFile = new File([blob], `captura-${Date.now()}.${ext}`, { type: blob.type || 'image/png' });
+            uploadEvidenceFiles([pastedFile]);
+        };
+        window.addEventListener('paste', onPaste);
+        return () => window.removeEventListener('paste', onPaste);
+    }, [evidenceModal, uploadEvidenceFiles]);
+
+    const openEvidenceModal = (student: any, competency: any, summaryLabel: string) => {
+        setEvidenceMessage('');
+        setSessionEvidences([]);
+        setEvidenceModal({
+            studentId: student.id,
+            studentName: String(student.name || 'Estudiante'),
+            competency,
+            summaryId: getCompetencySummaryId(competency),
+            summaryLabel
+        });
+    };
+
+    const closeEvidenceModal = () => {
+        setEvidenceModal(null);
+        setSessionEvidences([]);
+        setEvidenceMessage('');
+    };
+
+    const handleEvidenceFiles = async (files: FileList | null) => {
+        if (!files) return;
+        await uploadEvidenceFiles(Array.from(files));
+    };
+
+    const handleDeleteEvidence = async (id: string | number) => {
+        setEvidenceBusy(true);
+        const res = await deleteEvaluacionEvidencia(id);
+        if (!res.success) {
+            setEvidenceBusy(false);
+            setEvidenceMessage(res.message || 'No se pudo eliminar la evidencia.');
+            return;
+        }
+        await loadSessionEvidences();
+        setEvidenceBusy(false);
+        setEvidenceMessage('Evidencia eliminada.');
+    };
+
+    const handleOpenEvidence = (item: SessionEvidenceItem) => {
+        if (!item.fileUrl) return;
+        if (canOpenInline(item.previewKind)) {
+            window.open(item.fileUrl, '_blank', 'noopener,noreferrer');
+            return;
+        }
+        const link = document.createElement('a');
+        link.href = item.fileUrl;
+        link.download = item.fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
     if (!gradingCriteriaRows.length) {
         return (
             <div className="p-10 text-center text-slate-400 text-sm font-bold">
@@ -107,6 +373,12 @@ const getRegisterDynamicWidth = (units: number) =>
         a: 'bg-emerald-50',
         ad: 'bg-sky-50'
     };
+    const levelRadioToneMap: Record<string, { border: string; fill: string }> = {
+        c: { border: '#e11d48', fill: '#f43f5e' },
+        b: { border: '#ea580c', fill: '#f97316' },
+        a: { border: '#059669', fill: '#10b981' },
+        ad: { border: '#0284c7', fill: '#0ea5e9' }
+    };
     const summaryLevelConfig = [
         { id: 'c', label: 'INICIO', color: '#e11d48' },
         { id: 'b', label: 'PROCESO', color: '#f97316' },
@@ -118,6 +390,32 @@ const getRegisterDynamicWidth = (units: number) =>
         acc[level.label] = level.color;
         return acc;
     }, {} as Record<string, string>);
+    const isInactiveStudent = (student: any) => {
+        const normalizedEstado = normalizeLoose(String(student?.estado || ''));
+        return (
+            normalizedEstado === 'r' || normalizedEstado.includes('retir')
+            || normalizedEstado === 't' || normalizedEstado.includes('traslad')
+            || normalizedEstado === 'na' || normalizedEstado.includes('no asiste')
+        );
+    };
+    const applyLevelToCriterionColumn = (criteriaId: string | number, levelCode: string) => {
+        const storedLevel = gradingCodeToStoredLevel(levelCode);
+        filteredStudents.forEach((student) => {
+            if (isInactiveStudent(student)) return;
+            updateGradingRecord(student.id, criteriaId, { level: storedLevel });
+        });
+    };
+    const clearCriterionLevel = (studentId: string | number, criteriaId: string | number) => {
+        updateGradingRecord(studentId, criteriaId, { level: '' });
+    };
+    const getCriterionLevelDescriptor = (criterion: any, levelId: string) => {
+        const descriptor = String(
+            criterion?.levelDescriptors?.[levelId]
+            || criterion?.[levelId]
+            || ''
+        ).trim();
+        return descriptor;
+    };
     const formatTooltipValue = (value: any, _name: any, props: any) => {
         const label = String(props?.payload?.label || 'Nivel');
         const color = summaryLevelLabelColorMap[label] || '#334155';
@@ -195,8 +493,24 @@ const getRegisterDynamicWidth = (units: number) =>
                                     >
                                         {stat.label}
                                     </td>
-                                    <td className="border border-slate-200 p-1 font-black">{stat.count}</td>
-                                    <td className="border border-slate-200 p-1 font-black">{Number(stat.percentage || 0).toFixed(2)}%</td>
+                                    <td
+                                        className="border border-slate-200 p-1 font-black"
+                                        style={{
+                                            color: stat.color,
+                                            backgroundColor: `${stat.color}14`
+                                        }}
+                                    >
+                                        {stat.count}
+                                    </td>
+                                    <td
+                                        className="border border-slate-200 p-1 font-black"
+                                        style={{
+                                            color: stat.color,
+                                            backgroundColor: `${stat.color}14`
+                                        }}
+                                    >
+                                        {Number(stat.percentage || 0).toFixed(2)}%
+                                    </td>
                                 </tr>
                             ))}
                             <tr className="bg-slate-100 font-black text-center">
@@ -436,6 +750,8 @@ const getRegisterDynamicWidth = (units: number) =>
         .replace(/&#39;/gi, "'")
         .replace(/\s+/g, ' ')
         .trim();
+    const printHeaderDarkCellClass = 'bg-black text-white font-black text-right px-1 py-1 border border-black leading-tight print:text-[8px] print:leading-tight print:outline print:outline-1 print:outline-white print:-outline-offset-1';
+    const printHeaderValueCellClass = 'px-2 py-1 border border-black print:text-[8px] print:leading-tight';
 
     const renderPrintHeader = (subtitle: string) => (
         <div className="hidden print:block session-register-page-header print:pb-1">
@@ -463,42 +779,50 @@ const getRegisterDynamicWidth = (units: number) =>
                 <table className="w-full border-collapse text-[10px] print:text-[8px]">
                     <tbody>
                         <tr>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black w-[120px]">Nivel:</td>
-                            <td className="px-2 py-1 border border-black">{generalData?.level || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black w-[80px]">Grado:</td>
-                            <td className="px-2 py-1 border border-black w-[70px]">{selGrade || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black w-[80px]">Unidad:</td>
-                            <td className="px-2 py-1 border border-black w-[90px]">N° {unitNumber || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black w-[80px]">Sesión:</td>
-                            <td className="px-2 py-1 border border-black">{sessionData?.title || printInstrumentName || '-'}</td>
+                            <td className={`${printHeaderDarkCellClass} w-[88px]`}>Nivel:</td>
+                            <td className={`${printHeaderValueCellClass} w-[64px]`}>{generalData?.level || '-'}</td>
+                            <td className={`${printHeaderDarkCellClass} w-[72px]`}>Grado:</td>
+                            <td className={`${printHeaderValueCellClass} w-[52px]`}>{selGrade || '-'}</td>
+                            <td className={`${printHeaderDarkCellClass} w-[72px]`}>Unidad:</td>
+                            <td className={`${printHeaderValueCellClass} w-[64px]`}>N° {unitNumber || '-'}</td>
+                            <td className={`${printHeaderDarkCellClass} w-[72px]`}>Sesión:</td>
+                            <td className={printHeaderValueCellClass}>{sessionData?.title || printInstrumentName || '-'}</td>
                         </tr>
                         <tr>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">Área Curricular:</td>
-                            <td className="px-2 py-1 border border-black">{selArea || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">Sección:</td>
-                            <td className="px-2 py-1 border border-black">{selSection || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">N° Sesión:</td>
-                            <td className="px-2 py-1 border border-black">N° {sessionNumber || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">Propósito:</td>
-                            <td className="px-2 py-1 border border-black">{sessionData?.purpose || '-'}</td>
+                            <td className={printHeaderDarkCellClass}>Área Curricular:</td>
+                            <td className={`${printHeaderValueCellClass} whitespace-nowrap`}>
+                                {selArea || '-'}
+                            </td>
+                            <td className={printHeaderDarkCellClass}>Sección:</td>
+                            <td className={printHeaderValueCellClass}>{selSection || '-'}</td>
+                            <td className={printHeaderDarkCellClass}>N° Sesión:</td>
+                            <td className={printHeaderValueCellClass}>N° {sessionNumber || '-'}</td>
+                            <td className={printHeaderDarkCellClass}>Propósito:</td>
+                            <td className={printHeaderValueCellClass}>{sessionData?.purpose || '-'}</td>
                         </tr>
                         <tr>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">Docente:</td>
-                            <td className="px-2 py-1 border border-black">{generalData?.teacher || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">Bimestre:</td>
-                            <td className="px-2 py-1 border border-black">{bimesterLabel || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">Fecha:</td>
-                            <td className="px-2 py-1 border border-black">{printFooterDate || '-'}</td>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">Producto:</td>
-                            <td className="px-2 py-1 border border-black">{printSessionProduct || '-'}</td>
+                            <td className={printHeaderDarkCellClass}>Docente:</td>
+                            <td className={`${printHeaderValueCellClass} whitespace-nowrap`}>
+                                {generalData?.teacher || '-'}
+                            </td>
+                            <td className={printHeaderDarkCellClass}>Bimestre:</td>
+                            <td className={printHeaderValueCellClass}>{bimesterLabel || '-'}</td>
+                            <td className={printHeaderDarkCellClass}>Fecha:</td>
+                            <td className={printHeaderValueCellClass}>{printFooterDate || '-'}</td>
+                            <td className={printHeaderDarkCellClass}>Producto:</td>
+                            <td className={printHeaderValueCellClass}>{printSessionProduct || '-'}</td>
                         </tr>
                         <tr>
-                            <td className="bg-black text-white font-black text-right px-2 py-1 border border-black">Desempeño:</td>
-                            <td colSpan={7} className="px-2 py-1 border border-black leading-tight">{sessionPerformanceText || '-'}</td>
+                            <td className={printHeaderDarkCellClass}>Desempeño:</td>
+                            <td colSpan={7} className={`${printHeaderValueCellClass} leading-tight`}>{sessionPerformanceText || '-'}</td>
                         </tr>
                     </tbody>
                 </table>
             </div>
+
+
+
+            
         </div>
     );
 
@@ -519,12 +843,30 @@ const getRegisterDynamicWidth = (units: number) =>
                         {filteredStudents.length} estudiantes · {gradingCriteriaRows.length} criterios · {groupedCompetencies.length} competencias activas
                     </p>
                 </div>
-                <button
-                    onClick={() => window.print()}
-                    className="print:hidden px-5 py-3 rounded-2xl text-white text-[11px] font-black uppercase tracking-widest bg-slate-900 hover:bg-slate-800"
-                >
-                    Imprimir Registro
-                </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={() => setShowCellDescriptors((prev) => !prev)}
+                        title={showCellDescriptors ? 'Ocultar descripciones emergentes' : 'Mostrar descripciones emergentes'}
+                        aria-label={showCellDescriptors ? 'Ocultar descripciones emergentes' : 'Mostrar descripciones emergentes'}
+                        aria-pressed={showCellDescriptors}
+                        className={`print:hidden inline-flex h-11 w-11 items-center justify-center rounded-2xl border text-lg font-black leading-none transition ${
+                            showCellDescriptors
+                                ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100'
+                        }`}
+                    >
+                        {showCellDescriptors ? <TooltipVisibleIcon /> : <TooltipHiddenIcon />}
+                    </button>
+                    <button
+                        onClick={() => window.print()}
+                        title="Imprimir registro"
+                        aria-label="Imprimir registro"
+                        className="print:hidden inline-flex h-11 w-11 items-center justify-center rounded-2xl text-lg text-white font-black leading-none bg-slate-900 hover:bg-slate-800"
+                    >
+                        <PrintMiniIcon />
+                    </button>
+                </div>
             </div>
 
             <div className="print:hidden">{gradingSectionTabs}</div>
@@ -604,10 +946,10 @@ const getRegisterDynamicWidth = (units: number) =>
                                                         <button
                                                             type="button"
                                                             onClick={() => setExpandedSessionRegisterObservations((prev) => ({ ...prev, [summaryId]: !prev[summaryId] }))}
-                                                            className="rounded bg-white/15 px-1.5 py-0.5 text-[10px] font-black leading-none hover:bg-white/25 print:hidden"
+                                                            className="inline-flex items-center justify-center rounded bg-white/15 px-1.5 py-0.5 text-[10px] font-black leading-none hover:bg-white/25 print:hidden"
                                                             title={expanded ? 'Ocultar conclusión' : 'Mostrar conclusión'}
                                                         >
-                                                            {expanded ? '⇤⇥' : '⇄'}
+                                                            <ToggleConclusionIcon expanded={expanded} />
                                                         </button>
                                                     </div>
                                                 </th>,
@@ -625,16 +967,18 @@ const getRegisterDynamicWidth = (units: number) =>
                                         })()
                                     )}
                                 </tr>
-                                <tr className="text-white text-[9px] print:text-[16px]">
+                                <tr className="text-white text-[9px] print:text-[14px]">
                                     {criterionBlocks.map((block: any, idx: number) => (
                                         <th
                                             key={`session-register-head-crit-${idx}`}
                                             colSpan={gradingCanonicalLevels.length}
-                                            className="border border-white/20 p-2 text-left normal-case leading-tight"
+                                            className="border border-white/20 p-2 text-left align-top normal-case leading-tight print:p-1 print:align-top"
                                             style={{ backgroundColor: String(block.source || '') === 'transversal' ? '#0f766e' : '#334155' }}
                                         >
-                                            <div className="font-black uppercase text-[8px] print:text-[16px] tracking-wide">{block.code}</div>
-<div className="mt-1 text-[9px] print:text-[16px] font-medium">{block.criterion.criterio}</div>
+                                            <div className="font-black uppercase text-[8px] print:text-[10px] tracking-wide leading-tight">{block.code}</div>
+                                            <div className="mt-1 text-[9px] print:text-[14px] font-medium leading-tight whitespace-normal break-words">
+                                                {block.criterion.criterio}
+                                            </div>
                                         </th>
                                     ))}
                                 </tr>
@@ -643,7 +987,9 @@ const getRegisterDynamicWidth = (units: number) =>
                                         gradingCanonicalLevels.map((level: any) => (
                                             <th
                                                 key={`session-register-head-level-${idx}-${level.id}`}
-                                                className={`border border-white/20 p-1 text-center ${level.color} ${level.id === 'ad' ? 'border-r-4 border-r-slate-800/60' : ''}`}
+                                                onClick={() => applyLevelToCriterionColumn(block.criterion.id, level.id)}
+                                                title={`Aplicar ${String(level.short || level.label || '').toUpperCase()} a toda la columna`}
+                                                className={`border border-white/20 p-1 text-center ${level.color} ${level.id === 'ad' ? 'border-r-4 border-r-slate-800/60' : ''} cursor-pointer transition hover:brightness-110 hover:shadow-inner`}
                                             >
                                                 {level.short}
                                             </th>
@@ -654,11 +1000,7 @@ const getRegisterDynamicWidth = (units: number) =>
                             <tbody>
                                 {filteredStudents.map((student, studentIdx) => {
                                     const rowState = getStudentRowStateClass(student.estado);
-                                    const normalizedEstado = normalizeLoose(String(student.estado || ''));
-                                    const isInactiveStudent =
-                                        normalizedEstado === 'r' || normalizedEstado.includes('retir')
-                                        || normalizedEstado === 't' || normalizedEstado.includes('traslad')
-                                        || normalizedEstado === 'na' || normalizedEstado.includes('no asiste');
+                                    const inactiveStudent = isInactiveStudent(student);
                                     const rowBaseClass = rowState.row === 'bg-white'
                                         ? (studentIdx % 2 === 0 ? 'bg-white' : 'bg-slate-50')
                                         : rowState.row;
@@ -683,17 +1025,68 @@ const getRegisterDynamicWidth = (units: number) =>
                                                         return gradingCanonicalLevels.map((level: any, levelIdx: number) => (
                                                             <td
                                                                 key={`session-register-cell-${student.id}-${compIdx}-${blockIdx}-${level.id}`}
-                                                                className={`border border-slate-200 px-1 py-1 print:px-0.5 print:py-0.5 text-center ${isInactiveStudent ? rowState.row : (levelFillMap[level.id] || '')} ${levelIdx === gradingCanonicalLevels.length - 1 ? 'border-r-4 border-r-slate-300' : ''}`}
+                                                                className={`group relative border border-slate-200 px-1 py-1 print:px-0.5 print:py-0.5 text-center ${inactiveStudent ? rowState.row : (levelFillMap[level.id] || '')} ${levelIdx === gradingCanonicalLevels.length - 1 ? 'border-r-4 border-r-slate-300' : ''}`}
+                                                                onContextMenu={(event) => {
+                                                                    if (inactiveStudent) return;
+                                                                    event.preventDefault();
+                                                                    clearCriterionLevel(student.id, block.criterion.id);
+                                                                }}
                                                             >
-                                                                <label className="flex items-center justify-center cursor-pointer">
+                                                                {showCellDescriptors ? (() => {
+                                                                    const descriptor = getCriterionLevelDescriptor(block.criterion, level.id);
+                                                                    const levelLabel = String(level.short || level.label || '').toUpperCase();
+                                                                    if (!descriptor && inactiveStudent) return null;
+                                                                    return (
+                                                                        <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-56 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 px-3 py-2 text-left shadow-xl backdrop-blur-sm group-hover:block print:hidden">
+                                                                            <div className="mb-1 text-[10px] font-black uppercase tracking-wide text-slate-700">
+                                                                                {block.code} · {levelLabel}
+                                                                            </div>
+                                                                            <div className="text-[10px] leading-snug text-slate-600">
+                                                                                {inactiveStudent
+                                                                                    ? 'Estudiante no evaluable en esta fila.'
+                                                                                    : (descriptor || 'Este nivel no tiene descripción cargada todavía.')}
+                                                                            </div>
+                                                                            {!inactiveStudent ? (
+                                                                                <div className="mt-2 text-[9px] font-semibold text-slate-400">
+                                                                                    Clic derecho: desmarcar
+                                                                                </div>
+                                                                            ) : null}
+                                                                        </div>
+                                                                    );
+                                                                })() : null}
+                                                                <label className={`flex items-center justify-center ${inactiveStudent ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
                                                                     <input
                                                                         type="radio"
                                                                         name={`session-register-${student.id}-${block.criterion.id}`}
-                                                                        className="h-4 w-4 print:h-3 print:w-3 accent-slate-800"
-                                                                        checked={!isInactiveStudent && currentCode === level.id}
-                                                                        disabled={isInactiveStudent}
+                                                                        className="appearance-none h-4 w-4 print:h-3 print:w-3 rounded-full border-2 bg-white transition-all duration-150"
+                                                                        checked={!inactiveStudent && currentCode === level.id}
+                                                                        disabled={inactiveStudent}
+                                                                        style={(() => {
+                                                                            const tone = levelRadioToneMap[level.id];
+                                                                            const isChecked = !inactiveStudent && currentCode === level.id;
+                                                                            if (!tone) {
+                                                                                return {
+                                                                                    borderColor: isChecked ? '#0f172a' : '#a1a1aa',
+                                                                                    backgroundColor: isChecked ? '#0f172a' : '#ffffff',
+                                                                                    boxShadow: isChecked ? 'inset 0 0 0 2px #ffffff' : 'none'
+                                                                                };
+                                                                            }
+                                                                            return {
+                                                                                borderColor: isChecked ? tone.border : '#8a8f98',
+                                                                                backgroundColor: isChecked ? tone.fill : '#ffffff',
+                                                                                boxShadow: isChecked
+                                                                                    ? 'inset 0 0 0 2px #ffffff'
+                                                                                    : 'none',
+                                                                                opacity: inactiveStudent ? 0.65 : 1
+                                                                            };
+                                                                        })()}
+                                                                        title={showCellDescriptors
+                                                                            ? (inactiveStudent
+                                                                                ? 'Estudiante no evaluable'
+                                                                                : `${String(level.short || level.label || '').toUpperCase()}: ${getCriterionLevelDescriptor(block.criterion, level.id) || 'Sin descripción cargada'} · Clic derecho para desmarcar`)
+                                                                            : ''}
                                                                         onChange={() => {
-                                                                            if (isInactiveStudent) return;
+                                                                            if (inactiveStudent) return;
                                                                             updateGradingRecord(student.id, block.criterion.id, {
                                                                                 level: gradingCodeToStoredLevel(level.id)
                                                                             });
@@ -705,19 +1098,26 @@ const getRegisterDynamicWidth = (units: number) =>
                                                     }),
                                                     <td
                                                         key={`session-register-nl-${student.id}-${compIdx}`}
-                                                        className={`border border-slate-200 px-1.5 py-1 text-center font-black text-[10px] ${competencySummary.code ? (nlToneMap[competencySummary.code] || 'bg-slate-100 text-slate-700') : (isInactiveStudent ? rowState.row : (String(competency.source || '') === 'transversal' ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-slate-700'))}`}
+                                                        onClick={() => {
+                                                            if (inactiveStudent) return;
+                                                            openEvidenceModal(student, competency, competencySummary.label);
+                                                        }}
+                                                        title={inactiveStudent ? 'Estudiante no evaluable' : 'Clic para adjuntar evidencias de esta nota'}
+                                                        className={`border border-slate-200 px-1.5 py-1 text-center font-black text-[10px] ${inactiveStudent ? 'cursor-not-allowed' : 'cursor-pointer hover:brightness-110'} ${competencySummary.code ? (nlToneMap[competencySummary.code] || 'bg-slate-100 text-slate-700') : (inactiveStudent ? rowState.row : (String(competency.source || '') === 'transversal' ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-slate-700'))}`}
                                                     >
-                                                        {competencySummary.label}
+                                                        <div className="flex items-center justify-center gap-1">
+                                                            <span>{competencySummary.label}</span>
+                                                        </div>
                                                     </td>,
                                                     ...(expanded ? [
                                                         <td key={`session-register-obs-${student.id}-${compIdx}`} className="border border-slate-200 px-2 py-1 align-top">
                                                             <textarea
                                                                 key={`session-register-obs-input-${student.id}-${summaryId}-${getStudentObservationSummary(student.id, competency)}`}
                                                                 defaultValue={getStudentObservationSummary(student.id, competency)}
-                                                                disabled={isInactiveStudent}
+                                                                disabled={inactiveStudent}
                                                                 onInput={(event) => autoResizeTextarea(event.currentTarget)}
                                                                 onBlur={(event) => {
-                                                                    if (isInactiveStudent) return;
+                                                                    if (inactiveStudent) return;
                                                                     const nextValue = event.target.value;
                                                                     const currentValue = getStudentObservationSummary(student.id, competency);
                                                                     if (nextValue === currentValue) return;
@@ -725,10 +1125,10 @@ const getRegisterDynamicWidth = (units: number) =>
                                                                         observation: nextValue
                                                                     });
                                                                 }}
-                                                                placeholder={isInactiveStudent ? 'No evaluado' : 'Conclusión descriptiva...'}
+                                                                placeholder={inactiveStudent ? 'No evaluado' : 'Conclusión descriptiva...'}
                                                                 rows={2}
                                                                 className={`w-full resize-none overflow-hidden rounded-lg border px-2 py-1 text-[9px] leading-tight ${
-                                                                    isInactiveStudent
+                                                                    inactiveStudent
                                                                         ? 'border-slate-300 bg-slate-100 text-slate-400 cursor-not-allowed'
                                                                         : 'border-slate-200 bg-white text-slate-700'
                                                                 }`}
@@ -786,6 +1186,93 @@ const getRegisterDynamicWidth = (units: number) =>
                     </div>
                 </>
             )}
+            {evidenceModal ? (
+                <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/50 p-4 print:hidden">
+                    <div className="w-full max-w-3xl rounded-[2rem] border border-slate-200 bg-white shadow-2xl">
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-5">
+                            <div>
+                                <div className="text-[11px] font-black uppercase tracking-[0.2em] text-emerald-600">Evidencias de la nota</div>
+                                <h4 className="text-xl font-black text-slate-800">{evidenceModal.studentName}</h4>
+                                <p className="text-sm font-bold text-slate-500">{evidenceModal.competency?.name || 'Competencia'} · NL {evidenceModal.summaryLabel}</p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeEvidenceModal}
+                                className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-200 bg-white text-lg font-black text-slate-600 hover:bg-slate-100"
+                            >
+                                ×
+                            </button>
+                        </div>
+                        <div className="space-y-4 p-6">
+                            <div className="flex flex-wrap items-center gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => evidenceInputRef.current?.click()}
+                                    disabled={evidenceBusy}
+                                    className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-60"
+                                >
+                                    Subir evidencia
+                                </button>
+                                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-bold text-emerald-700">
+                                    Tambien puedes pegar una captura con `Ctrl + V` desde el recortador de Windows.
+                                </div>
+                                <input
+                                    ref={evidenceInputRef}
+                                    type="file"
+                                    multiple
+                                    accept={EVIDENCE_ACCEPT}
+                                    className="hidden"
+                                    onChange={(event) => {
+                                        handleEvidenceFiles(event.target.files);
+                                        event.currentTarget.value = '';
+                                    }}
+                                />
+                            </div>
+                            {evidenceMessage ? (
+                                <div className={`rounded-2xl border px-4 py-3 text-sm font-bold ${evidenceMessage.toLowerCase().includes('no se pudo') || evidenceMessage.toLowerCase().includes('formato no valido') ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+                                    {evidenceMessage}
+                                </div>
+                            ) : null}
+                            <div className="max-h-[55vh] overflow-y-auto rounded-[1.5rem] border border-slate-200">
+                                {evidenceBusy ? (
+                                    <div className="p-8 text-center text-sm font-bold text-slate-400">Procesando evidencias...</div>
+                                ) : sessionEvidences.length === 0 ? (
+                                    <div className="p-8 text-center text-sm font-bold text-slate-400">Aun no hay evidencias asociadas a esta nota.</div>
+                                ) : (
+                                    <div className="divide-y divide-slate-200">
+                                        {sessionEvidences.map((item) => (
+                                            <div key={item.id} className="flex items-center justify-between gap-4 px-4 py-4">
+                                                <div className="min-w-0">
+                                                    <div className="truncate text-sm font-black text-slate-800">{item.fileName}</div>
+                                                    <div className="mt-1 text-xs font-bold text-slate-500">
+                                                        {formatFileSize(item.fileSize)} · {item.uploadedAt || 'Sin fecha'}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleOpenEvidence(item)}
+                                                        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-700 hover:bg-slate-100"
+                                                    >
+                                                        Ver
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleDeleteEvidence(item.id)}
+                                                        className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-black text-rose-700 hover:bg-rose-100"
+                                                    >
+                                                        Eliminar
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
         </div>
     );
 };

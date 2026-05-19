@@ -135,12 +135,24 @@ const MENU_ITEMS: MenuItem[] = [
 ];
 
 export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, currentSection, onNavigate, teacherName, isCollapsed, toggleCollapse, moduleAccess, onLogout, userRoleLabel, profileSession }) => {
+  const appVersion = __APP_VERSION__;
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['datos_generales']);
   const [profileImage, setProfileImage] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const visibleMenuItems = MENU_ITEMS.filter((item) => moduleAccess?.[item.key] !== false);
+  const hiddenEvaluationSubmenuIds = new Set(['registro', 'reportes', 'retroalimentacion', 'configuracion']);
+  const visibleMenuItems = MENU_ITEMS
+    .filter((item) => moduleAccess?.[item.key] !== false)
+    .map((item) => item.key === 'evaluacion'
+      ? {
+          ...item,
+          subItems: Array.isArray(item.subItems)
+            ? item.subItems.filter((subItem) => !hiddenEvaluationSubmenuIds.has(subItem.id))
+            : item.subItems
+        }
+      : item
+    );
 
   useEffect(() => {
     const savedImg = readStoredProfileImage(profileSession);
@@ -450,6 +462,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
              {!isCollapsed && (
                  <div className="text-center pb-4 px-4">
                     <p className={`text-[10px] font-medium ${isDarkMode ? 'text-slate-600' : 'text-slate-400'}`}>© 2025 Armi Docente</p>
+                    <p className={`mt-1 text-[10px] font-black uppercase tracking-[0.18em] ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>v{appVersion}</p>
                  </div>
              )}
         </div>

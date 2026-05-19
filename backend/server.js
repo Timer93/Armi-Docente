@@ -15,7 +15,7 @@ import programacionWordRoutes from './routes/programacionWord.routes.js';
 import unidadWordRoutes from './routes/unidadWord.routes.js';
 import sesionWordRoutes from './routes/sesionWord.routes.js';
 import { checkPurchaseStatus, getAuthProviderInfo, getPurchaseConfig, loginUser, submitPurchase } from './auth.js';
-import { applyCloudArtifact, clearCloudVersionHistory, getSyncStatus, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, resolveCloudConflict, saveFrontendStateSnapshot, updateSyncConfig } from './sync.js';
+import { applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, getSyncStatus, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, resolveCloudConflict, saveFrontendStateSnapshot, updateSyncConfig } from './sync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1020,11 +1020,30 @@ app.post('/api/estado-modulos', (req, res) => {
   } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 });
 
+const normalizeBirthDate = (value) => {
+  const raw = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
+};
+
+const calculateAgeFromBirthDate = (birthDate) => {
+  const normalized = normalizeBirthDate(birthDate);
+  if (!normalized) return null;
+  const parsed = new Date(`${normalized}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - parsed.getFullYear();
+  const monthDiff = today.getMonth() - parsed.getMonth();
+  const dayDiff = today.getDate() - parsed.getDate();
+  if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) age -= 1;
+  return age >= 0 ? age : null;
+};
+
 app.get('/api/estudiantes', (req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM db_estudiantes ORDER BY estudiantes ASC').all();
     res.json({ success: true, data: rows.map(r => ({
       id: r.id, nivel: r.nivel, dni: r.dni, name: r.estudiantes, grade: r.grado, section: r.secc,
+      fechaNacimiento: r.fecha_nacimiento || '',
       email: r.gmail, microsoft: r.outlook, estado: r.estado, group: r.grupo, sexo: r.sexo, edad: r.edad
     })) });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -1033,8 +1052,24 @@ app.get('/api/estudiantes', (req, res) => {
 app.post('/api/estudiantes', (req, res) => {
   try {
     const s = req.body;
-    const mapped = { nivel: s.nivel, dni: s.dni, estudiantes: s.name, grado: s.grade, secc: s.section, gmail: s.email, outlook: s.microsoft, estado: s.estado, grupo: s.group, sexo: s.sexo, edad: s.edad };
-    if (s.id && !String(s.id).startsWith('import')) {
+    const fechaNacimiento = normalizeBirthDate(s.fechaNacimiento);
+    const edadCalculada = calculateAgeFromBirthDate(fechaNacimiento);
+    const edad = edadCalculada ?? (String(s.edad || '').trim() ? Number(s.edad) : null);
+    const mapped = {
+      nivel: s.nivel,
+      dni: s.dni,
+      estudiantes: s.name,
+      grado: s.grade,
+      secc: s.section,
+      fecha_nacimiento: fechaNacimiento,
+      gmail: s.email,
+      outlook: s.microsoft,
+      estado: s.estado,
+      grupo: s.group,
+      sexo: s.sexo,
+      edad,
+    };
+    if (s.id && !String(s.id).startsWith('import') && !String(s.id).startsWith('new-')) {
       const cols = Object.keys(mapped);
       const setClause = cols.map(c => `${c} = ?`).join(', ');
       db.prepare(`UPDATE db_estudiantes SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...Object.values(mapped), s.id);
@@ -1064,6 +1099,7 @@ app.get('/api/egresados', (req, res) => {
       name: r.estudiantes,
       grade: r.grado,
       section: r.secc,
+      fechaNacimiento: r.fecha_nacimiento || '',
       email: r.gmail,
       microsoft: r.outlook,
       estado: r.estado,
@@ -1096,8 +1132,8 @@ app.post('/api/estudiantes/egresar', (req, res) => {
 
     const insertGraduate = db.prepare(`
       INSERT INTO db_egresados (
-        estudiante_id_origen, nivel, dni, estudiantes, grado, secc, gmail, outlook, estado, grupo, sexo, edad
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        estudiante_id_origen, nivel, dni, estudiantes, grado, secc, fecha_nacimiento, gmail, outlook, estado, grupo, sexo, edad
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const deleteStudent = db.prepare('DELETE FROM db_estudiantes WHERE id = ?');
 
@@ -1110,6 +1146,7 @@ app.post('/api/estudiantes/egresar', (req, res) => {
           row.estudiantes || '',
           row.grado || '',
           row.secc || '',
+          row.fecha_nacimiento || '',
           row.gmail || '',
           row.outlook || '',
           row.estado || '',
@@ -1555,7 +1592,7 @@ app.post('/api/evaluacion/registros', (req, res) => {
 });
 
 app.get('/api/evaluacion/evidencias', (req, res) => {
-  const { year, areaId, grade, section, bimester, unitNumber, sessionNumber } = req.query;
+  const { year, areaId, grade, section, bimester, unitNumber, sessionNumber, studentId, criteriaId } = req.query;
   try {
     let sql = 'SELECT * FROM evaluacion_evidencias WHERE 1=1';
     const params = [];
@@ -1566,6 +1603,8 @@ app.get('/api/evaluacion/evidencias', (req, res) => {
     if (bimester) { sql += ' AND bimester = ?'; params.push(bimester); }
     if (unitNumber) { sql += ' AND unit_number = ?'; params.push(unitNumber); }
     if (sessionNumber) { sql += ' AND session_number = ?'; params.push(sessionNumber); }
+    if (studentId) { sql += ' AND student_id = ?'; params.push(String(studentId)); }
+    if (criteriaId) { sql += ' AND criteria_id = ?'; params.push(String(criteriaId)); }
     sql += ' ORDER BY updated_at DESC';
 
     const rows = db.prepare(sql).all(...params).map((row) => ({
@@ -1577,6 +1616,9 @@ app.get('/api/evaluacion/evidencias', (req, res) => {
       bimester: row.bimester || '',
       unitNumber: row.unit_number || '',
       sessionNumber: row.session_number || '',
+      studentId: row.student_id || '',
+      criteriaId: row.criteria_id || '',
+      observation: row.observation || '',
       studentIds: JSON.parse(row.student_ids || '[]'),
       studentNames: JSON.parse(row.student_names || '[]'),
       fileName: row.file_name || path.basename(row.file_path || ''),
@@ -1605,10 +1647,12 @@ app.post('/api/evaluacion/evidencias', (req, res) => {
     sessionNumber,
     studentIds,
     studentNames,
+    criteriaId,
     fileName,
     fileType,
     fileSize,
-    dataUrl
+    dataUrl,
+    observation
   } = req.body || {};
 
   try {
@@ -1660,10 +1704,10 @@ app.post('/api/evaluacion/evidencias', (req, res) => {
       `).run(
         firstStudentId,
         sessionId,
-        '',
+        String(criteriaId || ''),
         absoluteFilePath,
         fileType || '',
-        '',
+        String(observation || ''),
         year,
         areaId,
         grade,
@@ -1692,10 +1736,10 @@ app.post('/api/evaluacion/evidencias', (req, res) => {
       `).run(
         firstStudentId,
         sessionId,
-        '',
+        String(criteriaId || ''),
         absoluteFilePath,
         fileType || '',
-        '',
+        String(observation || ''),
         year,
         areaId,
         grade,
@@ -1725,6 +1769,9 @@ app.post('/api/evaluacion/evidencias', (req, res) => {
         bimester: saved.bimester || '',
         unitNumber: saved.unit_number || '',
         sessionNumber: saved.session_number || '',
+        studentId: saved.student_id || '',
+        criteriaId: saved.criteria_id || '',
+        observation: saved.observation || '',
         studentIds: JSON.parse(saved.student_ids || '[]'),
         studentNames: JSON.parse(saved.student_names || '[]'),
         fileName: saved.file_name || path.basename(saved.file_path || ''),
@@ -1869,6 +1916,20 @@ app.post('/api/sync/config', async (req, res) => {
 app.post('/api/sync/push', async (req, res) => {
   try {
     res.json(await pushToCloud());
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+app.post('/api/sync/pending/mark', async (req, res) => {
+  try {
+    res.json(await markPendingLocalBackup(req.body || {}));
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+app.post('/api/sync/pending/discard', async (req, res) => {
+  try {
+    res.json(await discardPendingLocalBackup());
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }

@@ -19,6 +19,7 @@ const configPath = path.join(runtimeFolder, 'sync-config.json');
 const authSettingsPath = path.join(runtimeFolder, 'auth-settings.json');
 const bundledAuthSettingsPath = path.join(appRoot, 'sync-runtime', 'auth-settings.json');
 const remoteSyncStatePath = path.join(runtimeFolder, 'remote-sync-state.json');
+const pendingLocalStatePath = path.join(runtimeFolder, 'pending-local-state.json');
 const syncableDirectories = [
   { key: 'uploads', absolutePath: uploadsRoot },
 ];
@@ -52,6 +53,58 @@ const pathExists = (targetPath) => {
 
 const toPosix = (value) => value.split(path.sep).join('/');
 const fromPosixToCurrentOs = (value) => value.split('/').join(path.sep);
+
+const stableJsonValue = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableJsonValue(item));
+  }
+  if (value && typeof value === 'object') {
+    return Object.keys(value)
+      .sort((left, right) => left.localeCompare(right))
+      .reduce((acc, key) => {
+        acc[key] = stableJsonValue(value[key]);
+        return acc;
+      }, {});
+  }
+  return value;
+};
+
+const buildStableSyncFingerprint = (targetPath, scope, relativePath) => {
+  if (scope === 'database' || relativePath === 'database/database-dump.json') {
+    const payload = readJsonFile(targetPath, null);
+    if (payload && typeof payload === 'object') {
+      const normalized = {
+        ...payload,
+        exportedAt: '',
+        sqliteSequence: Array.isArray(payload.sqliteSequence)
+          ? [...payload.sqliteSequence].sort((left, right) => String(left?.name || '').localeCompare(String(right?.name || '')))
+          : [],
+      };
+      const stable = JSON.stringify(stableJsonValue(normalized));
+      return {
+        checksum: crypto.createHash('sha256').update(stable).digest('hex'),
+        size: Buffer.byteLength(stable, 'utf8'),
+      };
+    }
+  }
+
+  if (scope === 'frontend-state' || relativePath === 'state/frontend-local-storage.json') {
+    const payload = readJsonFile(targetPath, null);
+    const stable = JSON.stringify(stableJsonValue({
+      keys: payload?.keys || {},
+    }));
+    return {
+      checksum: crypto.createHash('sha256').update(stable).digest('hex'),
+      size: Buffer.byteLength(stable, 'utf8'),
+    };
+  }
+
+  const stats = safeStat(targetPath);
+  return {
+    checksum: hashFile(targetPath),
+    size: stats?.size || 0,
+  };
+};
 
 const readJsonFile = (targetPath, fallback = null) => {
   try {
@@ -195,6 +248,7 @@ const defaultConfig = () => ({
   autoSyncOnClose: true,
   syncUserKey: DEFAULT_SYNC_USER_KEY,
   syncUserLabel: 'Usuario local',
+  remoteFolderInfo: null,
   lastUpdatedAt: null,
 });
 
@@ -237,6 +291,78 @@ const normalizeUserLabel = (value) => {
   return normalized || 'Usuario local';
 };
 
+const normalizeRemoteFolderInfo = (value) => {
+  if (!value || typeof value !== 'object') return null;
+  const normalized = {
+    syncUserKey: sanitizeUserScope(value.syncUserKey),
+    syncUserLabel: normalizeUserLabel(value.syncUserLabel || value.folderName),
+    folderId: String(value.folderId || '').trim(),
+    folderName: String(value.folderName || '').trim(),
+    folderUrl: String(value.folderUrl || '').trim(),
+    currentFolderId: String(value.currentFolderId || '').trim(),
+    currentFolderUrl: String(value.currentFolderUrl || '').trim(),
+    versionsFolderId: String(value.versionsFolderId || '').trim(),
+    versionsFolderUrl: String(value.versionsFolderUrl || '').trim(),
+    conflictsFolderId: String(value.conflictsFolderId || '').trim(),
+    conflictsFolderUrl: String(value.conflictsFolderUrl || '').trim(),
+    resolvedConflictsFolderId: String(value.resolvedConflictsFolderId || '').trim(),
+    resolvedConflictsFolderUrl: String(value.resolvedConflictsFolderUrl || '').trim(),
+    archivedVersionsFolderId: String(value.archivedVersionsFolderId || '').trim(),
+    archivedVersionsFolderUrl: String(value.archivedVersionsFolderUrl || '').trim(),
+  };
+  return normalized.folderId ? normalized : null;
+};
+
+const sameRemoteFolderInfo = (left, right) => (
+  JSON.stringify(normalizeRemoteFolderInfo(left) || null) === JSON.stringify(normalizeRemoteFolderInfo(right) || null)
+);
+
+const persistRemoteFolderInfo = (remoteUser, configLike = null) => {
+  const normalized = normalizeRemoteFolderInfo(remoteUser);
+  const currentConfig = configLike || readConfig();
+  if (sameRemoteFolderInfo(currentConfig.remoteFolderInfo, normalized)) {
+    return currentConfig;
+  }
+  return saveConfig({ remoteFolderInfo: normalized });
+};
+
+const persistObservedRemoteSyncState = (manifest, configLike = null) => {
+  const cloudVersion = String(manifest?.cloudVersion || '').trim();
+  const digest = String(manifest?.digest || '').trim();
+  if (!cloudVersion && !digest) return;
+
+  const currentState = readJsonFile(remoteSyncStatePath, {});
+  const currentConfig = configLike || readConfig();
+  const nextSyncUserKey = sanitizeUserScope(currentConfig.syncUserKey);
+  const nextState = {
+    ...currentState,
+    lastCloudVersion: cloudVersion || currentState.lastCloudVersion || '',
+    lastCloudDigest: digest || currentState.lastCloudDigest || '',
+    lastSeenAt: new Date().toISOString(),
+    syncUserKey: nextSyncUserKey,
+    provider: REMOTE_PROVIDER,
+  };
+
+  writeJsonAtomic(remoteSyncStatePath, nextState);
+};
+
+const buildAppsScriptSyncPayload = (configLike = {}) => {
+  const config = configLike || {};
+  const remoteFolderInfo = normalizeRemoteFolderInfo(config.remoteFolderInfo);
+  return {
+    syncUserKey: sanitizeUserScope(config.syncUserKey),
+    syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+    ...(remoteFolderInfo?.folderId ? {
+      folderId: remoteFolderInfo.folderId,
+      currentFolderId: remoteFolderInfo.currentFolderId,
+      versionsFolderId: remoteFolderInfo.versionsFolderId,
+      conflictsFolderId: remoteFolderInfo.conflictsFolderId,
+      resolvedConflictsFolderId: remoteFolderInfo.resolvedConflictsFolderId,
+      archivedVersionsFolderId: remoteFolderInfo.archivedVersionsFolderId,
+    } : {}),
+  };
+};
+
 const buildSuggestedMirrorPath = (basePath, syncUserKey) => (
   path.join(basePath, DEFAULT_MIRROR_SUBFOLDER, 'users', sanitizeUserScope(syncUserKey))
 );
@@ -269,7 +395,10 @@ const ensureMirrorStructure = (mirrorPath) => {
 };
 
 const stageLocalDatabaseDump = () => {
-  const dump = dumpDatabase({ excludeTables: Array.from(SYNC_EXCLUDED_TABLES) });
+  const dump = dumpDatabase({
+    excludeTables: Array.from(SYNC_EXCLUDED_TABLES),
+    includeExportedAt: false,
+  });
   writeJsonAtomic(dbDumpPath, dump);
   return dbDumpPath;
 };
@@ -278,13 +407,14 @@ const serializeLocalFiles = () => {
   const files = [];
   const databaseDumpStats = safeStat(dbDumpPath);
   if (databaseDumpStats) {
+    const fingerprint = buildStableSyncFingerprint(dbDumpPath, 'database', 'database/database-dump.json');
     files.push({
       scope: 'database',
       relativePath: 'database/database-dump.json',
       absolutePath: dbDumpPath,
-      size: databaseDumpStats.size,
+      size: fingerprint.size,
       mtimeMs: databaseDumpStats.mtimeMs,
-      checksum: hashFile(dbDumpPath),
+      checksum: fingerprint.checksum,
     });
   }
 
@@ -292,26 +422,29 @@ const serializeLocalFiles = () => {
     listFilesRecursive(absolutePath).forEach((filePath) => {
       const stats = safeStat(filePath);
       if (!stats) return;
+      const relativePath = toPosix(path.relative(dataRoot, filePath));
+      const fingerprint = buildStableSyncFingerprint(filePath, key, relativePath);
       files.push({
         scope: key,
-        relativePath: toPosix(path.relative(dataRoot, filePath)),
+        relativePath,
         absolutePath: filePath,
-        size: stats.size,
+        size: fingerprint.size,
         mtimeMs: stats.mtimeMs,
-        checksum: hashFile(filePath),
+        checksum: fingerprint.checksum,
       });
     });
   });
 
   const frontendStats = safeStat(frontendStatePath);
   if (frontendStats) {
+    const fingerprint = buildStableSyncFingerprint(frontendStatePath, 'frontend-state', 'state/frontend-local-storage.json');
     files.push({
       scope: 'frontend-state',
       relativePath: 'state/frontend-local-storage.json',
       absolutePath: frontendStatePath,
-      size: frontendStats.size,
+      size: fingerprint.size,
       mtimeMs: frontendStats.mtimeMs,
-      checksum: hashFile(frontendStatePath),
+      checksum: fingerprint.checksum,
     });
   }
 
@@ -323,10 +456,9 @@ const buildManifestFromFiles = (files, provider, storageMode) => {
   const digest = crypto.createHash('sha256')
     .update(
       JSON.stringify(
-        files.map(({ relativePath, size, mtimeMs, checksum }) => ({
+        files.map(({ relativePath, size, checksum }) => ({
           relativePath,
           size,
-          mtimeMs,
           checksum,
         }))
       )
@@ -464,12 +596,32 @@ const verifyMirrorIntegrity = (mirrorPath, manifest) => {
   return { ok: true, code: 'ok', missingFiles: [] };
 };
 
+const getComparableManifestDigest = (manifest) => {
+  const files = Array.isArray(manifest?.files) ? manifest.files : [];
+  if (!files.length) return '';
+  return crypto.createHash('sha256')
+    .update(
+      JSON.stringify(
+        files.map(({ relativePath, size, checksum }) => ({
+          relativePath: String(relativePath || ''),
+          size: Number(size || 0),
+          checksum: String(checksum || ''),
+        }))
+        .sort((left, right) => left.relativePath.localeCompare(right.relativePath))
+      )
+    )
+    .digest('hex');
+};
+
 const compareManifests = (localManifest, mirrorManifest, mode) => {
   if (mode === 'local') return 'local-mode';
   if (mode === 'apps_script_drive' && !mirrorManifest && localManifest) return 'mirror-missing';
   if (!mirrorManifest && !localManifest) return 'no-data';
   if (!mirrorManifest && localManifest) return 'mirror-missing';
   if (localManifest?.digest === mirrorManifest?.digest) return 'in-sync';
+  const localComparableDigest = getComparableManifestDigest(localManifest);
+  const mirrorComparableDigest = getComparableManifestDigest(mirrorManifest);
+  if (localComparableDigest && localComparableDigest === mirrorComparableDigest) return 'in-sync';
   const localDate = Date.parse(localManifest?.generatedAt || '') || 0;
   const mirrorDate = Date.parse(mirrorManifest?.generatedAt || '') || 0;
   if (mirrorDate > localDate) return 'mirror-newer';
@@ -535,6 +687,45 @@ const saveFrontendStateSnapshot = (payload = {}) => {
   const normalized = normalizeFrontendStatePayload(payload);
   writeJsonAtomic(frontendStatePath, normalized);
   return normalized;
+};
+
+const readPendingLocalState = () => readJsonFile(pendingLocalStatePath, null);
+
+const clearPendingLocalState = () => {
+  try {
+    if (pathExists(pendingLocalStatePath)) {
+      fs.unlinkSync(pendingLocalStatePath);
+    }
+  } catch {}
+};
+
+const persistPendingLocalState = (payload = {}) => {
+  const pending = {
+    createdAt: new Date().toISOString(),
+    reason: String(payload.reason || 'pending-sync').trim() || 'pending-sync',
+    restorePoint: String(payload.restorePoint || '').trim(),
+    manifest: payload.manifest || null,
+    counts: payload.counts || getSyncEntityCounts(),
+    note: String(payload.note || '').trim(),
+  };
+  writeJsonAtomic(pendingLocalStatePath, pending);
+  return pending;
+};
+
+export const markPendingLocalBackup = async (payload = {}) => {
+  const restorePoint = createLocalRestorePoint();
+  stageLocalDatabaseDump();
+  const manifest = buildManifestFromFiles(serializeLocalFiles(), 'local-pending-backup', 'local');
+  writeJsonAtomic(localManifestPath, manifest);
+  return {
+    success: true,
+    data: persistPendingLocalState({
+      ...payload,
+      restorePoint,
+      manifest,
+      counts: getSyncEntityCounts(),
+    }),
+  };
 };
 
 const createLocalRestorePoint = () => {
@@ -672,8 +863,7 @@ const fetchCloudArtifact = async ({ artifactId = '', artifactKind = 'version' } 
 
   const response = await postAppsScript({
     action: 'sync_pull_artifact',
-    syncUserKey: sanitizeUserScope(config.syncUserKey),
-    syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+    ...buildAppsScriptSyncPayload(config),
     artifactId: String(artifactId || '').trim(),
     artifactKind: normalizeArtifactKind(artifactKind),
   }, 240000);
@@ -704,8 +894,7 @@ export const resolveCloudConflict = async ({ artifactId = '' } = {}) => {
 
   const response = await postAppsScript({
     action: 'sync_resolve_conflict',
-    syncUserKey: sanitizeUserScope(config.syncUserKey),
-    syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+    ...buildAppsScriptSyncPayload(config),
     conflictId,
   }, 120000);
 
@@ -728,8 +917,7 @@ export const clearCloudVersionHistory = async () => {
 
   const response = await postAppsScript({
     action: 'sync_clear_versions',
-    syncUserKey: sanitizeUserScope(config.syncUserKey),
-    syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+    ...buildAppsScriptSyncPayload(config),
   }, 120000);
 
   if (!response.success) {
@@ -902,23 +1090,23 @@ const mergeStudentsTablesFromDump = (dump) => {
   const transaction = db.transaction(() => {
     const insertStudent = db.prepare(`
       INSERT INTO db_estudiantes (
-        nivel, dni, estudiantes, grado, secc, gmail, outlook, estado, grupo, sexo, edad, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        nivel, dni, estudiantes, grado, secc, fecha_nacimiento, gmail, outlook, estado, grupo, sexo, edad, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const updateStudent = db.prepare(`
       UPDATE db_estudiantes
-      SET nivel = ?, dni = ?, estudiantes = ?, grado = ?, secc = ?, gmail = ?, outlook = ?, estado = ?, grupo = ?, sexo = ?, edad = ?, updated_at = ?
+      SET nivel = ?, dni = ?, estudiantes = ?, grado = ?, secc = ?, fecha_nacimiento = ?, gmail = ?, outlook = ?, estado = ?, grupo = ?, sexo = ?, edad = ?, updated_at = ?
       WHERE id = ?
     `);
     const deleteStudent = db.prepare('DELETE FROM db_estudiantes WHERE id = ?');
     const insertGraduate = db.prepare(`
       INSERT INTO db_egresados (
-        estudiante_id_origen, nivel, dni, estudiantes, grado, secc, gmail, outlook, estado, grupo, sexo, edad, egresado_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        estudiante_id_origen, nivel, dni, estudiantes, grado, secc, fecha_nacimiento, gmail, outlook, estado, grupo, sexo, edad, egresado_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const updateGraduate = db.prepare(`
       UPDATE db_egresados
-      SET estudiante_id_origen = ?, nivel = ?, dni = ?, estudiantes = ?, grado = ?, secc = ?, gmail = ?, outlook = ?, estado = ?, grupo = ?, sexo = ?, edad = ?, egresado_at = ?
+      SET estudiante_id_origen = ?, nivel = ?, dni = ?, estudiantes = ?, grado = ?, secc = ?, fecha_nacimiento = ?, gmail = ?, outlook = ?, estado = ?, grupo = ?, sexo = ?, edad = ?, egresado_at = ?
       WHERE id = ?
     `);
 
@@ -938,6 +1126,7 @@ const mergeStudentsTablesFromDump = (dump) => {
           row?.estudiantes ?? '',
           row?.grado ?? '',
           row?.secc ?? '',
+          row?.fecha_nacimiento ?? '',
           row?.gmail ?? '',
           row?.outlook ?? '',
           row?.estado ?? 'A',
@@ -958,6 +1147,7 @@ const mergeStudentsTablesFromDump = (dump) => {
           row?.estudiantes ?? existing.estudiantes ?? '',
           row?.grado ?? existing.grado ?? '',
           row?.secc ?? existing.secc ?? '',
+          row?.fecha_nacimiento ?? existing.fecha_nacimiento ?? '',
           row?.gmail ?? existing.gmail ?? '',
           row?.outlook ?? existing.outlook ?? '',
           row?.estado ?? existing.estado ?? 'A',
@@ -983,6 +1173,7 @@ const mergeStudentsTablesFromDump = (dump) => {
           row?.estudiantes ?? '',
           row?.grado ?? '',
           row?.secc ?? '',
+          row?.fecha_nacimiento ?? '',
           row?.gmail ?? '',
           row?.outlook ?? '',
           row?.estado ?? '',
@@ -1000,6 +1191,7 @@ const mergeStudentsTablesFromDump = (dump) => {
           row?.estudiantes ?? existingGraduate.estudiantes ?? '',
           row?.grado ?? existingGraduate.grado ?? '',
           row?.secc ?? existingGraduate.secc ?? '',
+          row?.fecha_nacimiento ?? existingGraduate.fecha_nacimiento ?? '',
           row?.gmail ?? existingGraduate.gmail ?? '',
           row?.outlook ?? existingGraduate.outlook ?? '',
           row?.estado ?? existingGraduate.estado ?? '',
@@ -1068,16 +1260,24 @@ export const getSyncStatus = async () => {
     : null;
   let remoteUser = null;
   let remoteActivity = null;
+  let remoteLookupMessage = '';
   if (config.mode === 'apps_script_drive') {
     const remoteStatus = await postAppsScript({
       action: 'sync_status',
-      syncUserKey: sanitizeUserScope(config.syncUserKey),
-      syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+      ...buildAppsScriptSyncPayload(config),
     }, 45000);
     if (remoteStatus.success) {
       mirrorManifest = remoteStatus.data?.manifest || null;
-      remoteUser = remoteStatus.data?.user || null;
+      remoteUser = normalizeRemoteFolderInfo(remoteStatus.data?.user);
       remoteActivity = remoteStatus.data?.activity || null;
+      if (remoteUser) {
+        persistRemoteFolderInfo(remoteUser, config);
+      }
+      if (mirrorManifest) {
+        persistObservedRemoteSyncState(mirrorManifest, config);
+      }
+    } else {
+      remoteLookupMessage = String(remoteStatus.message || '').trim();
     }
   }
   const integrity = config.mode === 'drive_mirror' && resolvedMirror.mirrorPath
@@ -1094,8 +1294,9 @@ export const getSyncStatus = async () => {
         resolvedMirrorPath: resolvedMirror.mirrorPath,
         mirrorPathDerivedAutomatically: resolvedMirror.derivedAutomatically,
         remoteProvider: config.mode === 'apps_script_drive' ? REMOTE_PROVIDER : null,
-        remoteUser,
+        remoteUser: remoteUser || normalizeRemoteFolderInfo(config.remoteFolderInfo),
         remoteActivity,
+        remoteLookupMessage,
         lastCloudVersion: remoteState.lastCloudVersion || '',
       },
       localManifest,
@@ -1107,6 +1308,8 @@ export const getSyncStatus = async () => {
         detected: driveCandidates.length > 0,
         candidates: driveCandidates,
       },
+      pendingLocal: readPendingLocalState(),
+      frontendState: readJsonFile(frontendStatePath, { keys: {} }),
       safety: {
         restorePointsPath: snapshotsFolder,
         retention: SAFETY_RETENTION,
@@ -1142,7 +1345,7 @@ export const updateSyncConfig = async (payload = {}) => {
     if (!prepared.success) {
       return { success: false, message: prepared.message || 'No pude preparar la carpeta del usuario en Drive.' };
     }
-    remoteUser = prepared.data || null;
+    remoteUser = normalizeRemoteFolderInfo(prepared.data);
   }
 
   const nextConfig = saveConfig({
@@ -1151,6 +1354,7 @@ export const updateSyncConfig = async (payload = {}) => {
     autoSyncOnClose,
     syncUserKey,
     syncUserLabel,
+    remoteFolderInfo: mode === 'apps_script_drive' ? remoteUser : null,
   });
 
   if (nextConfig.mode === 'drive_mirror') {
@@ -1195,8 +1399,7 @@ export const pushToCloud = async () => {
     const packageBase64 = buildSyncPackageBase64(manifest);
     const response = await postAppsScript({
       action: 'sync_push',
-      syncUserKey: sanitizeUserScope(config.syncUserKey),
-      syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+      ...buildAppsScriptSyncPayload(config),
       deviceId: getDeviceId(),
       baseCloudVersion: remoteState.lastCloudVersion || '',
       manifest,
@@ -1204,6 +1407,9 @@ export const pushToCloud = async () => {
     }, 240000);
 
     if (!response.success) {
+      if (response.data?.currentManifest) {
+        persistObservedRemoteSyncState(response.data.currentManifest, config);
+      }
       return {
         success: false,
         message: response.message || 'No se pudo subir la copia a Drive.',
@@ -1213,6 +1419,10 @@ export const pushToCloud = async () => {
     }
 
     const cloudManifest = response.data?.manifest || manifest;
+    const remoteUser = normalizeRemoteFolderInfo(response.data?.user);
+    if (remoteUser) {
+      persistRemoteFolderInfo(remoteUser, config);
+    }
     if (String(cloudManifest?.digest || '') !== String(manifest.digest || '')) {
       return {
         success: false,
@@ -1222,7 +1432,7 @@ export const pushToCloud = async () => {
           remoteDigest: cloudManifest?.digest || '',
           localCounts,
           restorePoint,
-          remoteUser: response.data?.user || null,
+          remoteUser,
         },
       };
     }
@@ -1234,6 +1444,7 @@ export const pushToCloud = async () => {
       provider: REMOTE_PROVIDER,
     });
     writeJsonAtomic(localManifestPath, cloudManifest);
+    clearPendingLocalState();
     return {
       success: true,
       data: {
@@ -1241,7 +1452,7 @@ export const pushToCloud = async () => {
         mode: config.mode,
         counts: localCounts,
         restorePoint,
-        remoteUser: response.data?.user || null,
+        remoteUser,
       },
     };
   }
@@ -1317,12 +1528,25 @@ export const pullFromCloud = async (payload = {}) => {
   if (config.mode === 'apps_script_drive') {
     const response = await postAppsScript({
       action: 'sync_pull',
-      syncUserKey: sanitizeUserScope(config.syncUserKey),
-      syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+      ...buildAppsScriptSyncPayload(config),
     }, 240000);
 
     if (!response.success) {
       return { success: false, message: response.message || 'No se pudo descargar la copia desde Drive.' };
+    }
+    const remoteUser = normalizeRemoteFolderInfo(response.data?.user) || normalizeRemoteFolderInfo(config.remoteFolderInfo);
+    if (response.data?.user) {
+      persistRemoteFolderInfo(response.data.user, config);
+    }
+    if (!String(response.data?.packageBase64 || '').trim()) {
+      return {
+        success: false,
+        message: response.message || 'No hay una copia actual disponible en Drive para este usuario todavia.',
+        data: {
+          remoteUser,
+          manifest: response.data?.manifest || null,
+        },
+      };
     }
 
     const localCountsBeforePull = getSyncEntityCounts();
@@ -1346,7 +1570,7 @@ export const pullFromCloud = async (payload = {}) => {
           remoteCounts,
           regressions: regressionCheck.regressions,
           restorePoint: restoreRoot,
-          remoteUser: response.data?.user || null,
+          remoteUser,
         },
       };
     }
@@ -1360,6 +1584,7 @@ export const pullFromCloud = async (payload = {}) => {
       syncUserKey: sanitizeUserScope(config.syncUserKey),
       provider: REMOTE_PROVIDER,
     });
+    clearPendingLocalState();
 
     return {
       success: true,
@@ -1368,7 +1593,7 @@ export const pullFromCloud = async (payload = {}) => {
         counts: getSyncEntityCounts(),
         frontendState: readJsonFile(frontendStatePath, { keys: {} }),
         restorePoint: restoreRoot,
-        remoteUser: response.data?.user || null,
+        remoteUser,
       },
     };
   }
@@ -1411,6 +1636,7 @@ export const pullFromCloud = async (payload = {}) => {
   }
   applyMirrorToLocal(effectiveMirror.mirrorPath, mirrorManifest, restoreRoot);
   writeJsonAtomic(localManifestPath, mirrorManifest);
+  clearPendingLocalState();
   persistMirrorSyncState(effectiveMirror.mirrorPath, {
     lastPullAt: new Date().toISOString(),
     lastOperation: 'pull',
@@ -1565,6 +1791,11 @@ export const mergeStudentsFromCloudArtifact = async (payload = {}) => {
   } catch (error) {
     return { success: false, message: error?.message || 'No se pudo fusionar la lista de estudiantes de la copia seleccionada.' };
   }
+};
+
+export const discardPendingLocalBackup = async () => {
+  clearPendingLocalState();
+  return { success: true };
 };
 
 export { saveFrontendStateSnapshot };

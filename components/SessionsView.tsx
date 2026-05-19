@@ -70,11 +70,14 @@ import {
     InternalToast,
     AuthOverlay
 } from './sessions-view/shared';
+import { readStoredViewSelection, writeStoredViewSelection } from '../utils/viewSelectionStorage';
 
 interface Props {
   activeSection: string;
   onSuccess: () => void;
 }
+
+const SESSIONS_VIEW_SELECTION_STORAGE_KEY = 'armi_view_selection_sesiones_v1';
 
 const DEFAULT_EXTENSION_ACTIVITIES = [
     'Socialización oral de aprendizajes clave del proyecto entre equipos.',
@@ -130,8 +133,136 @@ const buildDefaultAreaTemplateSessionData = () => {
     });
 };
 
+const sanitizeAiJsonCandidate = (rawText: string) =>
+    String(rawText || '')
+        .replace(/^\uFEFF/, '')
+        .replace(/```json/gi, '')
+        .replace(/```/g, '')
+        .trim();
+
+const SESSION_AI_DIAGNOSTIC_STORAGE_KEY = 'armi_session_ai_last_failure_v1';
+
+const buildAiDiagnosticPreview = (text: string, maxLength = 1600) => {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+    return normalized.length > maxLength
+        ? `${normalized.slice(0, maxLength)}...`
+        : normalized;
+};
+
+const recordSessionAiDiagnostic = (payload: {
+    stage: 'extract' | 'parse';
+    errorMessage: string;
+    rawText: string;
+    cleanedText?: string;
+}) => {
+    const diagnosticEntry = {
+        timestamp: new Date().toISOString(),
+        stage: payload.stage,
+        errorMessage: payload.errorMessage,
+        rawLength: String(payload.rawText || '').length,
+        cleanedLength: String(payload.cleanedText || '').length,
+        rawPreview: buildAiDiagnosticPreview(payload.rawText),
+        cleanedPreview: buildAiDiagnosticPreview(payload.cleanedText || '')
+    };
+
+    try {
+        localStorage.setItem(SESSION_AI_DIAGNOSTIC_STORAGE_KEY, JSON.stringify(diagnosticEntry));
+    } catch {
+        // Si localStorage falla, mantenemos solo el diagnóstico en consola.
+    }
+
+    console.error('Session IA diagnostic', diagnosticEntry);
+};
+
+const extractFirstBalancedJsonBlock = (rawText: string) => {
+    const cleaned = sanitizeAiJsonCandidate(rawText);
+    let start = -1;
+    let depth = 0;
+    let inString = false;
+    let escaping = false;
+
+    for (let i = 0; i < cleaned.length; i += 1) {
+        const ch = cleaned[i];
+
+        if (start === -1) {
+            if (ch === '{' || ch === '[') {
+                start = i;
+                depth = 1;
+            }
+            continue;
+        }
+
+        if (inString) {
+            if (escaping) {
+                escaping = false;
+                continue;
+            }
+            if (ch === '\\') {
+                escaping = true;
+                continue;
+            }
+            if (ch === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (ch === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (ch === '{' || ch === '[') {
+            depth += 1;
+            continue;
+        }
+
+        if (ch === '}' || ch === ']') {
+            depth -= 1;
+            if (depth === 0) {
+                return cleaned.slice(start, i + 1);
+            }
+        }
+    }
+
+    if (cleaned) {
+        const firstBrace = cleaned.indexOf('{');
+        const lastBrace = cleaned.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+            return cleaned.slice(firstBrace, lastBrace + 1);
+        }
+    }
+
+    recordSessionAiDiagnostic({
+        stage: 'extract',
+        errorMessage: 'La IA no devolvió un JSON utilizable.',
+        rawText,
+        cleanedText: cleaned
+    });
+
+    throw new Error('La IA no devolvió un JSON utilizable.');
+};
+
+const parseAiJsonObject = (rawText: string) => {
+    const jsonBlock = extractFirstBalancedJsonBlock(rawText);
+    try {
+        return JSON.parse(jsonBlock);
+    } catch (error: any) {
+        const rawMessage = String(error?.message || 'JSON inválido');
+        recordSessionAiDiagnostic({
+            stage: 'parse',
+            errorMessage: rawMessage,
+            rawText,
+            cleanedText: jsonBlock
+        });
+        throw new Error(`La IA devolvió JSON malformado. ${rawMessage}`);
+    }
+};
+
 export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
+    const initialSelection = useMemo(() => readStoredViewSelection(SESSIONS_VIEW_SELECTION_STORAGE_KEY), []);
     const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
+    const [assignmentsLoaded, setAssignmentsLoaded] = useState(false);
     const [competenciasBase, setCompetenciasBase] = useState<any[]>([]);
     const [sessionMode, setSessionMode] = useState<'planificacion' | 'calificacion'>('planificacion');
     const [students, setStudents] = useState<Student[]>([]);
@@ -142,16 +273,16 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [expandedSessionRegisterObservations, setExpandedSessionRegisterObservations] = useState<Record<string, boolean>>({});
     const gradingAutosaveRef = useRef<{ initialized: boolean; lastSaved: string; saving: boolean }>({ initialized: false, lastSaved: '', saving: false });
     
-    const [selArea, setSelArea] = useState('');
-    const [selGrade, setSelGrade] = useState('');
-    const [selSection, setSelSection] = useState('');
+    const [selArea, setSelArea] = useState(initialSelection.areaName || '');
+    const [selGrade, setSelGrade] = useState(initialSelection.grade || '');
+    const [selSection, setSelSection] = useState(initialSelection.section || '');
 
-    const [unitNumber, setUnitNumber] = useState('1');
-    const [sessionNumber, setSessionNumber] = useState('1');
+    const [unitNumber, setUnitNumber] = useState(initialSelection.unitNumber || '1');
+    const [sessionNumber, setSessionNumber] = useState(initialSelection.sessionNumber || '1');
     const [maxSessionsInUnit, setMaxSessionsInUnit] = useState(15);
     const [sessionDate, setSessionDate] = useState('');
     const [dateOptions, setDateOptions] = useState<{value: string, label: string}[]>([]);
-    const [year, setYear] = useState(new Date().getFullYear().toString());
+    const [year, setYear] = useState(initialSelection.year || new Date().getFullYear().toString());
     const [themeColor, setThemeColor] = useState(localStorage.getItem('armi_sessions_theme') || '#6b21a8');
     const [toasts, setToasts] = useState<Array<{ id: string; msg: string; type: 'success' | 'error' | 'warning' }>>([]);
     const [allSavedPrograms, setAllSavedPrograms] = useState<Record<string, any>>({});
@@ -168,6 +299,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [pendingDate, setPendingDate] = useState('');
     const [showMotiveModal, setShowMotiveModal] = useState(false);
     const [motiveInput, setMotiveInput] = useState('');
+    const lastToastRef = useRef<{ msg: string; type: 'success' | 'error' | 'warning'; at: number } | null>(null);
 
     const bimesterLabel = useMemo(() => {
         const u = parseInt(unitNumber);
@@ -221,15 +353,53 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const setToast = useCallback((nextToast: { msg: string, type: 'success' | 'error' | 'warning' } | null) => {
         if (!nextToast) {
             setToasts([]);
+            lastToastRef.current = null;
             return;
         }
+        const normalizedMsg = String(nextToast.msg || '').trim();
+        const now = Date.now();
+        const lastToast = lastToastRef.current;
+        if (
+            lastToast
+            && lastToast.type === nextToast.type
+            && lastToast.msg === normalizedMsg
+            && now - lastToast.at < 1800
+        ) {
+            return;
+        }
+        lastToastRef.current = { msg: normalizedMsg, type: nextToast.type, at: now };
         const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        setToasts(prev => [...prev, { id, ...nextToast }]);
+        setToasts(prev => [...prev, { id, ...nextToast, msg: normalizedMsg }]);
     }, []);
 
     const closeToastById = useCallback((id: string) => {
         setToasts(prev => prev.filter(t => t.id !== id));
     }, []);
+
+    const handleOpenLastAiDiagnostic = useCallback(() => {
+        try {
+            const raw = localStorage.getItem(SESSION_AI_DIAGNOSTIC_STORAGE_KEY);
+            if (!raw) {
+                setToast({ msg: 'No hay diagnóstico IA guardado.', type: 'warning' });
+                return;
+            }
+            const parsed = JSON.parse(raw);
+            const message = [
+                `Fecha: ${parsed?.timestamp || '-'}`,
+                `Etapa: ${parsed?.stage || '-'}`,
+                `Error: ${parsed?.errorMessage || '-'}`,
+                `Largo bruto: ${parsed?.rawLength || 0}`,
+                `Largo limpio: ${parsed?.cleanedLength || 0}`,
+                '',
+                'Vista previa:',
+                String(parsed?.cleanedPreview || parsed?.rawPreview || '-')
+            ].join('\n');
+            window.alert(message);
+        } catch (error) {
+            console.error('No se pudo abrir el diagnóstico IA guardado.', error);
+            setToast({ msg: 'No se pudo leer el diagnóstico IA.', type: 'error' });
+        }
+    }, [setToast]);
 
     const loadTemplateRowsByInstrument = useCallback(async (instrumentLabel: string) => {
         if (!selArea || !selGrade || !selSection) {
@@ -326,6 +496,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             instrumentName: selectedTemplate?.name || '',
             matchQuality: selected.isFullMatch ? 'full' as const : 'area' as const,
             template: {
+                id: selectedTemplate?.id ?? null,
                 type: instrumentType,
                 name: selectedTemplate?.name || '',
                 structure: selectedTemplate?.structure || {}
@@ -333,6 +504,40 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             rows
         };
     }, [assignments, selArea, selGrade, selSection, year]);
+
+    const hydrateMissingInstrumentTemplate = useCallback(async (rawSessionData: any) => {
+        const instrumentLabel = String(rawSessionData?.instrumentoTemplate?.name || rawSessionData?.competenciaPrio?.inst || '').trim();
+        const hasTemplate = !!rawSessionData?.instrumentoTemplate;
+        const hasRows = hasFilledInstrumentRows(rawSessionData?.instrumento);
+
+        if (hasTemplate || !hasRows || !instrumentLabel) {
+            return { data: rawSessionData, hydrated: false, reason: '' };
+        }
+
+        const templateResult = await loadTemplateRowsByInstrument(instrumentLabel);
+        if (templateResult.status !== 'loaded') {
+            return {
+                data: rawSessionData,
+                hydrated: false,
+                reason: templateResult.status === 'error' || templateResult.status === 'unsupported'
+                    ? templateResult.reason
+                    : ''
+            };
+        }
+
+        return {
+            hydrated: true,
+            reason: '',
+            data: {
+                ...rawSessionData,
+                instrumentoTemplate: {
+                    ...templateResult.template,
+                    lockedLayout: true,
+                    fillableCellIds: getTemplateFillableCellIds(templateResult.template)
+                }
+            }
+        };
+    }, [loadTemplateRowsByInstrument]);
 
     useEffect(() => {
         const runResize = () => {
@@ -347,16 +552,17 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         const load = async () => {
             const saved = localStorage.getItem('armi_assignments');
             if (saved) setAssignments(JSON.parse(saved));
+            setAssignmentsLoaded(true);
             const gd = await getDatosGenerales();
             setGeneralData(gd);
-            if (gd.year) setYear(gd.year);
+            if (!initialSelection.year && gd.year) setYear(gd.year);
             const progs = await getProgramacionesAnuales();
             setAllSavedPrograms(progs);
             const studentRows = await getEstudiantes();
             setStudents(studentRows);
         };
         load();
-    }, []);
+    }, [initialSelection.year]);
 
     const uniqueAreas = useMemo(() => Array.from(new Set(assignments.map(a => a.areaName))).sort(), [assignments]);
     
@@ -374,6 +580,44 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         }
         return options;
     }, [assignments, selArea, selGrade]);
+
+    useEffect(() => {
+        writeStoredViewSelection(SESSIONS_VIEW_SELECTION_STORAGE_KEY, {
+            areaName: selArea,
+            grade: selGrade,
+            section: selSection,
+            unitNumber,
+            sessionNumber,
+            year
+        });
+    }, [selArea, selGrade, selSection, unitNumber, sessionNumber, year]);
+
+    useEffect(() => {
+        if (!assignmentsLoaded) return;
+        if (selArea && !uniqueAreas.includes(selArea)) {
+            setSelArea('');
+            setSelGrade('');
+            setSelSection('');
+            return;
+        }
+        if (selGrade && !availableGrades.includes(selGrade)) {
+            setSelGrade('');
+            setSelSection('');
+            return;
+        }
+        if (selSection && !availableSections.some(option => option.value === selSection)) {
+            setSelSection('');
+            return;
+        }
+        if (unitNumber && !Array.from({ length: 8 }, (_, i) => String(i + 1)).includes(String(unitNumber))) {
+            setUnitNumber('1');
+            return;
+        }
+        const availableSessionNumbers = Array.from({ length: Math.max(maxSessionsInUnit, 1) }, (_, i) => String(i + 1));
+        if (sessionNumber && !availableSessionNumbers.includes(String(sessionNumber))) {
+            setSessionNumber('1');
+        }
+    }, [assignmentsLoaded, selArea, selGrade, selSection, unitNumber, sessionNumber, uniqueAreas, availableGrades, availableSections, maxSessionsInUnit]);
 
     const handleInputChange = (path: string, value: any) => {
         const keys = path.split('.');
@@ -491,11 +735,10 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             const currentTemplateType = String(sessionData?.instrumentoTemplate?.type || detectInstrumentTypeFromText(String(sessionData?.competenciaPrio?.inst || '')) || 'rubrica');
             const currentInstrumentName = String(sessionData?.instrumentoTemplate?.name || sessionData?.competenciaPrio?.inst || 'Rúbrica');
             const targetInstrumentRows = (() => {
-                const primaryRows = (Array.isArray(currentSessionAssessmentModel?.rows) ? currentSessionAssessmentModel.rows : [])
-                    .filter((row: any) => row?.source === 'primary')
+                const canonicalRows = (Array.isArray(currentSessionAssessmentModel?.rows) ? currentSessionAssessmentModel.rows : [])
                     .filter((row: any) => normalizeLoose(String(row?.criterionText || row?.capacityName || row?.competencyName || '')));
-                if (primaryRows.length > 0) {
-                    return primaryRows.map((row: any, idx: number) => ({
+                if (canonicalRows.length > 0) {
+                    return canonicalRows.map((row: any, idx: number) => ({
                         id: String(row?.id || idx + 1),
                         competencia: String(row?.competencyName || '').trim(),
                         capacidad: String(row?.capacityName || '').trim(),
@@ -503,7 +746,9 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                         c: String(row?.levelDescriptors?.c || '').trim(),
                         b: String(row?.levelDescriptors?.b || '').trim(),
                         a: String(row?.levelDescriptors?.a || '').trim(),
-                        ad: String(row?.levelDescriptors?.ad || '').trim()
+                        ad: String(row?.levelDescriptors?.ad || '').trim(),
+                        source: String(row?.source || 'primary').trim(),
+                        rowColor: String(row?.rowColor || '').trim()
                     }));
                 }
                 return (Array.isArray(sessionData?.instrumento) ? sessionData.instrumento : []).map((row: any, idx: number) => ({
@@ -514,9 +759,19 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     c: String(row?.c || '').trim(),
                     b: String(row?.b || '').trim(),
                     a: String(row?.a || '').trim(),
-                    ad: String(row?.ad || '').trim()
+                    ad: String(row?.ad || '').trim(),
+                    source: String(row?.source || 'primary').trim(),
+                    rowColor: String(row?.rowColor || '').trim()
                 }));
             })();
+            const instrumentRowsTarget = targetInstrumentRows.map((row: any, idx: number) => ({
+                index: idx,
+                source: String(row?.source || 'primary').trim(),
+                competencia: String(row?.competencia || '').trim(),
+                capacidad: String(row?.capacidad || '').trim(),
+                criterio: String(row?.criterio || '').trim(),
+                requiredLevels: ['c', 'b', 'a', 'ad']
+            }));
 
             const placeholderSet = new Set<string>();
             AI_RICH_TEXT_PATHS.forEach(path => {
@@ -584,14 +839,20 @@ REGLAS:
 3) Para campos HTML devuelve contenido en formato HTML simple (<p>, <ul>, <li>, <strong>, <em>, <span style="color: green;">).
 4) Respeta el instrumento actual del contexto: "${currentInstrumentName}" (tipo: "${currentTemplateType}").
 5) Debes devolver "instrumentRows" con exactamente ${Math.max(targetInstrumentRows.length, currentTemplateType === 'rubrica' ? 4 : 1)} filas.
-6) Cada fila de "instrumentRows" debe incluir: criterio, c, b, a, ad.
+6) Cada fila de "instrumentRows" debe incluir: index, criterio, c, b, a, ad.
 7) En TODOS los instrumentos, aunque visualmente no se muestren, c/b/a/ad deben ser descriptores pedagógicos reales de nivel de logro para ese criterio.
 8) No devuelvas etiquetas sueltas como "Deficiente", "Regular", "Bueno", "Muy bueno" dentro de c/b/a/ad; devuelve descripciones de desempeño observables.
 9) Si el instrumento es rúbrica, los descriptores pueden ser más extensos. Si es lista, escala o guía, los descriptores pueden ser breves pero específicos.
 10) Redacta pensando en estudiantes de ${selGrade}, área ${selArea}.
+11) Debes completar TODOS los índices listados en "FILAS DEL INSTRUMENTO A COMPLETAR", incluyendo criterios del área y competencias transversales.
+12) No omitas ninguna fila aunque sea la 5, 6 o posterior.
+13) Usa el mismo criterio base de cada índice y devuelve descriptores para todos los niveles de logro.
 
 PLACEHOLDERS DETECTADOS:
 ${JSON.stringify(Array.from(placeholderSet), null, 2)}
+
+FILAS DEL INSTRUMENTO A COMPLETAR:
+${JSON.stringify(instrumentRowsTarget, null, 2)}
 
 CONTEXTO ACTUAL:
 ${JSON.stringify(contextForAI, null, 2)}
@@ -618,10 +879,10 @@ FORMATO DE RESPUESTA:
     "salida": { "evaluacion": "html" }
   },
   "instrumentRows": [
-    { "criterio": "string", "capacidad": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
+    { "index": 0, "criterio": "string", "capacidad": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
   ],
   "rubrica": [
-    { "criterio": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
+    { "index": 0, "criterio": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
   ]
 }
 `;
@@ -634,10 +895,7 @@ FORMATO DE RESPUESTA:
 
             const raw = String(response.text || '').trim();
             if (!raw) throw new Error("EMPTY_RESPONSE");
-            const firstBrace = raw.indexOf('{');
-            const lastBrace = raw.lastIndexOf('}');
-            const jsonText = firstBrace >= 0 && lastBrace > firstBrace ? raw.slice(firstBrace, lastBrace + 1) : raw;
-            const aiData = JSON.parse(jsonText);
+            const aiData = parseAiJsonObject(raw);
 
             const placeholderMapRaw = aiData?.placeholderMap && typeof aiData.placeholderMap === 'object' ? aiData.placeholderMap : {};
             const placeholderMap: Record<string, string> = {};
@@ -706,6 +964,13 @@ FORMATO DE RESPUESTA:
             const aiInstrumentRows = Array.isArray(aiData?.instrumentRows) && aiData.instrumentRows.length > 0
                 ? aiData.instrumentRows
                 : (Array.isArray(aiData?.rubrica) ? aiData.rubrica : []);
+            const aiInstrumentRowsByIndex = new Map<number, any>();
+            aiInstrumentRows.forEach((row: any, idx: number) => {
+                const rawIndex = row?.index;
+                const parsedIndex = Number(rawIndex);
+                const effectiveIndex = Number.isFinite(parsedIndex) && parsedIndex >= 0 ? parsedIndex : idx;
+                aiInstrumentRowsByIndex.set(effectiveIndex, row);
+            });
             const targetRowCount = Math.max(
                 targetInstrumentRows.length,
                 aiInstrumentRows.length,
@@ -713,7 +978,7 @@ FORMATO DE RESPUESTA:
             );
             nextData.instrumento = Array.from({ length: targetRowCount }, (_, i) => {
                 const base = targetInstrumentRows[i] || nextData.instrumento?.[i] || { id: i + 1, criterio: '', c: '', b: '', a: '', ad: '' };
-                const aiRow = aiInstrumentRows[i] || {};
+                const aiRow = aiInstrumentRowsByIndex.get(i) || aiInstrumentRows[i] || {};
                 return {
                     ...base,
                     id: base?.id || i + 1,
@@ -723,11 +988,14 @@ FORMATO DE RESPUESTA:
                     c: replaceBracketTokens(String(aiRow.c || base.c || ''), placeholderMap),
                     b: replaceBracketTokens(String(aiRow.b || base.b || ''), placeholderMap),
                     a: replaceBracketTokens(String(aiRow.a || base.a || ''), placeholderMap),
-                    ad: replaceBracketTokens(String(aiRow.ad || base.ad || ''), placeholderMap)
+                    ad: replaceBracketTokens(String(aiRow.ad || base.ad || ''), placeholderMap),
+                    source: String(base?.source || aiRow?.source || 'primary').trim(),
+                    rowColor: String(base?.rowColor || aiRow?.rowColor || '').trim()
                 };
             }).filter((row: any) =>
                 normalizeLoose(String(row?.criterio || row?.capacidad || row?.competencia || row?.c || row?.b || row?.a || row?.ad || '')).length > 0
             );
+
             nextData.assessmentModel = buildAssessmentModelFromData(nextData, 'ai');
             nextData.sessionAssessmentModel = buildSessionAssessmentModel(nextData, {
                 areaId,
@@ -903,7 +1171,7 @@ FORMATO DE RESPUESTA:
                 setSessionDate('');
             }
             
-            const loadUnitInfo = async () => {
+            const loadUnitInfo = async (options?: { source?: 'unit-prefill' | 'silent' }) => {
                 const comps = await getCompetencias(selGrade, selArea);
                 if (isStaleRequest()) return;
                 setCompetenciasBase(comps);
@@ -1195,8 +1463,8 @@ FORMATO DE RESPUESTA:
                         }
                     }
 
-                    if (shouldShowLoadedToast) {
-                        setToast({ msg: `✅ Datos cargados desde Unidad U${unitNumber}`, type: 'success' });
+                    if (shouldShowLoadedToast && options?.source === 'unit-prefill') {
+                        setToast({ msg: `✅ Sesión ${sessionNumber} pre llenada desde la unidad U${unitNumber}`, type: 'success' });
                     }
                 } else {
                     setToast({ msg: `⚠️ No se halló la Unidad U${unitNumber} para estos filtros en SQL.`, type: 'warning' });
@@ -1253,7 +1521,11 @@ FORMATO DE RESPUESTA:
                 const saved = await getSesion(year, areaId, selGrade, selSection, unitNumber, sessionNumber);
                 if (isStaleRequest()) return;
                 if (saved) {
-                    setSessionData(ensureSessionExtraBlocks(ensureSessionAssessmentModel(ensureAssessmentModel(saved, 'sql'), {
+                    const hydratedSavedResult = await hydrateMissingInstrumentTemplate(saved);
+                    if (isStaleRequest()) return;
+                    const savedWithTemplate = hydratedSavedResult.data;
+
+                    setSessionData(ensureSessionExtraBlocks(ensureSessionAssessmentModel(ensureAssessmentModel(savedWithTemplate, 'sql'), {
                         areaId: assignments.find(a => a.areaName === selArea)?.areaId || selArea,
                         grade: selGrade,
                         section: selSection,
@@ -1268,7 +1540,12 @@ FORMATO DE RESPUESTA:
                         await loadSessionDateFromUnit();
                         if (isStaleRequest()) return;
                     }
-                            setToast({ msg: `✅ Sesión ${sessionNumber} cargada desde SQL`, type: 'success' });
+                    setToast({
+                        msg: hydratedSavedResult.hydrated
+                            ? `✅ Sesión ${sessionNumber} completa cargada desde DB e instrumento reconectado`
+                            : `✅ Sesión ${sessionNumber} completa cargada desde DB`,
+                        type: 'success'
+                    });
                 } else {
                     // SE BUSCA PLANTILLA DE ÁREA EN LA NUEVA TABLA
                     try {
@@ -1284,8 +1561,7 @@ FORMATO DE RESPUESTA:
                                 sessionNumber,
                                 bimester: bimesterLabel
                             })));
-                            loadUnitInfo();
-                            setToast({ msg: `✅ Aplicando plantilla de área guardada`, type: 'success' });
+                            loadUnitInfo({ source: 'unit-prefill' });
                         } else {
                             const defaultTemplate = buildDefaultAreaTemplateSessionData();
                             setSessionData(ensureSessionExtraBlocks(ensureSessionAssessmentModel(ensureAssessmentModel(defaultTemplate, 'system'), {
@@ -1306,8 +1582,7 @@ FORMATO DE RESPUESTA:
                                     sessionData: defaultTemplate
                                 })
                             }).catch(() => null);
-                            loadUnitInfo();
-                            setToast({ msg: `✅ Plantilla global aplicada por defecto`, type: 'success' });
+                            loadUnitInfo({ source: 'unit-prefill' });
                         }
                     } catch (e) {
                         const defaultTemplate = buildDefaultAreaTemplateSessionData();
@@ -1319,7 +1594,7 @@ FORMATO DE RESPUESTA:
                             sessionNumber,
                             bimester: bimesterLabel
                         })));
-                        loadUnitInfo();
+                        loadUnitInfo({ source: 'unit-prefill' });
                     }
                 }
             };
@@ -2510,13 +2785,17 @@ FORMATO DE RESPUESTA:
                             <th className="border border-white/10 bg-emerald-500 p-3 text-center font-black text-white">AD (DESTACADO)</th>
                         </tr>
                     </thead>
-                    <tbody>
-                        {rubricRows.map((row: any, idx: number) => (
+                        <tbody>
+                        {rubricRows.map((row: any, idx: number) => {
+                            const isTransversal = String(row?.source || '') === 'transversal';
+                            const transversalColor = String(row?.rowColor || '#00b28c');
+                            const rowSurfaceStyle = isTransversal ? getTransversalSurfaceStyle(transversalColor, 0.12) : undefined;
+                            return (
                             <tr key={`rubrica-template-row-${idx}`} className="align-top">
-                                <td className="border border-slate-200 bg-slate-50/50 p-3 text-center font-black text-slate-700">
+                                <td className="border border-slate-200 bg-slate-50/50 p-3 text-center font-black text-slate-700" style={rowSurfaceStyle}>
                                     {idx + 1}
                                 </td>
-                                <td className="border border-slate-200 p-0 align-top">
+                                <td className="border border-slate-200 p-0 align-top" style={rowSurfaceStyle}>
                                     <textarea
                                         data-comp-table="1"
                                         className="w-full resize-none overflow-hidden border-0 bg-transparent p-3 text-center text-[10px] font-bold text-slate-800 outline-none"
@@ -2526,7 +2805,7 @@ FORMATO DE RESPUESTA:
                                         placeholder="Defina criterio..."
                                     />
                                 </td>
-                                <td className="border border-slate-200 p-0 align-top">
+                                <td className="border border-slate-200 p-0 align-top" style={rowSurfaceStyle}>
                                     <textarea
                                         data-comp-table="1"
                                         className="w-full resize-none overflow-hidden border-0 bg-transparent p-3 text-justify text-[10px] italic font-medium text-red-600 outline-none"
@@ -2536,7 +2815,7 @@ FORMATO DE RESPUESTA:
                                         placeholder="Descriptor inicio..."
                                     />
                                 </td>
-                                <td className="border border-slate-200 p-0 align-top">
+                                <td className="border border-slate-200 p-0 align-top" style={rowSurfaceStyle}>
                                     <textarea
                                         data-comp-table="1"
                                         className="w-full resize-none overflow-hidden border-0 bg-transparent p-3 text-justify text-[10px] italic font-medium text-orange-700 outline-none"
@@ -2546,7 +2825,7 @@ FORMATO DE RESPUESTA:
                                         placeholder="Descriptor proceso..."
                                     />
                                 </td>
-                                <td className="border border-slate-200 p-0 align-top">
+                                <td className="border border-slate-200 p-0 align-top" style={rowSurfaceStyle}>
                                     <textarea
                                         data-comp-table="1"
                                         className="w-full resize-none overflow-hidden border-0 bg-transparent p-3 text-justify text-[10px] italic font-medium text-blue-700 outline-none"
@@ -2556,7 +2835,7 @@ FORMATO DE RESPUESTA:
                                         placeholder="Descriptor logrado..."
                                     />
                                 </td>
-                                <td className="border border-slate-200 p-0 align-top">
+                                <td className="border border-slate-200 p-0 align-top" style={rowSurfaceStyle}>
                                     <textarea
                                         data-comp-table="1"
                                         className="w-full resize-none overflow-hidden border-0 bg-transparent p-3 text-justify text-[10px] italic font-medium text-emerald-700 outline-none"
@@ -2567,7 +2846,7 @@ FORMATO DE RESPUESTA:
                                     />
                                 </td>
                             </tr>
-                        ))}
+                        )})}
                     </tbody>
                 </table>
             );
@@ -3293,7 +3572,7 @@ FORMATO DE RESPUESTA:
     return (
         <div className="animate-fade-in pb-20 space-y-6 relative">
             {typeof document !== 'undefined' && toasts.length > 0 && createPortal(
-                <div className="fixed top-10 right-10 z-[2147483000] w-full max-w-md pointer-events-none flex flex-col gap-3 print:hidden">
+                <div className="fixed right-4 top-4 z-[2147483000] flex w-[min(24rem,calc(100vw-1.5rem))] flex-col gap-2.5 pointer-events-none print:hidden sm:right-6 sm:top-6">
                     {toasts.map(t => (
                         <InternalToast
                             key={t.id}
@@ -3377,6 +3656,13 @@ FORMATO DE RESPUESTA:
                     <div className="bg-white/20 p-3 rounded-[3rem] border border-white/30 shadow-inner backdrop-blur-md flex gap-3 ml-auto lg:mr-16">
                         <button onClick={handleGenerateAI} disabled={!headerFilled || isGeneratingIA} className={`btn-3d-purple scale-90 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`} title="Completar con IA Armi">
                             {isGeneratingIA ? <span className="text-xl">✨</span> : <span>🤖</span>}
+                        </button>
+                        <button
+                            onClick={handleOpenLastAiDiagnostic}
+                            className="h-9 w-9 rounded-full border border-white/35 bg-black/15 text-[11px] font-black text-white/90 transition hover:bg-black/25"
+                            title="Ver último diagnóstico IA"
+                        >
+                            IA
                         </button>
                         <button onClick={handleSave} className="btn-3d-plus scale-90" title="Guardar Sesión">
                             <span>+</span>
@@ -4021,18 +4307,27 @@ FORMATO DE RESPUESTA:
                                                 const competencia = String(row?.competencia || '').trim();
                                                 const capacidad = String(row?.capacidad || '').trim();
                                                 const isTransversal = String(row?.source || '') === 'transversal';
-                                                const rowTone = isTransversal ? 'bg-emerald-50/60 hover:bg-emerald-50/80' : 'hover:bg-slate-50';
-                                                const toneCell = isTransversal ? 'bg-emerald-50/60' : '';
+                                                const transversalColor = String(row?.rowColor || '#00b28c');
+                                                const rowTone = isTransversal ? 'hover:bg-emerald-50/80' : 'hover:bg-slate-50';
+                                                const toneCellClass = isTransversal ? '' : '';
+                                                const toneCellStyle = isTransversal ? getTransversalSurfaceStyle(transversalColor, 0.12) : undefined;
+                                                const transversalHeaderStyle = isTransversal ? { backgroundColor: transversalColor, color: '#ffffff' } : undefined;
+                                                const transversalSubheaderStyle = isTransversal
+                                                    ? {
+                                                        backgroundColor: getTransversalSurfaceColor(transversalColor, 0.18),
+                                                        color: getTransversalTextColor(transversalColor)
+                                                    }
+                                                    : undefined;
 
                                                 if (competencia && normalizeLoose(competencia) !== normalizeLoose(currentCompetencia)) {
                                                     currentCompetencia = competencia;
                                                     currentCapacidad = '';
                                                     rendered.push(
                                                         <tr key={`rubrica-comp-${i}`}>
-                                                            <td className={`p-3 text-center font-black border-b border-black/20 ${isTransversal ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-white'}`}>
+                                                            <td className={`p-3 text-center font-black border-b border-black/20 ${isTransversal ? '' : 'bg-slate-800 text-white'}`} style={transversalHeaderStyle}>
                                                                 COMP.
                                                             </td>
-                                                            <td colSpan={5} className={`p-3 text-center font-black uppercase tracking-wide border-b border-black/20 ${isTransversal ? 'bg-emerald-700/90 text-white' : 'bg-slate-100 text-slate-800'}`}>
+                                                            <td colSpan={5} className={`p-3 text-center font-black uppercase tracking-wide border-b border-black/20 ${isTransversal ? '' : 'bg-slate-100 text-slate-800'}`} style={isTransversal ? { ...transversalHeaderStyle, opacity: 0.94 } : undefined}>
                                                                 {competencia}
                                                             </td>
                                                         </tr>
@@ -4043,10 +4338,10 @@ FORMATO DE RESPUESTA:
                                                     currentCapacidad = capacidad;
                                                     rendered.push(
                                                         <tr key={`rubrica-cap-${i}`}>
-                                                            <td className={`p-3 text-center font-black border-b border-black/20 ${isTransversal ? 'bg-emerald-100 text-emerald-900' : 'bg-slate-100 text-slate-700'}`}>
+                                                            <td className={`p-3 text-center font-black border-b border-black/20 ${isTransversal ? '' : 'bg-slate-100 text-slate-700'}`} style={transversalSubheaderStyle}>
                                                                 CAP.
                                                             </td>
-                                                            <td colSpan={5} className={`p-3 text-center font-bold border-b border-black/20 ${isTransversal ? 'bg-emerald-50 text-emerald-900' : 'bg-slate-50 text-slate-700'}`}>
+                                                            <td colSpan={5} className={`p-3 text-center font-bold border-b border-black/20 ${isTransversal ? '' : 'bg-slate-50 text-slate-700'}`} style={toneCellStyle}>
                                                                 {capacidad}
                                                             </td>
                                                         </tr>
@@ -4055,14 +4350,14 @@ FORMATO DE RESPUESTA:
 
                                                 rendered.push(
                                                     <tr key={row.id || i} className={`divide-x divide-y divide-black/20 border-b border-slate-50 align-top group transition-all ${rowTone}`}>
-                                                        <td className={`p-4 text-center font-black text-slate-900 bg-slate-50/30 align-middle border-b border-black/20 ${toneCell}`}>{i + 1}</td>
-                                                        <td className={`p-0 align-middle border-b border-black/20 ${toneCell}`}>
+                                                        <td className={`p-4 text-center font-black text-slate-900 bg-slate-50/30 align-middle border-b border-black/20 ${toneCellClass}`} style={toneCellStyle}>{i + 1}</td>
+                                                        <td className={`p-0 align-middle border-b border-black/20 ${toneCellClass}`} style={toneCellStyle}>
                                                             <textarea data-comp-table="1" className="w-full p-3 border-0 outline-none font-bold text-slate-800 resize-none overflow-hidden text-center bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.criterio} onChange={e => updateRow('criterio', e.target.value)} placeholder={rubricRowMode === 'capacity' ? 'Capacidad...' : 'Defina criterio...'} />
                                                         </td>
-                                                        <td className={`p-0 align-middle border-b border-black/20 ${toneCell}`}><textarea data-comp-table="1" className="w-full p-3 border-0 outline-none text-red-600 italic font-medium resize-none overflow-hidden text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.c} onChange={e => updateRow('c', e.target.value)} placeholder="..." /></td>
-                                                        <td className={`p-0 align-middle border-b border-black/20 ${toneCell}`}><textarea data-comp-table="1" className="w-full p-3 border-0 outline-none text-orange-700 italic font-medium resize-none overflow-hidden text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.b} onChange={e => updateRow('b', e.target.value)} placeholder="..." /></td>
-                                                        <td className={`p-0 align-middle border-b border-black/20 ${toneCell}`}><textarea data-comp-table="1" className="w-full p-3 border-0 outline-none text-blue-700 italic font-medium resize-none overflow-hidden text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.a} onChange={e => updateRow('a', e.target.value)} placeholder="..." /></td>
-                                                        <td className={`p-0 align-middle border-r border-b border-black/20 ${toneCell}`}><textarea data-comp-table="1" className="w-full p-3 border-0 outline-none text-emerald-700 italic font-medium resize-none overflow-hidden text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.ad} onChange={e => updateRow('ad', e.target.value)} placeholder="..." /></td>
+                                                        <td className={`p-0 align-middle border-b border-black/20 ${toneCellClass}`} style={toneCellStyle}><textarea data-comp-table="1" className="w-full p-3 border-0 outline-none text-red-600 italic font-medium resize-none overflow-hidden text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.c} onChange={e => updateRow('c', e.target.value)} placeholder="..." /></td>
+                                                        <td className={`p-0 align-middle border-b border-black/20 ${toneCellClass}`} style={toneCellStyle}><textarea data-comp-table="1" className="w-full p-3 border-0 outline-none text-orange-700 italic font-medium resize-none overflow-hidden text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.b} onChange={e => updateRow('b', e.target.value)} placeholder="..." /></td>
+                                                        <td className={`p-0 align-middle border-b border-black/20 ${toneCellClass}`} style={toneCellStyle}><textarea data-comp-table="1" className="w-full p-3 border-0 outline-none text-blue-700 italic font-medium resize-none overflow-hidden text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.a} onChange={e => updateRow('a', e.target.value)} placeholder="..." /></td>
+                                                        <td className={`p-0 align-middle border-r border-b border-black/20 ${toneCellClass}`} style={toneCellStyle}><textarea data-comp-table="1" className="w-full p-3 border-0 outline-none text-emerald-700 italic font-medium resize-none overflow-hidden text-justify bg-transparent text-[10px] h-full" onInput={e => autoResizeTextarea(e.currentTarget)} value={row.ad} onChange={e => updateRow('ad', e.target.value)} placeholder="..." /></td>
                                                     </tr>
                                                 );
                                             });

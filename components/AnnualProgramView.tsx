@@ -23,6 +23,7 @@ import {
 import { INITIAL_GENERAL_DATA } from '../constants';
 import { Select } from './Select';
 import { TemplateMergeView } from './TemplateMergeView'; 
+import { readStoredViewSelection, writeStoredViewSelection } from '../utils/viewSelectionStorage';
 
 const superNormalize = (str: string) => {
     if (!str) return "";
@@ -111,6 +112,7 @@ const STATIC_EJES_REGIONALES = [
 const GLOBAL_PINNED_MATRIX_STORAGE_KEY = 'armi_pa_pinned_matrix_global';
 const GLOBAL_PINNED_DIDACTIC_UNITS_STORAGE_KEY = 'armi_pa_pinned_didactic_units_global';
 const getPinnedMatrixStorageKey = (areaId: string, grade: string) => `armi_pa_pinned_matrix_${areaId}_${grade}`;
+const ANNUAL_VIEW_SELECTION_STORAGE_KEY = 'armi_view_selection_programacion_anual_v1';
 
 const getMineduDuration = (startStr?: string, endStr?: string): string => {
     if (!startStr || !endStr) return "-";
@@ -545,14 +547,15 @@ export const AnnualProgramView: React.FC<{
   onSuccess: () => void;
   activeSection?: string;
 }> = ({ onSuccess, activeSection = 'planificacion' }) => {
+    const initialSelection = useMemo(() => readStoredViewSelection(ANNUAL_VIEW_SELECTION_STORAGE_KEY), []);
 
     const [generalData, setGeneralData] = useState<GeneralData>(INITIAL_GENERAL_DATA);
     const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
     
-    const [selectedAreaId, setSelectedAreaId] = useState('');
-    const [selectedGrade, setSelectedGrade] = useState('');
-    const [selectedSection, setSelectedSection] = useState('');
-    const [selectedYear, setSelectedYear] = useState(new Date().getFullYear().toString());
+    const [selectedAreaId, setSelectedAreaId] = useState(initialSelection.areaId || '');
+    const [selectedGrade, setSelectedGrade] = useState(initialSelection.grade || '');
+    const [selectedSection, setSelectedSection] = useState(initialSelection.section || '');
+    const [selectedYear, setSelectedYear] = useState(initialSelection.year || new Date().getFullYear().toString());
     const [showYearPicker, setShowYearPicker] = useState(false);
     const [isManageModalOpen, setIsManageModalOpen] = useState(false);
     const [allSavedProgramsList, setAllSavedProgramsList] = useState<any[]>([]);
@@ -589,6 +592,7 @@ export const AnnualProgramView: React.FC<{
     const [importType, setImportType] = useState<'competencias' | 'estandares'>('competencias');
     const [previewData, setPreviewData] = useState<any[]>([]);
     const [importLoading, setImportLoading] = useState(false);
+    const [assignmentsLoaded, setAssignmentsLoaded] = useState(false);
 
     const [studentStats, setStudentStats] = useState({ total: '0', ciclo: '-', horas: '0' });
 
@@ -617,12 +621,13 @@ export const AnnualProgramView: React.FC<{
         const load = async () => {
             const gd = await getDatosGenerales();
             setGeneralData(gd);
-            if (gd.year) setSelectedYear(gd.year);
+            if (!initialSelection.year && gd.year) setSelectedYear(gd.year);
             const savedAssign = localStorage.getItem('armi_assignments');
             if (savedAssign) setAssignments(JSON.parse(savedAssign));
+            setAssignmentsLoaded(true);
         };
         load();
-    }, []);
+    }, [initialSelection.year]);
 
     const areaOptions = useMemo(() => {
         const unique = new Map();
@@ -651,6 +656,33 @@ export const AnnualProgramView: React.FC<{
         }
         return options;
     }, [assignments, selectedAreaId, selectedGrade]);
+
+    useEffect(() => {
+        writeStoredViewSelection(ANNUAL_VIEW_SELECTION_STORAGE_KEY, {
+            areaId: selectedAreaId,
+            grade: selectedGrade,
+            section: selectedSection,
+            year: selectedYear
+        });
+    }, [selectedAreaId, selectedGrade, selectedSection, selectedYear]);
+
+    useEffect(() => {
+        if (!assignmentsLoaded) return;
+        if (selectedAreaId && !areaOptions.some(option => option.value === selectedAreaId)) {
+            setSelectedAreaId('');
+            setSelectedGrade('');
+            setSelectedSection('');
+            return;
+        }
+        if (selectedGrade && !availableGrades.some(option => option.value === selectedGrade)) {
+            setSelectedGrade('');
+            setSelectedSection('');
+            return;
+        }
+        if (selectedSection && !availableSections.some(option => option.value === selectedSection)) {
+            setSelectedSection('');
+        }
+    }, [assignmentsLoaded, selectedAreaId, selectedGrade, selectedSection, areaOptions, availableGrades, availableSections]);
 
     const sectionsForSelectedGrade = useMemo(() => {
         return Array.from(new Set(assignments.filter(a => a.grade === selectedGrade && a.areaId === selectedAreaId).map(a => a.section))).sort();

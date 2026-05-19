@@ -77,20 +77,54 @@ const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'wa
         return () => clearTimeout(timer);
     }, [onClose]);
 
-    const bgClass = type === 'success' ? 'bg-emerald-600' : type === 'error' ? 'bg-rose-600' : 'bg-amber-500';
-    const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : '⚠️';
+    const tone = type === 'success'
+        ? {
+            shell: 'border-emerald-200 bg-emerald-50/96 text-emerald-900 shadow-[0_14px_34px_rgba(16,185,129,0.16)]',
+            stripe: 'bg-emerald-500',
+            iconWrap: 'bg-emerald-100 text-emerald-700',
+            eyebrow: 'text-emerald-600/80',
+            icon: '✓'
+        }
+        : type === 'error'
+            ? {
+                shell: 'border-rose-200 bg-rose-50/96 text-rose-900 shadow-[0_14px_34px_rgba(244,63,94,0.16)]',
+                stripe: 'bg-rose-500',
+                iconWrap: 'bg-rose-100 text-rose-700',
+                eyebrow: 'text-rose-600/80',
+                icon: '!'
+            }
+            : {
+                shell: 'border-amber-200 bg-amber-50/96 text-amber-900 shadow-[0_14px_34px_rgba(245,158,11,0.16)]',
+                stripe: 'bg-amber-500',
+                iconWrap: 'bg-amber-100 text-amber-700',
+                eyebrow: 'text-amber-700/80',
+                icon: '•'
+            };
 
     return (
-        <div className="fixed top-10 right-10 z-[10000000] animate-fly-in-right w-full max-w-md pointer-events-none">
-            <div className={`${bgClass} px-8 py-5 rounded-[2.5rem] shadow-[0_30px_90px_rgba(0,0,0,0.4)] border border-white/30 flex items-center gap-6 backdrop-blur-2xl transition-all text-white pointer-events-auto`}>
-                <div className="w-12 h-12 rounded-2xl bg-white/20 flex items-center justify-center text-2xl shrink-0 shadow-inner">
-                    {icon}
+        <div className="w-full animate-fly-in-right pointer-events-auto">
+            <div className={`relative overflow-hidden rounded-[1.6rem] border backdrop-blur-xl transition-all ${tone.shell}`}>
+                <div className={`absolute inset-y-0 left-0 w-1.5 ${tone.stripe}`} aria-hidden="true" />
+                <div className="flex items-center gap-3 px-4 py-2.5 pl-5">
+                    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-lg font-black ${tone.iconWrap}`}>
+                        {tone.icon}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                        <span className={`block text-[9px] font-black uppercase tracking-[0.24em] ${tone.eyebrow}`}>
+                            Sistema de Sesiones
+                        </span>
+                        <p className="mt-0.5 text-[12px] font-bold leading-5 break-words">
+                            {message}
+                        </p>
+                    </div>
+                    <button
+                        onClick={onClose}
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-base text-current/60 transition-colors hover:bg-black/5 hover:text-current"
+                        aria-label="Cerrar aviso"
+                    >
+                        ×
+                    </button>
                 </div>
-                <div className="flex flex-col flex-1 min-w-0">
-                    <span className="text-[10px] font-black uppercase tracking-[0.3em] opacity-70 mb-1">Sistema de Sesiones</span>
-                    <p className="text-xs font-bold leading-tight uppercase tracking-tight break-words">{message}</p>
-                </div>
-                <button onClick={onClose} className="w-8 h-8 rounded-full hover:bg-black/10 flex items-center justify-center transition-colors text-lg shrink-0">✕</button>
             </div>
         </div>
     );

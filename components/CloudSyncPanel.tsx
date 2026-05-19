@@ -17,6 +17,12 @@ import { useAuth } from './auth/AuthContext';
 import { applyArmiLocalState, CLOUD_SYNC_EVENT, collectArmiLocalState, emitCloudSyncUpdated } from '../utils/cloudSyncState';
 
 type SyncAction = 'push' | 'pull' | null;
+
+const RECENT_MANUAL_PUSH_MARK_KEY = 'armi-sync-recent-manual-push';
+
+const markRecentManualPush = () => {
+  window.localStorage.setItem(RECENT_MANUAL_PUSH_MARK_KEY, String(Date.now()));
+};
 type ToastState = { type: 'success' | 'error'; text: string } | null;
 type ArtifactKind = 'version' | 'conflict' | 'current';
 type ArtifactAction = 'inspect' | 'apply' | 'merge-attendance' | 'merge-students';
@@ -25,6 +31,27 @@ const reloadApplicationView = () => {
   window.setTimeout(() => {
     window.location.reload();
   }, 1200);
+};
+
+const buildDriveDiagnosticMessage = (status: CloudSyncStatusData | null | undefined, fallback?: string) => {
+  const base = String(fallback || '').trim();
+  if (!status || status.config.mode !== 'apps_script_drive') {
+    return base || 'No se pudo recuperar la copia del usuario desde Drive.';
+  }
+
+  const remoteLookupMessage = String(status.config.remoteLookupMessage || '').trim();
+  if (remoteLookupMessage) return remoteLookupMessage;
+
+  const versionsCount = Number(status.config.remoteActivity?.versions?.count || 0);
+  const conflictsCount = Number(status.config.remoteActivity?.conflicts?.count || 0);
+  if (!status.mirrorManifest && (versionsCount > 0 || conflictsCount > 0)) {
+    const parts = [];
+    if (versionsCount > 0) parts.push(`${versionsCount} version${versionsCount === 1 ? '' : 'es'} en el historial`);
+    if (conflictsCount > 0) parts.push(`${conflictsCount} conflicto${conflictsCount === 1 ? '' : 's'} protegido${conflictsCount === 1 ? '' : 's'}`);
+    return `Drive si tiene ${parts.join(' y ')}, pero no se pudo leer la copia actual en la carpeta "current". Normalmente eso significa que falta "manifest.json" o "snapshot.zip" en la copia actual, o que Apps Script esta resolviendo mal esa subcarpeta.`;
+  }
+
+  return base || 'No se pudo recuperar la copia del usuario desde Drive.';
 };
 
 const comparisonMeta: Record<CloudSyncStatusData['comparison'], { label: string; tone: string; dot: string }> = {
@@ -57,6 +84,44 @@ const formatEntitySummary = (summary?: { entities?: Record<string, number> } | n
 
 const formatArtifactMoment = (value?: string) => value ? new Date(value).toLocaleString() : 'Sin fecha';
 const VERSION_HISTORY_VISIBILITY_KEY = 'armi_cloud_sync_show_version_history';
+
+const removeConflictFromStatus = (status: CloudSyncStatusData | null, conflictId: string): CloudSyncStatusData | null => {
+  if (!status) return status;
+
+  const currentItems = Array.isArray(status.config.remoteActivity?.conflicts?.items)
+    ? status.config.remoteActivity?.conflicts?.items
+    : [];
+  const nextItems = currentItems.filter((item) => String(item?.id || '').trim() !== conflictId);
+  if (nextItems.length === currentItems.length) return status;
+
+  return {
+    ...status,
+    config: {
+      ...status.config,
+      remoteActivity: {
+        ...(status.config.remoteActivity || {}),
+        conflicts: {
+          ...(status.config.remoteActivity?.conflicts || { count: 0 }),
+          count: Math.max(0, Number(status.config.remoteActivity?.conflicts?.count || currentItems.length) - 1),
+          latestAt: nextItems[0]?.generatedAt || nextItems[0]?.createdAt || '',
+          latestId: nextItems[0]?.id || '',
+          latestUrl: nextItems[0]?.url || '',
+          items: nextItems,
+        },
+      },
+    },
+  };
+};
+
+const manifestsLookEquivalent = (
+  left?: { digest?: string; summary?: { entities?: Record<string, number> } | null } | null,
+  right?: { digest?: string; summary?: { entities?: Record<string, number> } | null } | null,
+) => {
+  if (!left || !right) return false;
+  if (left.digest && right.digest && left.digest === right.digest) return true;
+  const entityKeys = Object.keys(syncEntityLabels);
+  return entityKeys.every((key) => Number(left.summary?.entities?.[key] || 0) === Number(right.summary?.entities?.[key] || 0));
+};
 
 const iconButtonBase = 'flex h-9 w-9 items-center justify-center rounded-xl border transition disabled:opacity-50';
 
@@ -94,6 +159,16 @@ const RestoreIcon = () => (
   </svg>
 );
 
+const ArchiveIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 7h18" />
+    <path d="M5 7h14v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2Z" />
+    <path d="M9 11h6" />
+    <path d="M9 15h6" />
+    <path d="M8 3h8l1 4H7l1-4Z" />
+  </svg>
+);
+
 const VersionActionButton: React.FC<{
   label: string;
   title: string;
@@ -107,6 +182,29 @@ const VersionActionButton: React.FC<{
     type="button"
     aria-label={loading ? label : title}
     title={loading ? label : title}
+    onClick={onClick}
+    disabled={disabled}
+    className={`${iconButtonBase} ${tone}`}
+  >
+    {loading ? (
+      <span className="h-4 w-4 animate-pulse rounded-full bg-current/45" aria-hidden="true" />
+    ) : children}
+  </button>
+);
+
+const ConflictActionButton: React.FC<{
+  loadingLabel: string;
+  title: string;
+  loading: boolean;
+  disabled: boolean;
+  tone: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}> = ({ loadingLabel, title, loading, disabled, tone, onClick, children }) => (
+  <button
+    type="button"
+    aria-label={loading ? loadingLabel : title}
+    title={loading ? loadingLabel : title}
     onClick={onClick}
     disabled={disabled}
     className={`${iconButtonBase} ${tone}`}
@@ -350,6 +448,18 @@ export const CloudSyncPanel: React.FC = () => {
 
   const executeSyncAction = async (action: SyncAction) => {
     if (!action) return;
+    if (action === 'pull' && !status?.mirrorManifest) {
+      const nextMessage = buildDriveDiagnosticMessage(
+        status,
+        'Todavia no existe una copia actual en Drive para este usuario. Primero debes subir una copia desde alguna PC.'
+      );
+      setActiveAction(null);
+      setModalOpen(true);
+      setErrorMessage(nextMessage);
+      setToast({ type: 'error', text: nextMessage });
+      setModalMessage(nextMessage);
+      return;
+    }
     setActiveAction(action);
     setModalOpen(true);
     setErrorMessage(null);
@@ -363,8 +473,11 @@ export const CloudSyncPanel: React.FC = () => {
     const response = action === 'push' ? await pushCloudSync() : await pullCloudSync();
 
     if (!response.success) {
-      setErrorMessage(response.message || 'La sincronizacion no termino correctamente.');
-      setToast({ type: 'error', text: response.message || 'La sincronizacion no termino correctamente.' });
+      const nextMessage = action === 'pull'
+        ? buildDriveDiagnosticMessage(status, response.message || 'La sincronizacion no termino correctamente.')
+        : response.message || 'La sincronizacion no termino correctamente.';
+      setErrorMessage(nextMessage);
+      setToast({ type: 'error', text: nextMessage });
       setModalMessage('La operacion no pudo completarse.');
       setActiveAction(null);
       await refreshStatus();
@@ -384,6 +497,7 @@ export const CloudSyncPanel: React.FC = () => {
     }
 
     if (response.data?.skippedUpload) {
+      markRecentManualPush();
       setToast({ type: 'success', text: response.data?.message || 'No hubo cambios nuevos para subir a Drive.' });
       setModalMessage(response.data?.message || 'No hubo cambios nuevos para subir a Drive.');
       setActiveAction(null);
@@ -392,6 +506,7 @@ export const CloudSyncPanel: React.FC = () => {
       return;
     }
 
+    markRecentManualPush();
     setToast({ type: 'success', text: 'Copia subida correctamente a Drive.' });
     setModalMessage('La copia de Drive quedo actualizada correctamente.');
     setActiveAction(null);
@@ -404,7 +519,7 @@ export const CloudSyncPanel: React.FC = () => {
     setErrorMessage(null);
     const response = await clearCloudVersionHistory();
     if (!response.success) {
-      const nextError = response.message || 'No se pudo limpiar el historial de versiones.';
+      const nextError = response.message || 'No se pudo archivar el historial de versiones.';
       setErrorMessage(nextError);
       setToast({ type: 'error', text: nextError });
       setClearingHistory(false);
@@ -432,7 +547,8 @@ export const CloudSyncPanel: React.FC = () => {
       return;
     }
 
-    setToast({ type: 'success', text: response.message || 'Conflicto archivado correctamente.' });
+    setStatus((current) => removeConflictFromStatus(current, artifactId));
+    setToast({ type: 'success', text: response.message || 'Conflicto archivado y retirado de la lista.' });
     setArtifactActionKey('');
     await refreshStatus();
     emitCloudSyncUpdated();
@@ -456,6 +572,15 @@ export const CloudSyncPanel: React.FC = () => {
   const localEntitySummary = formatEntitySummary(status?.localManifest?.summary);
   const driveEntitySummary = formatEntitySummary(status?.mirrorManifest?.summary);
   const latestConflictEntitySummary = formatEntitySummary(latestConflict?.summary);
+  const localMatchesLatestConflict = manifestsLookEquivalent(status?.localManifest, latestConflict as any);
+  const localMatchesAnyConflict = Boolean(
+    status?.localManifest && conflictsSummary?.items?.some((item) => manifestsLookEquivalent(status.localManifest, item as any))
+  );
+  const localMatchesAnyVersion = Boolean(
+    status?.localManifest && versionsSummary?.items?.some((item) => manifestsLookEquivalent(status.localManifest, item as any))
+  );
+  const canPullFromDrive = !!status?.mirrorManifest;
+  const remoteLookupMessage = String(status?.config.remoteLookupMessage || '').trim();
   const localDate = status?.localManifest?.generatedAt
     ? new Date(status.localManifest.generatedAt).toLocaleString()
     : 'Sin datos locales';
@@ -645,7 +770,9 @@ export const CloudSyncPanel: React.FC = () => {
                   <p className="font-black uppercase tracking-[0.14em] text-slate-400">Drive</p>
                   <p className="mt-1 leading-relaxed">{mirrorDate}</p>
                   <p className="mt-2 leading-relaxed text-slate-600">
-                    {status?.mirrorManifest?.summary ? driveEntitySummary : 'Esta copia aun no trae resumen detallado.'}
+                    {status?.mirrorManifest?.summary
+                      ? driveEntitySummary
+                      : remoteLookupMessage || 'Esta copia aun no trae resumen detallado.'}
                   </p>
                 </div>
               </div>
@@ -720,12 +847,22 @@ export const CloudSyncPanel: React.FC = () => {
                   <p className="mt-2 leading-relaxed">
                     Si usted registro asistencias en otra PC y no las ve aqui, es muy probable que hayan quedado dentro de este conflicto protegido.
                   </p>
+                  {localMatchesLatestConflict ? (
+                    <p className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 font-semibold text-emerald-800">
+                      La copia local ya coincide con este conflicto. Si ya recuperaste esa informacion, puedes archivarlo sin afectar tu copia actual.
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
 
               {isDriveMode && conflictsSummary?.items?.length ? (
                 <div className="rounded-2xl bg-slate-50 px-3 py-3 text-xs text-slate-600">
                   <p className="font-black uppercase tracking-[0.14em] text-slate-400">Copias en conflicto</p>
+                  {localMatchesAnyConflict ? (
+                    <p className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 leading-relaxed text-emerald-800">
+                      La copia local ya coincide con al menos uno de estos conflictos. Esos registros ya pueden tratarse como historial de respaldo y archivarse uno por uno.
+                    </p>
+                  ) : null}
                   <div className="mt-2 space-y-2">
                     {conflictsSummary.items.map((item) => {
                       const inspectKey = `inspect:conflict:${item.id}`;
@@ -738,47 +875,57 @@ export const CloudSyncPanel: React.FC = () => {
                           <p className="font-semibold text-slate-800">{formatArtifactMoment(item.generatedAt || item.createdAt)}</p>
                           <p className="mt-1 leading-relaxed text-slate-500">{item.deviceId || 'Equipo no identificado'}</p>
                           <p className="mt-1 leading-relaxed text-slate-500">{formatEntitySummary(item.summary) || 'Sin resumen disponible.'}</p>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <button
-                              type="button"
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <ConflictActionButton
+                              loadingLabel="Revisando..."
+                              title="Abrir un resumen de esta copia en conflicto para revisar fecha, equipo y contenido."
+                              loading={artifactActionKey === inspectKey}
+                              disabled={artifactActionKey !== ''}
+                              tone="border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50"
                               onClick={() => runArtifactAction('conflict', item.id, 'inspect')}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl border border-slate-300 bg-white px-3 py-2 font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
                             >
-                              {artifactActionKey === inspectKey ? 'Revisando...' : 'Ver resumen'}
-                            </button>
-                            <button
-                              type="button"
+                              <EyeIcon />
+                            </ConflictActionButton>
+                            <ConflictActionButton
+                              loadingLabel="Fusionando..."
+                              title="Traer solo las asistencias de esta copia en conflicto sin reemplazar toda la PC."
+                              loading={artifactActionKey === mergeKey}
+                              disabled={artifactActionKey !== ''}
+                              tone="border-amber-300 bg-amber-50 text-amber-800 hover:border-amber-400 hover:bg-amber-100"
                               onClick={() => runArtifactAction('conflict', item.id, 'merge-attendance')}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 font-bold text-amber-800 transition hover:border-amber-400 disabled:opacity-50"
                             >
-                              {artifactActionKey === mergeKey ? 'Fusionando...' : 'Fusionar asistencia'}
-                            </button>
-                            <button
-                              type="button"
+                              <AttendanceMergeIcon />
+                            </ConflictActionButton>
+                            <ConflictActionButton
+                              loadingLabel="Fusionando..."
+                              title="Traer solo estudiantes y egresados de esta copia en conflicto sin reemplazar todo lo demás."
+                              loading={artifactActionKey === mergeStudentsKey}
+                              disabled={artifactActionKey !== ''}
+                              tone="border-sky-300 bg-sky-50 text-sky-800 hover:border-sky-400 hover:bg-sky-100"
                               onClick={() => runArtifactAction('conflict', item.id, 'merge-students')}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 font-bold text-sky-800 transition hover:border-sky-400 disabled:opacity-50"
                             >
-                              {artifactActionKey === mergeStudentsKey ? 'Fusionando...' : 'Fusionar estudiantes'}
-                            </button>
-                            <button
-                              type="button"
+                              <StudentsMergeIcon />
+                            </ConflictActionButton>
+                            <ConflictActionButton
+                              loadingLabel="Cargando..."
+                              title="Reemplazar la copia actual de esta PC con toda la informacion de este conflicto."
+                              loading={artifactActionKey === applyKey}
+                              disabled={artifactActionKey !== ''}
+                              tone="border-slate-900 bg-slate-900 text-white hover:border-slate-800 hover:bg-slate-800"
                               onClick={() => runArtifactAction('conflict', item.id, 'apply')}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl bg-slate-900 px-3 py-2 font-bold text-white transition hover:bg-slate-800 disabled:opacity-50"
                             >
-                              {artifactActionKey === applyKey ? 'Cargando...' : 'Usar copia completa'}
-                            </button>
-                            <button
-                              type="button"
+                              <RestoreIcon />
+                            </ConflictActionButton>
+                            <ConflictActionButton
+                              loadingLabel="Archivando..."
+                              title="Marcar este conflicto como revisado y moverlo al archivo para despejar la lista."
+                              loading={artifactActionKey === resolveKey}
+                              disabled={artifactActionKey !== ''}
+                              tone="border-rose-300 bg-rose-50 text-rose-800 hover:border-rose-400 hover:bg-rose-100"
                               onClick={() => markConflictResolved(item.id)}
-                              disabled={artifactActionKey !== ''}
-                              className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 font-bold text-rose-800 transition hover:border-rose-400 disabled:opacity-50"
                             >
-                              {artifactActionKey === resolveKey ? 'Archivando...' : 'Marcar resuelto'}
-                            </button>
+                              <ArchiveIcon />
+                            </ConflictActionButton>
                           </div>
                         </div>
                       );
@@ -805,10 +952,15 @@ export const CloudSyncPanel: React.FC = () => {
                         disabled={clearingHistory || activeAction !== null || artifactActionKey !== ''}
                         className="rounded-xl border border-emerald-300 bg-white px-3 py-2 font-bold text-emerald-800 transition hover:border-emerald-400 disabled:opacity-50"
                       >
-                        {clearingHistory ? 'Limpiando...' : 'Limpiar'}
+                        {clearingHistory ? 'Archivando...' : 'Archivar historial'}
                       </button>
                     </div>
                   </div>
+                  {localMatchesAnyVersion ? (
+                    <p className="mt-3 rounded-xl border border-emerald-200 bg-white px-3 py-2 leading-relaxed text-emerald-800">
+                      La copia local ya coincide con una version del historial. Ese historial puede conservarse como respaldo o archivarse para despejar la vista; no cambia tu copia actual.
+                    </p>
+                  ) : null}
                   <div className="mt-3 space-y-2">
                     {versionsSummary.items.map((item) => {
                       const inspectKey = `inspect:version:${item.id}`;
@@ -915,7 +1067,8 @@ export const CloudSyncPanel: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => executeSyncAction('pull')}
-                    disabled={loadingStatus || activeAction !== null}
+                    disabled={loadingStatus || activeAction !== null || !canPullFromDrive}
+                    title={!canPullFromDrive ? 'Aun no existe una copia actual en Drive' : undefined}
                     className="rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
                   >
                     Traer
@@ -932,7 +1085,7 @@ export const CloudSyncPanel: React.FC = () => {
           <div className="w-full max-w-lg rounded-[2rem] bg-white p-7 shadow-[0_24px_60px_rgba(15,23,42,0.28)]">
             <p className="text-[11px] font-black uppercase tracking-[0.25em] text-sky-500">Estado de sincronizacion</p>
             <h2 className="mt-2 text-2xl font-black text-slate-900">
-              {activeAction === 'push' ? 'Actualizando Drive' : activeAction === 'pull' ? 'Cargando desde Drive' : 'Sincronizacion protegida'}
+              {activeAction === 'push' ? 'Actualizando Drive' : activeAction === 'pull' ? 'Cargando desde Drive' : errorMessage ? 'Operacion no disponible' : 'Sincronizacion protegida'}
             </h2>
             <p className="mt-4 text-sm leading-relaxed text-slate-600">{modalMessage}</p>
 

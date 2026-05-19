@@ -16,6 +16,7 @@ import {
 import { Select } from './Select';
 import { GoogleGenAI, Type } from "@google/genai";
 import { UnitTemplateMergeView } from './UnitTemplateMergeView';
+import { readStoredViewSelection, writeStoredViewSelection } from '../utils/viewSelectionStorage';
 
 interface Props {
   activeSection: string;
@@ -23,6 +24,7 @@ interface Props {
 }
 
 const UNITS = [1, 2, 3, 4, 5, 6, 7, 8];
+const UNITS_VIEW_SELECTION_STORAGE_KEY = 'armi_view_selection_unidades_v1';
 
 const INSTRUMENTS_OPTIONS = [
     { value: 'Rúbrica', label: 'Rúbrica' },
@@ -351,11 +353,12 @@ const AuthOverlay: React.FC<{
 };
 
 export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
+    const initialSelection = useMemo(() => readStoredViewSelection(UNITS_VIEW_SELECTION_STORAGE_KEY), []);
     const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
-    const [selectedAreaId, setSelectedAreaId] = useState('');
-    const [selectedGrade, setSelectedGrade] = useState('');
-    const [selectedSection, setSelectedSection] = useState('');
-    const [unitNumber, setUnitNumber] = useState('1');
+    const [selectedAreaId, setSelectedAreaId] = useState(initialSelection.areaId || '');
+    const [selectedGrade, setSelectedGrade] = useState(initialSelection.grade || '');
+    const [selectedSection, setSelectedSection] = useState(initialSelection.section || '');
+    const [unitNumber, setUnitNumber] = useState(initialSelection.unitNumber || '1');
     const [competenciasBase, setCompetenciasBase] = useState<any[]>([]);
     const [estandaresBase, setEstandaresBase] = useState<any[]>([]);
     const [generalData, setGeneralData] = useState<GeneralData | null>(null);
@@ -364,12 +367,13 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [transversalesEstandares, setTransversalesEstandares] = useState<any[]>([]);
 
     const [allPrograms, setAllPrograms] = useState<Record<string, any>>({});
-    const [year, setYear] = useState(new Date().getFullYear().toString());
+    const [year, setYear] = useState(initialSelection.year || new Date().getFullYear().toString());
     const [isGeneratingIA, setIsGeneratingIA] = useState(false);
     const [showCompSelector, setShowCompSelector] = useState(false);
     const [showTemplateMode, setShowTemplateMode] = useState(false);
     const [toast, setToast] = useState<{ msg: string, type: 'success' | 'error' | 'warning' } | null>(null);
     const [hasStoredUnits, setHasStoredUnits] = useState(false);
+    const [assignmentsLoaded, setAssignmentsLoaded] = useState(false);
     const [isManageUnitsModalOpen, setIsManageUnitsModalOpen] = useState(false);
     const [allSavedUnitsList, setAllSavedUnitsList] = useState<any[]>([]);
     const [deletingUnitId, setDeletingUnitId] = useState<string | null>(null);
@@ -484,9 +488,10 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         const load = async () => {
             const gd = await getDatosGenerales();
             setGeneralData(gd);
-            if (gd.year) setYear(gd.year);
+            if (!initialSelection.year && gd.year) setYear(gd.year);
             const saved = localStorage.getItem('armi_assignments');
             if (saved) setAssignments(JSON.parse(saved));
+            setAssignmentsLoaded(true);
             const [progs, unitsMap] = await Promise.all([
                 getProgramacionesAnuales(),
                 getAllUnidadesDidacticas()
@@ -495,7 +500,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             setHasStoredUnits(Object.keys(unitsMap || {}).length > 0);
         };
         load();
-    }, []);
+    }, [initialSelection.year]);
 
     const areaOptions = useMemo(() => {
         const unique = new Map();
@@ -531,6 +536,38 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         }
         return options;
     }, [assignments, selectedAreaId, selectedGrade]);
+
+    useEffect(() => {
+        writeStoredViewSelection(UNITS_VIEW_SELECTION_STORAGE_KEY, {
+            areaId: selectedAreaId,
+            grade: selectedGrade,
+            section: selectedSection,
+            unitNumber,
+            year
+        });
+    }, [selectedAreaId, selectedGrade, selectedSection, unitNumber, year]);
+
+    useEffect(() => {
+        if (!assignmentsLoaded) return;
+        if (selectedAreaId && !areaOptions.some(option => option.value === selectedAreaId)) {
+            setSelectedAreaId('');
+            setSelectedGrade('');
+            setSelectedSection('');
+            return;
+        }
+        if (selectedGrade && !gradeOptions.some(option => option.value === selectedGrade)) {
+            setSelectedGrade('');
+            setSelectedSection('');
+            return;
+        }
+        if (selectedSection && !sectionOptions.some(option => option.value === selectedSection)) {
+            setSelectedSection('');
+            return;
+        }
+        if (unitNumber && !UNITS.some(unit => String(unit) === String(unitNumber))) {
+            setUnitNumber('1');
+        }
+    }, [assignmentsLoaded, selectedAreaId, selectedGrade, selectedSection, unitNumber, areaOptions, gradeOptions, sectionOptions]);
 
     const currentBimesterRoman = useMemo(() => {
         const u = parseInt(unitNumber);

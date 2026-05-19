@@ -113,6 +113,7 @@ export interface CloudSyncStatusData {
         lastUpdatedAt: string | null;
         remoteProvider?: string | null;
         lastCloudVersion?: string;
+        remoteLookupMessage?: string;
         remoteUser?: {
             syncUserKey?: string;
             syncUserLabel?: string;
@@ -179,6 +180,18 @@ export interface CloudSyncStatusData {
             suggestedMirrorPath: string;
         }>;
     };
+    pendingLocal?: {
+        createdAt?: string;
+        reason?: string;
+        restorePoint?: string;
+        manifest?: CloudSyncManifest | null;
+        counts?: Record<string, number> | null;
+        note?: string;
+    } | null;
+    frontendState?: {
+        exportedAt?: string | null;
+        keys: Record<string, string>;
+    } | null;
     safety: {
         restorePointsPath: string;
         retention: number;
@@ -478,6 +491,30 @@ export const pushCloudSync = async (): Promise<ApiResponse<any>> => {
         const res = await safeFetch(`${BACKEND_URL}/sync/push`, {
             method: 'POST',
         }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const markPendingCloudSync = async (data?: { reason?: string; note?: string }): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/pending/mark`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data || {}),
+        }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const discardPendingCloudSync = async (): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/pending/discard`, {
+            method: 'POST',
+        }, 30000);
         return await readJsonResponse(res);
     } catch (e: any) {
         return { success: false, message: e.message };

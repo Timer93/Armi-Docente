@@ -30,33 +30,43 @@ const readJsonFileSafe = (filePath, fallbackValue = {}) => {
   }
 };
 
-const authSettings = {
-  ...readJsonFileSafe(bundledAuthSettingsPath, {}),
-  ...readJsonFileSafe(authSettingsPath, {}),
-};
 const DEFAULT_PROVIDER = 'local_json';
-const PROVIDER = String(
-  process.env.ARMI_AUTH_PROVIDER
-  || authSettings.provider
-  || authSettings.authProvider
-  || DEFAULT_PROVIDER
-).trim().toLowerCase();
-const APPS_SCRIPT_URL = String(
-  process.env.ARMI_AUTH_APPS_SCRIPT_URL
-  || authSettings.appsScriptUrl
-  || authSettings.authLoginUrl
-  || ''
-).trim();
-const APPS_SCRIPT_RESOLVER_URL = String(
-  process.env.ARMI_AUTH_APPS_SCRIPT_RESOLVER_URL
-  || authSettings.appsScriptResolverUrl
-  || authSettings.authResolverUrl
-  || ''
-).trim();
 const execFileAsync = promisify(execFile);
 let cachedAppsScriptUrl = '';
 let cachedAppsScriptUrlAt = 0;
 const URL_CACHE_TTL_MS = 10 * 60 * 1000;
+
+const getAuthSettings = () => ({
+  ...readJsonFileSafe(bundledAuthSettingsPath, {}),
+  ...readJsonFileSafe(authSettingsPath, {}),
+});
+
+const getProvider = () => String(
+  process.env.ARMI_AUTH_PROVIDER
+  || getAuthSettings().provider
+  || getAuthSettings().authProvider
+  || DEFAULT_PROVIDER
+).trim().toLowerCase();
+
+const getAppsScriptUrlSetting = () => {
+  const authSettings = getAuthSettings();
+  return String(
+    process.env.ARMI_AUTH_APPS_SCRIPT_URL
+    || authSettings.appsScriptUrl
+    || authSettings.authLoginUrl
+    || ''
+  ).trim();
+};
+
+const getAppsScriptResolverUrlSetting = () => {
+  const authSettings = getAuthSettings();
+  return String(
+    process.env.ARMI_AUTH_APPS_SCRIPT_RESOLVER_URL
+    || authSettings.appsScriptResolverUrl
+    || authSettings.authResolverUrl
+    || ''
+  ).trim();
+};
 
 const persistResolvedAppsScriptUrl = (resolvedUrl) => {
   const normalizedUrl = normalizeText(resolvedUrl);
@@ -65,7 +75,7 @@ const persistResolvedAppsScriptUrl = (resolvedUrl) => {
   const currentRuntimeSettings = readJsonFileSafe(authSettingsPath, {});
   writeJsonFileAtomic(authSettingsPath, {
     ...currentRuntimeSettings,
-    provider: currentRuntimeSettings.provider || authSettings.provider || 'apps_script',
+    provider: currentRuntimeSettings.provider || getAuthSettings().provider || 'apps_script',
     appsScriptUrl: normalizedUrl,
     authLoginUrl: normalizedUrl,
     appsScriptResolverUrl: normalizedUrl,
@@ -493,13 +503,15 @@ const extractResolvedAppsScriptUrl = (payload) => {
 };
 
 const resolveAppsScriptUrl = async (forceRefresh = false) => {
+  const resolverUrl = getAppsScriptResolverUrlSetting();
+  const directUrl = getAppsScriptUrlSetting();
   if (!forceRefresh && cachedAppsScriptUrl && Date.now() - cachedAppsScriptUrlAt < URL_CACHE_TTL_MS) {
     return cachedAppsScriptUrl;
   }
 
-  if (APPS_SCRIPT_RESOLVER_URL) {
+  if (resolverUrl) {
     try {
-      const response = await withTimeout(async (signal) => fetch(APPS_SCRIPT_RESOLVER_URL, {
+      const response = await withTimeout(async (signal) => fetch(resolverUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'ResolveAuthUrl' }),
@@ -516,7 +528,7 @@ const resolveAppsScriptUrl = async (forceRefresh = false) => {
     } catch {}
 
     try {
-      const response = await withTimeout(async (signal) => fetch(APPS_SCRIPT_RESOLVER_URL, { signal }));
+      const response = await withTimeout(async (signal) => fetch(resolverUrl, { signal }));
       const parsed = await parseRemoteJsonResponse(response);
       const resolved = extractResolvedAppsScriptUrl(parsed);
       if (resolved) {
@@ -528,12 +540,12 @@ const resolveAppsScriptUrl = async (forceRefresh = false) => {
     } catch {}
   }
 
-  if (APPS_SCRIPT_URL) {
-    cachedAppsScriptUrl = APPS_SCRIPT_URL;
+  if (directUrl) {
+    cachedAppsScriptUrl = directUrl;
     cachedAppsScriptUrlAt = Date.now();
-    persistResolvedAppsScriptUrl(APPS_SCRIPT_URL);
+    persistResolvedAppsScriptUrl(directUrl);
   }
-  return APPS_SCRIPT_URL;
+  return directUrl;
 };
 
 const loginWithLocalProvider = async ({ username, password, remember, deviceContext }) => {
@@ -860,7 +872,7 @@ export const checkPurchaseStatus = async (payload = {}) => {
 };
 
 export const loginUser = async (payload = {}) => {
-  if (PROVIDER === 'apps_script') {
+  if (getProvider() === 'apps_script') {
     return await loginWithAppsScriptProvider(payload);
   }
   return await loginWithLocalProvider(payload);
@@ -869,9 +881,9 @@ export const loginUser = async (payload = {}) => {
 export const getAuthProviderInfo = () => ({
   success: true,
   data: {
-    provider: PROVIDER,
-    mode: PROVIDER === 'apps_script' ? 'remote' : 'local',
-    appsScriptConfigured: !!APPS_SCRIPT_URL,
+    provider: getProvider(),
+    mode: getProvider() === 'apps_script' ? 'remote' : 'local',
+    appsScriptConfigured: !!getAppsScriptUrlSetting(),
   },
 });
 

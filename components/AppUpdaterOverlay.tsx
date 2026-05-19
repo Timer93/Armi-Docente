@@ -22,7 +22,7 @@ type UpdaterSnapshot = {
 const fallbackSnapshot: UpdaterSnapshot = {
   available: false,
   configured: false,
-  currentVersion: '',
+  currentVersion: __APP_VERSION__,
   status: 'idle',
   progress: null,
   message: '',
@@ -46,6 +46,7 @@ const formatBytes = (value: number) => {
 };
 
 export const AppUpdaterOverlay: React.FC = () => {
+  const hasUpdaterBridge = typeof window !== 'undefined' && !!window.armiUpdater;
   const [snapshot, setSnapshot] = useState<UpdaterSnapshot>(
     typeof window !== 'undefined' && window.armiUpdater?.getSnapshot
       ? window.armiUpdater.getSnapshot()
@@ -74,6 +75,9 @@ export const AppUpdaterOverlay: React.FC = () => {
   const isVisible = !dismissed && (isBlocking || isError || isDownloadedModal);
   const progress = Math.max(0, Math.min(100, Number(snapshot.progress?.percent || 0)));
   const hasAttention = snapshot.available || isError || Boolean(snapshot.downloadReady);
+  const panelMessage = !hasUpdaterBridge
+    ? 'Sistema actualizado en esta vista web. La verificacion e instalacion de nuevas versiones se realiza desde la app de escritorio.'
+    : snapshot.message || (snapshot.configured ? 'Sistema actualizado.' : 'El actualizador de escritorio aun no tiene GitHub Releases configurado.');
 
   const closeModal = () => {
     if (!canDismissModal) return;
@@ -101,7 +105,7 @@ export const AppUpdaterOverlay: React.FC = () => {
             </div>
 
             <p className="mt-3 text-sm leading-relaxed text-slate-600">
-              {snapshot.message || (snapshot.configured ? 'Revisa si hay una nueva version disponible.' : 'Configura GitHub Releases para activar las actualizaciones automaticas.')}
+              {panelMessage}
             </p>
 
             {snapshot.releaseName ? (
@@ -112,8 +116,9 @@ export const AppUpdaterOverlay: React.FC = () => {
               <button
                 type="button"
                 onClick={() => window.armiUpdater?.checkForUpdates?.()}
-                disabled={!snapshot.configured || isBlocking}
+                disabled={!hasUpdaterBridge || !snapshot.configured || isBlocking}
                 className="rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                title={!hasUpdaterBridge ? 'Disponible en la app de escritorio' : undefined}
               >
                 Buscar actualizacion
               </button>

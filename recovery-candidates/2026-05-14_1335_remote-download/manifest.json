@@ -1,0 +1,64 @@
+{
+  "version": 2,
+  "provider": "local-app-storage",
+  "storageMode": "apps_script_drive",
+  "generatedAt": "2026-05-14T20:21:07.081Z",
+  "digest": "949d86bd9b34922a233c060cc2946432e5fcd4f97a91ac472d983678ab8b92ad",
+  "summary": {
+    "entities": {
+      "programaciones": 4,
+      "unidades": 8,
+      "sesiones": 28,
+      "estudiantes": 167,
+      "egresados": 32,
+      "asistencias": 1335,
+      "rostros": 0
+    },
+    "includesAttendance": true,
+    "includesFaceProfiles": true
+  },
+  "files": [
+    {
+      "relativePath": "database/database-dump.json",
+      "scope": "database",
+      "size": 3592152,
+      "mtimeMs": 1778790067046.8157,
+      "checksum": "6479f71f7900569fbff654e0230b46ae22c830e07263882a8fce9e269d9dbc20"
+    },
+    {
+      "relativePath": "state/frontend-local-storage.json",
+      "scope": "frontend-state",
+      "size": 42881,
+      "mtimeMs": 1778790056332.7842,
+      "checksum": "b1c91b7030cb76ed68096a9e2b7c47406df167b8f7f664abee242d1bfe0099cf"
+    },
+    {
+      "relativePath": "uploads/user-assets/general/insignia.png",
+      "scope": "uploads",
+      "size": 350696,
+      "mtimeMs": 1778561153844.891,
+      "checksum": "a977e3e87f0606d9e1df5646fee5fc5ec25cc2c8b89152391dba786c766852c4"
+    },
+    {
+      "relativePath": "uploads/user-assets/general/logo.png",
+      "scope": "uploads",
+      "size": 23136,
+      "mtimeMs": 1778561153845.9126,
+      "checksum": "619d75834fb85dcdb04c8a761213e510487cea035312b5efe553af062dc73cbd"
+    },
+    {
+      "relativePath": "uploads/user-assets/profiles/armi_profile_image/profile.png",
+      "scope": "uploads",
+      "size": 1344767,
+      "mtimeMs": 1778561153855.2334,
+      "checksum": "23274457490f3fdb051973ad1e5115e9a2ed937d443835724c1411ad7d2cef19"
+    },
+    {
+      "relativePath": "uploads/user-assets/profiles/arnold/profile.png",
+      "scope": "uploads",
+      "size": 1344767,
+      "mtimeMs": 1778561153871.2588,
+      "checksum": "23274457490f3fdb051973ad1e5115e9a2ed937d443835724c1411ad7d2cef19"
+    }
+  ]
+}
