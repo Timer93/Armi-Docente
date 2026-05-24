@@ -829,8 +829,25 @@ const getSyncEntityCounts = () => {
     }
   };
 
+  const safeScalar = (sql) => {
+    try {
+      const row = db.prepare(sql).get();
+      return Number(row?.total || 0);
+    } catch {
+      return 0;
+    }
+  };
+
   return {
     programaciones: safeCount('programacion_anual'),
+    programacionesConMetas: safeScalar(`
+      SELECT COUNT(*) as total
+      FROM programacion_anual
+      WHERE metas_datos IS NOT NULL
+        AND TRIM(metas_datos) <> ''
+        AND TRIM(metas_datos) <> '[]'
+    `),
+    datosGenerales: safeCount('datos_generales'),
     unidades: safeCount('unidades_didacticas'),
     sesiones: safeCount('sesiones'),
     estudiantes: safeCount('db_estudiantes'),
@@ -842,6 +859,13 @@ const getSyncEntityCounts = () => {
 
 const getSyncEntityCountsFromDump = (dump) => ({
   programaciones: Array.isArray(dump?.tables?.programacion_anual) ? dump.tables.programacion_anual.length : 0,
+  programacionesConMetas: Array.isArray(dump?.tables?.programacion_anual)
+    ? dump.tables.programacion_anual.filter((row) => {
+        const raw = String(row?.metas_datos ?? '').trim();
+        return raw && raw !== '[]' && raw !== 'null';
+      }).length
+    : 0,
+  datosGenerales: Array.isArray(dump?.tables?.datos_generales) ? dump.tables.datos_generales.length : 0,
   unidades: Array.isArray(dump?.tables?.unidades_didacticas) ? dump.tables.unidades_didacticas.length : 0,
   sesiones: Array.isArray(dump?.tables?.sesiones) ? dump.tables.sesiones.length : 0,
   estudiantes: Array.isArray(dump?.tables?.db_estudiantes) ? dump.tables.db_estudiantes.length : 0,
@@ -1234,7 +1258,15 @@ const mergeStudentsTablesFromDump = (dump) => {
 };
 
 const detectDestructiveCountRegression = (localCounts, remoteCounts) => {
-  const regressions = ['programaciones', 'unidades', 'sesiones', 'asistencias', 'rostros']
+  const regressions = [
+    'programaciones',
+    'programacionesConMetas',
+    'datosGenerales',
+    'unidades',
+    'sesiones',
+    'asistencias',
+    'rostros',
+  ]
     .map((key) => ({
       key,
       local: Number(localCounts?.[key] || 0),

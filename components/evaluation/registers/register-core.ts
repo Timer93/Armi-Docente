@@ -1,5 +1,5 @@
 import type { Student } from '../../../types';
-import { buildSessionAssessmentModel, normalizeLoose } from '../../sessions-view/shared';
+import { buildSessionAssessmentModel, extractCapacidades, normalizeLoose, TRANSVERSAL_CAPACITY_MAP } from '../../sessions-view/shared';
 import type {
   AggregatedCompetencySummary,
   AggregatedRegisterResult,
@@ -16,7 +16,6 @@ import type {
 } from './register-types';
 
 const SESSION_LEVEL_ORDER: Array<Exclude<RegisterLevelCode, 'ne'>> = ['c', 'b', 'a', 'ad'];
-const UNIT_SCORE_MAP: Record<Exclude<RegisterLevelCode, 'ne'>, number> = { c: 1, b: 2, a: 3, ad: 4 };
 const OVERALL_SCORE_MAP: Record<Exclude<RegisterLevelCode, 'ne'>, number> = { c: 0, b: 1, a: 2, ad: 3 };
 
 const getStudentInactiveCode = (student: Student | undefined): RegisterLevelCode | null => {
@@ -69,28 +68,6 @@ const getSessionMedianLevel = (codes: Array<RegisterLevelCode | ''>): RegisterLe
   return 'c';
 };
 
-const getAverageLevel = (
-  codes: Array<RegisterLevelCode | ''>,
-  scoreMap: Record<Exclude<RegisterLevelCode, 'ne'>, number>
-): RegisterLevelCode => {
-  const validCodes = codes.filter((code): code is Exclude<RegisterLevelCode, 'ne'> => SESSION_LEVEL_ORDER.includes(code as Exclude<RegisterLevelCode, 'ne'>));
-  if (!validCodes.length) return 'ne';
-
-  const average = validCodes.reduce((sum, code) => sum + scoreMap[code], 0) / validCodes.length;
-  if (scoreMap === OVERALL_SCORE_MAP) {
-    const rounded = Math.round(average);
-    if (rounded >= 3) return 'ad';
-    if (rounded === 2) return 'a';
-    if (rounded === 1) return 'b';
-    return 'c';
-  }
-
-  if (average >= 3.5) return 'ad';
-  if (average >= 2.5) return 'a';
-  if (average >= 1.5) return 'b';
-  return 'c';
-};
-
 const getAverageLevelFromZeroBasedScale = (codes: Array<RegisterLevelCode | ''>): RegisterLevelCode => {
   const validCodes = codes.filter((code): code is Exclude<RegisterLevelCode, 'ne'> => SESSION_LEVEL_ORDER.includes(code as Exclude<RegisterLevelCode, 'ne'>));
   if (!validCodes.length) return 'ne';
@@ -135,6 +112,73 @@ const getRecordMap = (records: EvaluationRecordRow[]) => {
   return map;
 };
 
+const sanitizeSessionAssessmentRows = (rows: any[], sessionData: any) => {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const primaryExpectedCapacities = extractCapacidades(String(sessionData?.competenciaPrio?.cap || ''));
+  const transversalDefinitions = new Map<string, string[]>(
+    (Array.isArray(sessionData?.competenciasTrans) ? sessionData.competenciasTrans : []).map((item: any) => {
+      const competencyName = String(item?.comp || '').trim();
+      const rowCapacityText = String(item?.cap || '').trim();
+      const officialCapacities = TRANSVERSAL_CAPACITY_MAP[competencyName] || [];
+      const explicitCapacities = extractCapacidades(rowCapacityText);
+      const matchedOfficialCapacities = officialCapacities.filter((capacity) =>
+        normalizeLoose(rowCapacityText).includes(normalizeLoose(capacity))
+      );
+      const resolvedCapacities = matchedOfficialCapacities.length > explicitCapacities.length
+        ? matchedOfficialCapacities
+        : explicitCapacities;
+      return [competencyName, resolvedCapacities];
+    })
+  );
+  const groupedRows = new Map<string, number[]>();
+
+  sourceRows.forEach((row: any, index: number) => {
+    const source = String(row?.source || 'primary') === 'transversal' ? 'transversal' : 'primary';
+    const competencyName = String(row?.competencyName || '').trim();
+    const capacityName = String(row?.capacityName || '').trim();
+    const expectedCapacities = source === 'transversal'
+      ? (transversalDefinitions.get(competencyName) || TRANSVERSAL_CAPACITY_MAP[competencyName] || [])
+      : primaryExpectedCapacities;
+    const groupKey = `${source}::${normalizeLoose(competencyName)}::${normalizeLoose(capacityName)}`;
+    if (!capacityName || expectedCapacities.length <= 1) return;
+    if (!groupedRows.has(groupKey)) groupedRows.set(groupKey, []);
+    groupedRows.get(groupKey)!.push(index);
+  });
+
+  return sourceRows.map((row: any) => {
+    const source = String(row?.source || 'primary') === 'transversal' ? 'transversal' : 'primary';
+    const competencyName = String(row?.competencyName || '').trim();
+    const capacityName = String(row?.capacityName || '').trim();
+    const expectedCapacities = source === 'transversal'
+      ? (transversalDefinitions.get(competencyName) || TRANSVERSAL_CAPACITY_MAP[competencyName] || [])
+      : primaryExpectedCapacities;
+    if (!capacityName || expectedCapacities.length === 0) return row;
+
+    const extracted = extractCapacidades(capacityName);
+    const expectedMatches = expectedCapacities.filter((item) =>
+      extracted.some((candidate) => normalizeLoose(candidate) === normalizeLoose(item))
+      || normalizeLoose(capacityName).includes(normalizeLoose(item))
+    );
+
+    const groupKey = `${source}::${normalizeLoose(competencyName)}::${normalizeLoose(capacityName)}`;
+    const groupedIndexes = groupedRows.get(groupKey) || [];
+    const currentIndex = groupedIndexes.indexOf(sourceRows.indexOf(row));
+    const looksCombined = /[.;•·]\s+/.test(capacityName) || extractCapacidades(capacityName).length > 1;
+    const sequentialExpected = groupedIndexes.length > 1 && groupedIndexes.length <= expectedCapacities.length
+      && looksCombined
+      ? expectedCapacities
+      : [];
+    const resolvedList = expectedMatches.length > 1 ? expectedMatches : sequentialExpected;
+
+    if (resolvedList.length <= 1 || currentIndex < 0) return row;
+
+    return {
+      ...row,
+      capacityName: resolvedList[Math.min(currentIndex, resolvedList.length - 1)] || row.capacityName
+    };
+  });
+};
+
 const getSessionRows = (session: SessionDetailEntry) => {
   const model = session?.sessionData?.sessionAssessmentModel || buildSessionAssessmentModel(session?.sessionData || {}, {
     areaId: session.areaId,
@@ -145,7 +189,7 @@ const getSessionRows = (session: SessionDetailEntry) => {
     bimester: session.bimesterLabel
   });
 
-  return Array.isArray(model?.rows) ? model.rows : [];
+  return sanitizeSessionAssessmentRows(Array.isArray(model?.rows) ? model.rows : [], session?.sessionData || {});
 };
 
 const getSessionRecordLevelCode = (
@@ -337,7 +381,7 @@ const buildUnitSnapshotsFromSessionSnapshots = (
             source: item.source,
             competencyName: item.competencyName,
             capacityName: item.capacityName,
-            code: getAverageLevel(item.codes, UNIT_SCORE_MAP)
+            code: getAverageLevelFromZeroBasedScale(item.codes)
           })),
           competencies: buildCompetenciesFromCapacities(
             Array.from(capacityMap.entries()).map(([key, item]) => ({
@@ -345,7 +389,7 @@ const buildUnitSnapshotsFromSessionSnapshots = (
               source: item.source,
               competencyName: item.competencyName,
               capacityName: item.capacityName,
-              code: getAverageLevel(item.codes, UNIT_SCORE_MAP)
+              code: getAverageLevelFromZeroBasedScale(item.codes)
             })),
             null
           )
@@ -401,7 +445,7 @@ export const buildUnitRegisterAggregation = ({ sessions, students, records }: Re
       source: bucket.source,
       competencyName: bucket.competencyName,
       capacityName: bucket.capacityName,
-      code: inactiveCode || getAverageLevel(bucket.codes, UNIT_SCORE_MAP)
+      code: inactiveCode || getAverageLevelFromZeroBasedScale(bucket.codes)
     }));
 
     const competencies = buildCompetenciesFromCapacities(capacities, inactiveCode);
@@ -409,7 +453,7 @@ export const buildUnitRegisterAggregation = ({ sessions, students, records }: Re
     const primaryCompetencyCodes = competencies
       .filter((item) => item.source === 'primary')
       .map((item) => item.code);
-    const overallCode = inactiveCode || getAverageLevel(primaryCompetencyCodes, OVERALL_SCORE_MAP);
+    const overallCode = inactiveCode || getAverageLevelFromZeroBasedScale(primaryCompetencyCodes);
 
     return {
       studentId: String(student.id),
@@ -431,6 +475,7 @@ export const buildUnitRegisterAggregation = ({ sessions, students, records }: Re
 };
 
 export const buildBimesterRegisterAggregation = ({ sessions, students, records }: RegisterSourceBundle): AggregatedRegisterResult => {
+  const sessionSnapshots = buildSessionRegisterSnapshots({ sessions, students, records });
   const sessionsByUnit = new Map<string, SessionDetailEntry[]>();
   sessions.forEach((session) => {
     const unitKey = String(session.unitNumber);
@@ -445,25 +490,13 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
   const aggregatedStudents: AggregatedStudentRegister[] = students.map((student) => {
     const inactiveCode = getStudentInactiveCode(student);
 
-    const competencyKeyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; codes: RegisterLevelCode[] }>();
     const capacityKeyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; capacityName: string; codes: RegisterLevelCode[] }>();
 
-    unitAggregations.forEach((unitAggregation) => {
-      const unitStudent = unitAggregation.students.find((entry) => entry.studentId === String(student.id));
-      if (!unitStudent) return;
+    sessionSnapshots.forEach((sessionSnapshot) => {
+      const sessionStudent = sessionSnapshot.students.find((entry) => entry.studentId === String(student.id));
+      if (!sessionStudent) return;
 
-      unitStudent.competencies.forEach((competency) => {
-        if (!competencyKeyMap.has(competency.key)) {
-          competencyKeyMap.set(competency.key, {
-            source: competency.source,
-            competencyName: competency.competencyName,
-            codes: []
-          });
-        }
-        competencyKeyMap.get(competency.key)!.codes.push(competency.code);
-      });
-
-      unitStudent.capacities.forEach((capacity) => {
+      sessionStudent.capacities.forEach((capacity) => {
         if (!capacityKeyMap.has(capacity.key)) {
           capacityKeyMap.set(capacity.key, {
             source: capacity.source,
@@ -481,7 +514,7 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
       source: bucket.source,
       competencyName: bucket.competencyName,
       capacityName: bucket.capacityName,
-      code: inactiveCode || getAverageLevel(bucket.codes, UNIT_SCORE_MAP)
+      code: inactiveCode || getAverageLevelFromZeroBasedScale(bucket.codes)
     }));
 
     const competencies = buildCompetenciesFromCapacities(capacities, inactiveCode);
@@ -489,7 +522,7 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
     const primaryCompetencyCodes = competencies
       .filter((item) => item.source === 'primary')
       .map((item) => item.code);
-    const overallCode = inactiveCode || getAverageLevel(primaryCompetencyCodes, OVERALL_SCORE_MAP);
+    const overallCode = inactiveCode || getAverageLevelFromZeroBasedScale(primaryCompetencyCodes);
 
     return {
       studentId: String(student.id),
@@ -501,7 +534,6 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
     };
   });
 
-  const sessionSnapshots = unitAggregations.flatMap((aggregation) => aggregation.sessions);
   const unitSnapshots = buildUnitSnapshotsFromSessionSnapshots(sessionSnapshots, students);
 
   return {

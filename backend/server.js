@@ -1591,6 +1591,86 @@ app.post('/api/evaluacion/registros', (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
+app.get('/api/evaluacion/conclusiones', (req, res) => {
+  const { year, areaId, grade, section, scopeType, scopeValue, studentId } = req.query;
+  try {
+    let sql = 'SELECT * FROM evaluacion_conclusiones WHERE 1=1';
+    const params = [];
+    if (year) { sql += ' AND year = ?'; params.push(String(year)); }
+    if (areaId) { sql += ' AND area_id = ?'; params.push(String(areaId)); }
+    if (grade) { sql += ' AND grade = ?'; params.push(String(grade)); }
+    if (section) { sql += ' AND section = ?'; params.push(String(section)); }
+    if (scopeType) { sql += ' AND scope_type = ?'; params.push(String(scopeType)); }
+    if (scopeValue) { sql += ' AND scope_value = ?'; params.push(String(scopeValue)); }
+    if (studentId) { sql += ' AND student_id = ?'; params.push(String(studentId)); }
+    sql += ' ORDER BY student_id, competency_name, competency_key';
+
+    const rows = db.prepare(sql).all(...params).map((row) => ({
+      id: row.id,
+      year: row.year || '',
+      areaId: row.area_id || '',
+      grade: row.grade || '',
+      section: row.section || '',
+      scopeType: row.scope_type || '',
+      scopeValue: row.scope_value || '',
+      studentId: row.student_id || '',
+      competencyKey: row.competency_key || '',
+      competencyName: row.competency_name || '',
+      competencySource: row.competency_source || '',
+      conclusionText: row.conclusion_text || '',
+      updatedAt: row.updated_at || ''
+    }));
+
+    res.json({ success: true, data: rows });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+app.post('/api/evaluacion/conclusiones', (req, res) => {
+  const { records } = req.body || {};
+  try {
+    const list = Array.isArray(records) ? records : [];
+    const transaction = db.transaction((items) => {
+      const del = db.prepare(`
+        DELETE FROM evaluacion_conclusiones
+        WHERE year = ? AND area_id = ? AND grade = ? AND section = ?
+          AND scope_type = ? AND scope_value = ? AND student_id = ? AND competency_key = ?
+      `);
+      const ins = db.prepare(`
+        INSERT INTO evaluacion_conclusiones (
+          year, area_id, grade, section, scope_type, scope_value,
+          student_id, competency_key, competency_name, competency_source, conclusion_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const item of items) {
+        const year = String(item?.year || '').trim();
+        const areaId = String(item?.areaId || '').trim();
+        const grade = String(item?.grade || '').trim();
+        const section = String(item?.section || '').trim();
+        const scopeType = String(item?.scopeType || '').trim();
+        const scopeValue = String(item?.scopeValue || '').trim();
+        const studentId = String(item?.studentId || '').trim();
+        const competencyKey = String(item?.competencyKey || '').trim();
+        const competencyName = String(item?.competencyName || '').trim();
+        const competencySource = String(item?.competencySource || '').trim();
+        const conclusionText = String(item?.conclusionText || '').trim();
+
+        if (!year || !areaId || !grade || !section || !scopeType || !scopeValue || !studentId || !competencyKey) {
+          continue;
+        }
+
+        del.run(year, areaId, grade, section, scopeType, scopeValue, studentId, competencyKey);
+        if (conclusionText) {
+          ins.run(year, areaId, grade, section, scopeType, scopeValue, studentId, competencyKey, competencyName, competencySource, conclusionText);
+        }
+      }
+    });
+
+    transaction(list);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
 app.get('/api/evaluacion/evidencias', (req, res) => {
   const { year, areaId, grade, section, bimester, unitNumber, sessionNumber, studentId, criteriaId } = req.query;
   try {

@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { getAllSesiones, getCompetencias, getDatosGenerales, getEstudiantes, getEvaluacionRegistros, getSesion } from '../../../services/apiService';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { GoogleGenAI, Type } from '@google/genai';
+import { getAllSesiones, getCompetencias, getDatosGenerales, getEstudiantes, getEvaluacionConclusiones, getEvaluacionRegistros, getEstandares, getSesion, saveEvaluacionConclusiones } from '../../../services/apiService';
 import { Select } from '../../Select';
 import type { GeneralData, Student, TeachingAssignment } from '../../../types';
 import { buildBimesterRegisterAggregation, buildUnitRegisterAggregation, inferBimesterLabelFromUnitNumber } from './register-core';
@@ -22,12 +23,59 @@ type CapacityGroup = {
   capacities: Array<{ key: string; capacityName: string }>;
 };
 
+type GeneratedConclusionItem = {
+  key: string;
+  logros?: string;
+  dificultades?: string;
+  sugerencias?: string;
+};
+
+const FloatingToast: React.FC<{ message: string; subtext?: string; type: 'success' | 'error'; onClose: () => void }> = ({ message, subtext, type, onClose }) => {
+  useEffect(() => {
+    const timer = window.setTimeout(onClose, 7000);
+    return () => window.clearTimeout(timer);
+  }, [onClose]);
+
+  return (
+    <div className="fixed top-10 left-1/2 z-[7000] w-full max-w-md -translate-x-1/2 px-4 print:hidden">
+      <div className={`rounded-[2.25rem] border px-6 py-5 shadow-2xl backdrop-blur-xl ${type === 'success' ? 'border-emerald-400/30 bg-slate-950 text-white' : 'border-rose-400/30 bg-slate-950 text-white'}`}>
+        <div className="flex items-start gap-4">
+          <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-2xl ${type === 'success' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+            {type === 'success' ? 'OK' : '!'}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className={`text-[10px] font-black uppercase tracking-[0.22em] ${type === 'success' ? 'text-emerald-300' : 'text-rose-300'}`}>Registro ARMI</div>
+            <div className="mt-1 text-[11px] font-bold leading-tight">{message}</div>
+            {subtext ? <div className="mt-2 text-[10px] leading-relaxed text-slate-300">{subtext}</div> : null}
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-500 transition hover:text-white">✕</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const PrintMiniIcon = () => (
   <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M7 9V4h10v5" />
     <rect x="4" y="9" width="16" height="8" rx="2" />
     <path d="M7 14h10v6H7z" />
     <path d="M17 12h.01" />
+  </svg>
+);
+
+const SparklesMiniIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 3l1.9 4.6L18.5 9l-4.6 1.4L12 15l-1.9-4.6L5.5 9l4.6-1.4L12 3z" />
+    <path d="M19 14l.9 2.1L22 17l-2.1.9L19 20l-.9-2.1L16 17l2.1-.9L19 14z" />
+    <path d="M5 14l.9 2.1L8 17l-2.1.9L5 20l-.9-2.1L2 17l2.1-.9L5 14z" />
+  </svg>
+);
+
+const CopyMiniIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
   </svg>
 );
 
@@ -97,6 +145,11 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
   const [showSessionSources, setShowSessionSources] = useState(false);
   const [expandedConclusions, setExpandedConclusions] = useState<Record<string, boolean>>({});
   const [editableConclusions, setEditableConclusions] = useState<Record<string, string>>({});
+  const [isGeneratingAiConclusions, setIsGeneratingAiConclusions] = useState(false);
+  const [aiConclusionMessage, setAiConclusionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [copySiagieMessage, setCopySiagieMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [conclusionsHydrated, setConclusionsHydrated] = useState(false);
+  const [toastData, setToastData] = useState<{ type: 'success' | 'error'; msg: string; sub?: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
@@ -112,6 +165,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
   const [unitNumber, setUnitNumber] = useState('');
   const [bimesterLabel, setBimesterLabel] = useState('');
   const [detailedSessions, setDetailedSessions] = useState<SessionDetailEntry[]>([]);
+  const lastLoadedConclusionsScopeRef = useRef('');
 
   useEffect(() => {
     let cancelled = false;
@@ -212,15 +266,76 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
     () => `armi_register_conclusions_${mode}_${year}_${areaId}_${grade}_${section}_${mode === 'unit' ? unitNumber : bimesterLabel}`,
     [mode, year, areaId, grade, section, unitNumber, bimesterLabel]
   );
+  const conclusionScopeType = mode;
+  const conclusionScopeValue = mode === 'unit' ? unitNumber : bimesterLabel;
+  const conclusionQueryKey = useMemo(
+    () => [year, areaId, grade, section, conclusionScopeType, conclusionScopeValue].join('::'),
+    [year, areaId, grade, section, conclusionScopeType, conclusionScopeValue]
+  );
 
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(conclusionStorageKey);
-      setEditableConclusions(stored ? JSON.parse(stored) : {});
-    } catch {
-      setEditableConclusions({});
-    }
-  }, [conclusionStorageKey]);
+    let cancelled = false;
+    const loadPersistedConclusions = async () => {
+      if (!year || !areaId || !grade || !section || !conclusionScopeType || !conclusionScopeValue) {
+        setEditableConclusions({});
+        setConclusionsHydrated(false);
+        lastLoadedConclusionsScopeRef.current = '';
+        return;
+      }
+      if (lastLoadedConclusionsScopeRef.current === conclusionQueryKey) return;
+
+      setConclusionsHydrated(false);
+      lastLoadedConclusionsScopeRef.current = conclusionQueryKey;
+      try {
+        const response = await getEvaluacionConclusiones({
+          year,
+          areaId,
+          grade,
+          section,
+          scopeType: conclusionScopeType,
+          scopeValue: conclusionScopeValue
+        });
+        if (cancelled) return;
+
+        const dbRows = response?.success && Array.isArray(response.data) ? response.data : [];
+        const fromDb = dbRows.reduce((acc: Record<string, string>, row: any) => {
+          const key = getConclusionKey(String(row.studentId || ''), String(row.competencyKey || ''));
+          const text = String(row.conclusionText || '').trim();
+          if (key && text) acc[key] = text;
+          return acc;
+        }, {});
+
+        if (Object.keys(fromDb).length > 0) {
+          setEditableConclusions(fromDb);
+          setConclusionsHydrated(true);
+          return;
+        }
+
+        try {
+          const stored = localStorage.getItem(conclusionStorageKey);
+          const localRows = stored ? JSON.parse(stored) : {};
+          setEditableConclusions(localRows && typeof localRows === 'object' ? localRows : {});
+        } catch {
+          setEditableConclusions({});
+        }
+      } catch {
+        if (cancelled) return;
+        lastLoadedConclusionsScopeRef.current = '';
+        try {
+          const stored = localStorage.getItem(conclusionStorageKey);
+          const localRows = stored ? JSON.parse(stored) : {};
+          setEditableConclusions(localRows && typeof localRows === 'object' ? localRows : {});
+        } catch {
+          setEditableConclusions({});
+        }
+      } finally {
+        if (!cancelled) setConclusionsHydrated(true);
+      }
+    };
+
+    loadPersistedConclusions();
+    return () => { cancelled = true; };
+  }, [conclusionStorageKey, conclusionQueryKey, year, areaId, grade, section, conclusionScopeType, conclusionScopeValue]);
 
   useEffect(() => {
     try {
@@ -397,6 +512,41 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
   }, [areaCompetencyRows, aggregation, detailedSessions]);
   const primaryCapacityGroups = capacityGroups.filter((g) => g.source === 'primary');
   const transversalCapacityGroups = capacityGroups.filter((g) => g.source === 'transversal');
+  const allCompetencyGroups = useMemo(() => [...primaryCapacityGroups, ...transversalCapacityGroups], [primaryCapacityGroups, transversalCapacityGroups]);
+
+  useEffect(() => {
+    if (!conclusionsHydrated || !year || !areaId || !grade || !section || !conclusionScopeValue) return;
+
+    const timeoutId = window.setTimeout(async () => {
+      const records = Object.entries(editableConclusions).map(([key, value]) => {
+        const separatorIndex = key.indexOf('::');
+        const studentId = separatorIndex >= 0 ? key.slice(0, separatorIndex) : '';
+        const competencyKey = separatorIndex >= 0 ? key.slice(separatorIndex + 2) : '';
+        const group = allCompetencyGroups.find((item) => item.competencyKey === competencyKey);
+        return {
+          year,
+          areaId,
+          grade,
+          section,
+          scopeType: conclusionScopeType,
+          scopeValue: conclusionScopeValue,
+          studentId: String(studentId || '').trim(),
+          competencyKey: String(competencyKey || '').trim(),
+          competencyName: String(group?.competencyName || '').trim(),
+          competencySource: String(group?.source || '').trim(),
+          conclusionText: String(value || '').trim()
+        };
+      }).filter((item) => item.studentId && item.competencyKey);
+
+      try {
+        await saveEvaluacionConclusiones({ records });
+      } catch (error) {
+        console.error('Conclusion persistence failed:', error);
+      }
+    }, 700);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [editableConclusions, conclusionsHydrated, year, areaId, grade, section, conclusionScopeType, conclusionScopeValue, allCompetencyGroups]);
 
   const getAggregatedCompetencyCode = (student: AggregatedStudentRegister, competencyKey: string) => student.competencies.find((i) => i.key === competencyKey)?.code || 'ne';
   const getAggregatedCapacityCode = (student: AggregatedStudentRegister, capacityKey: string) => student.capacities.find((i) => i.key === capacityKey)?.code || '';
@@ -465,6 +615,332 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
     return 'Sin evidencias suficientes para redactar una conclusión descriptiva.';
   };
   const getConclusionKey = (studentId: string, competencyKey: string) => `${studentId}::${competencyKey}`;
+  const normalizeConclusionText = (value: string) => String(value || '').replace(/\s+/g, ' ').trim().replace(/^[:;,\-.\s]+/, '');
+  const truncateConclusionPart = (value: string, max: number) => {
+    const normalized = normalizeConclusionText(value);
+    if (normalized.length <= max) return normalized;
+    const sliced = normalized.slice(0, Math.max(0, max - 1));
+    const lastSpace = sliced.lastIndexOf(' ');
+    return `${(lastSpace > 24 ? sliced.slice(0, lastSpace) : sliced).trim()}.`;
+  };
+  const composeStructuredConclusion = (logros: string, dificultades: string, sugerencias: string) => {
+    const safeLogros = normalizeConclusionText(logros) || 'muestra avances en la competencia';
+    const safeDificultades = normalizeConclusionText(dificultades) || 'requiere mayor consolidacion';
+    const safeSugerencias = normalizeConclusionText(sugerencias) || 'continuar con practica guiada';
+
+    const ensureSentence = (value: string) => {
+      const normalized = normalizeConclusionText(value);
+      if (!normalized) return '';
+      return /[.!?]$/.test(normalized) ? normalized : `${normalized}.`;
+    };
+    const stripLeadVerb = (value: string, options: string[]) => {
+      const normalized = normalizeConclusionText(value);
+      const match = options.find((option) => normalized.toLowerCase().startsWith(`${option.toLowerCase()} `));
+      return match ? normalized.slice(match.length).trim() : normalized;
+    };
+    const lowerFirst = (value: string) => {
+      const normalized = normalizeConclusionText(value);
+      if (!normalized) return '';
+      return normalized.charAt(0).toLowerCase() + normalized.slice(1);
+    };
+    const normalizeAchievementPart = (value: string) => {
+      const normalized = normalizeConclusionText(value) || 'muestra avances en la competencia';
+      if (/^(no|dificultad|dificultades|requiere|necesita)\b/i.test(normalized)) {
+        return 'Muestra avances limitados en la competencia';
+      }
+      return normalized;
+    };
+    const normalizeDifficultyPart = (value: string) => {
+      const normalized = normalizeConclusionText(value) || 'aspectos por consolidar';
+      const stripped = stripLeadVerb(normalized, [
+        'presenta',
+        'requiere',
+        'evidencia',
+        'muestra',
+        'tiene',
+        'observa',
+        'se observa'
+      ]);
+
+      if (/^no\s+/i.test(stripped)) {
+        return `dificultades para ${lowerFirst(stripped.replace(/^no\s+/i, ''))}`;
+      }
+      if (/^(dificultad|dificultades)\b/i.test(stripped)) {
+        return lowerFirst(stripped);
+      }
+      if (/^(crear|elaborar|proponer|resolver|analizar|identificar|organizar|explicar|argumentar|aplicar|comunicar|gestionar|planificar|evaluar|redactar|sustentar)\b/i.test(stripped)) {
+        return `dificultades para ${lowerFirst(stripped)}`;
+      }
+      return `aspectos por consolidar en ${lowerFirst(stripped)}`;
+    };
+    const normalizeSuggestionPart = (value: string) => {
+      const normalized = normalizeConclusionText(value) || 'continuar con practica guiada';
+      const stripped = stripLeadVerb(normalized, [
+        'se sugiere',
+        'sugerencia',
+        'conviene',
+        'requiere',
+        'debe',
+        'se recomienda',
+        'recomendacion'
+      ]);
+
+      if (/^que\s+/i.test(stripped)) return lowerFirst(stripped);
+      if (/^(fortalecer|reforzar|mejorar|continuar|practicar|planificar|organizar|crear|elaborar|proponer|resolver|analizar|identificar|explicar|argumentar|aplicar|comunicar|gestionar|evaluar)\b/i.test(stripped)) {
+        return lowerFirst(stripped);
+      }
+      return `fortalecer ${lowerFirst(stripped)}`;
+    };
+
+    const logroPart = ensureSentence(normalizeAchievementPart(safeLogros));
+    const dificultadCore = normalizeDifficultyPart(safeDificultades);
+    const sugerenciaCore = normalizeSuggestionPart(safeSugerencias);
+    const dificultadPart = ensureSentence(`Presenta ${dificultadCore || 'aspectos por consolidar'}`);
+    const sugerenciaPart = ensureSentence(`Se sugiere ${sugerenciaCore || 'continuar con practica guiada'}`);
+    const fullText = `${logroPart} ${dificultadPart} ${sugerenciaPart}`.replace(/\s+/g, ' ').trim();
+    if (fullText.length <= 250) return fullText;
+
+    const maxContent = 250 - (' Presenta . Se sugiere .'.length);
+    const goalsMax = Math.max(28, Math.floor(maxContent * 0.34));
+    const diffMax = Math.max(28, Math.floor(maxContent * 0.33));
+    const suggMax = Math.max(28, maxContent - goalsMax - diffMax);
+
+    const compact = `${ensureSentence(truncateConclusionPart(normalizeAchievementPart(safeLogros), goalsMax))} ${ensureSentence(`Presenta ${truncateConclusionPart(dificultadCore || 'aspectos por consolidar', diffMax)}`)} ${ensureSentence(`Se sugiere ${truncateConclusionPart(sugerenciaCore || 'continuar con practica guiada', suggMax)}`)}`.replace(/\s+/g, ' ').trim();
+    return compact.slice(0, 250).trim();
+  };
+  const buildRuleBasedConclusion = (
+    student: AggregatedStudentRegister,
+    competencyKey: string,
+    capacityItems: Array<{ key: string; capacityName: string }>,
+    competencyName: string,
+    standardText: string
+  ) => {
+    const evaluatedCaps = capacityItems
+      .map((capacity) => ({
+        name: capacity.capacityName,
+        code: getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, competencyName, capacity.capacityName) || 'ne'
+      }))
+      .filter((item) => item.code && item.code !== 'ne');
+
+    const strengths = evaluatedCaps.filter((item) => item.code === 'a' || item.code === 'ad').map((item) => item.name);
+    const support = evaluatedCaps.filter((item) => item.code === 'b' || item.code === 'c').map((item) => item.name);
+    const standardIdea = normalizeConclusionText(standardText).split(/[.;:]/)[0] || competencyName.toLowerCase();
+
+    if (!evaluatedCaps.length) {
+      return composeStructuredConclusion(
+        `sin evidencias suficientes en ${competencyName.toLowerCase()}`,
+        'falta consolidar informacion del bimestre',
+        'registrar nuevas evidencias y acompanamiento focalizado'
+      );
+    }
+
+    return composeStructuredConclusion(
+      strengths.length ? `avanza en ${formatCapacityLabelList(strengths).toLowerCase()} segun ${standardIdea.toLowerCase()}` : `muestra avances parciales en ${competencyName.toLowerCase()}`,
+      support.length ? `requiere reforzar ${formatCapacityLabelList(support).toLowerCase()}` : `necesita sostener el logro alcanzado`,
+      support.length ? `practicar ${formatCapacityLabelList(support).toLowerCase()} con retroalimentacion guiada` : `mantener retos vinculados al estandar del grado`
+    );
+  };
+  const buildStandardsMap = async () => {
+    const map = new Map<string, string>();
+
+    const addRows = (rows: any[]) => {
+      rows.forEach((row) => {
+        const competencyName = String(row?.competencias || '').trim();
+        const standardText = String(row?.estandar || '').trim();
+        if (competencyName && standardText) {
+          map.set(normalizeLoose(competencyName), standardText);
+        }
+      });
+    };
+
+    addRows(await getEstandares(grade, areaName));
+
+    const transversalNames = Array.from(new Set(transversalCapacityGroups.map((group) => group.competencyName)));
+    const transversalResponses = await Promise.all(transversalNames.map((name) => getEstandares(grade, name)));
+    transversalResponses.forEach((rows) => addRows(Array.isArray(rows) ? rows : []));
+
+    return map;
+  };
+  const generateAiConclusions = async () => {
+    if (mode !== 'bimester' || !aggregation || !allCompetencyGroups.length || isGeneratingAiConclusions) return;
+
+    const apiKey = String(generalData?.gemini_api_key || process.env.API_KEY || '').trim();
+    if (!apiKey || apiKey === 'undefined' || apiKey === 'null' || apiKey.length < 10) {
+      setToastData({
+        type: 'error',
+        msg: 'No hay una API key de Gemini válida.',
+        sub: 'Revisa Datos Generales y guarda una llave activa de Google AI Studio antes de usar el botón IA.'
+      });
+      return;
+    }
+
+    setIsGeneratingAiConclusions(true);
+    setAiConclusionMessage(null);
+    setToastData(null);
+
+    try {
+      const standardsMap = await buildStandardsMap();
+      const primaryGroups = allCompetencyGroups.filter((group) => group.source === 'primary');
+      const missingStandards = primaryGroups.filter((group) => !standardsMap.get(normalizeLoose(group.competencyName)));
+      if (primaryGroups.length > 0 && missingStandards.length === primaryGroups.length) {
+        throw new Error(`NO_STANDARDS::No se encontraron estándares del grado ${grade} para el área ${areaName}.`);
+      }
+
+      const requestRows = aggregation.students.flatMap((student) =>
+        allCompetencyGroups.map((group) => {
+          const standardText = standardsMap.get(normalizeLoose(group.competencyName)) || '';
+          const fallbackText = buildRuleBasedConclusion(student, group.competencyKey, group.capacities, group.competencyName, standardText);
+          const evaluatedCaps = group.capacities
+            .map((capacity) => ({
+              capacidad: capacity.capacityName,
+              nivel: (getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, group.competencyName, capacity.capacityName) || 'NE').toUpperCase()
+            }))
+            .filter((item) => item.nivel !== 'NE');
+
+          return {
+            key: getConclusionKey(student.studentId, group.competencyKey),
+            studentId: student.studentId,
+            competencyKey: group.competencyKey,
+            studentName: student.studentName,
+            competencyName: group.competencyName,
+            level: (getUnitCompetencyDisplayCode(student, group.competencyKey, group.capacities, group.competencyName) || 'NE').toUpperCase(),
+            standardText,
+            capacities: evaluatedCaps,
+            fallbackText
+          };
+        })
+      );
+
+      const ai = new GoogleGenAI({ apiKey });
+      const promptRows = requestRows.map((row) => ({
+        key: row.key,
+        estudiante: row.studentName,
+        competencia: row.competencyName,
+        nivel: row.level,
+        estandar: row.standardText || 'Sin estandar explicito disponible',
+        capacidades: row.capacities
+      }));
+      const prompt = [
+        'Actua como docente peruano experto en evaluacion por competencias.',
+        `Genera conclusiones descriptivas para registro por bimestre del grado ${grade}, area ${areaName}, seccion ${section}, bimestre ${bimesterLabel}.`,
+        'Cada respuesta debe usar de manera obligatoria el estandar del grado proporcionado como referencia central.',
+        'Devuelve SOLO JSON con un arreglo llamado conclusiones.',
+        'Cada item debe incluir: key, logros, dificultades, sugerencias.',
+        'Escribe frases breves en tercera persona, claras y pedagogicas, vinculadas al desempeno observado y al estandar.',
+        'No repitas etiquetas dentro de los campos.',
+        'En "logros" escribe una idea positiva y completa, por ejemplo: "Muestra avances en...".',
+        'En "dificultades" no empieces con "No..."; escribe formulaciones como "dificultades para..." o "aspectos por consolidar en...".',
+        'En "sugerencias" escribe acciones breves como "fortalecer...", "practicar..." o "mejorar...", no solo palabras sueltas.',
+        'No uses textos genericos como explorar necesidades basicas o participar en talleres salvo que los datos realmente lo justifiquen.',
+        'Los tres campos luego se uniran en un solo parrafo corrido, sin saltos de linea ni encabezados visibles.',
+        'La suma final debe mantenerse dentro de 250 caracteres incluyendo espacios.',
+        `Datos: ${JSON.stringify(promptRows)}`
+      ].join(' ');
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [{ parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.4,
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              conclusiones: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    key: { type: Type.STRING },
+                    logros: { type: Type.STRING },
+                    dificultades: { type: Type.STRING },
+                    sugerencias: { type: Type.STRING }
+                  },
+                  required: ['key', 'logros', 'dificultades', 'sugerencias']
+                }
+              }
+            },
+            required: ['conclusiones']
+          }
+        }
+      });
+
+      const parsed = JSON.parse(response.text || '{}');
+      const generatedList = Array.isArray(parsed?.conclusiones) ? parsed.conclusiones as GeneratedConclusionItem[] : [];
+      const generatedMap = new Map(generatedList.map((item) => [String(item.key || '').trim(), item]));
+
+      setEditableConclusions((prev) => {
+        const next = { ...prev };
+        requestRows.forEach((row) => {
+          const aiItem = generatedMap.get(row.key);
+          next[row.key] = aiItem
+            ? composeStructuredConclusion(aiItem.logros || '', aiItem.dificultades || '', aiItem.sugerencias || '')
+            : row.fallbackText;
+        });
+        return next;
+      });
+
+      setAiConclusionMessage({ type: 'success', text: 'Las conclusiones del bimestre se completaron con IA usando estandares del grado y limite de 250 caracteres.' });
+      setToastData({
+        type: 'success',
+        msg: 'Conclusiones generadas correctamente.',
+        sub: missingStandards.length > 0
+          ? `Se generaron con los estándares disponibles. Faltan estándares para: ${missingStandards.map((item) => item.competencyName).join(', ')}.`
+          : 'Se usaron los estándares del grado disponibles en la base de datos.'
+      });
+    } catch (error: any) {
+      console.error('AI bimester conclusion generation failed:', error);
+      const errorStr = String(error?.message || error || '').trim();
+      let msg = 'No se pudieron generar las conclusiones con IA.';
+      let sub = 'Ocurrió un problema no identificado durante la generación.';
+
+      if (errorStr.startsWith('NO_STANDARDS::')) {
+        msg = 'Faltan estándares del grado para esta área.';
+        sub = errorStr.replace('NO_STANDARDS::', '');
+      } else if (error?.status === 401 || error?.status === 403 || /api[_ ]?key|unauthorized|invalid|permission/i.test(errorStr)) {
+        msg = 'La API key de Gemini no es válida o no tiene permisos.';
+        sub = 'Actualiza la llave IA en Datos Generales y vuelve a intentarlo.';
+      } else if (error?.status === 429 || /quota|rate limit|exceeded/i.test(errorStr)) {
+        msg = 'La cuota de Gemini está saturada o agotada.';
+        sub = 'Espera unos minutos o revisa el estado de tu proyecto en Google AI Studio.';
+      } else if (/network|fetch|failed|connection|timeout/i.test(errorStr)) {
+        msg = 'Falló la conexión al servicio de IA.';
+        sub = 'Verifica internet, el backend local y vuelve a probar.';
+      } else if (/empty_response|empty/i.test(errorStr)) {
+        msg = 'La IA respondió vacío.';
+        sub = 'El servicio no devolvió contenido útil. Intenta nuevamente.';
+      } else if (errorStr) {
+        sub = errorStr.slice(0, 240);
+      }
+
+      setAiConclusionMessage({ type: 'error', text: msg });
+      setToastData({ type: 'error', msg, sub });
+    } finally {
+      setIsGeneratingAiConclusions(false);
+    }
+  };
+  const copyAreaCompetenciesForSiagie = async () => {
+    if (mode !== 'bimester' || !aggregation || !primaryCapacityGroups.length) return;
+
+    try {
+      const plainText = aggregation.students.map((student) => (
+        primaryCapacityGroups.map((group) => {
+          const level = (getUnitCompetencyDisplayCode(student, group.competencyKey, group.capacities, group.competencyName) || 'NE').toUpperCase();
+          const conclusion = getEditableConclusionValue(student, group.competencyKey, group.capacities, group.competencyName)
+            .replace(/\r?\n/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          return `${level}\t${conclusion}`;
+        }).join('\t')
+      )).join('\n');
+
+      await navigator.clipboard.writeText(plainText);
+      setCopySiagieMessage({ type: 'success', text: 'Se copiaron las notas y conclusiones de las competencias del área, sin encabezados, listas para pegar en SIAGIE.' });
+    } catch (error) {
+      console.error('SIAGIE copy failed:', error);
+      setCopySiagieMessage({ type: 'error', text: 'No se pudo copiar al portapapeles. Intenta nuevamente.' });
+    }
+  };
   const getEditableConclusionValue = (
     student: AggregatedStudentRegister,
     competencyKey: string,
@@ -530,6 +1006,58 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       }));
     });
   }, [aggregation, mode]);
+  const bimesterCapacityTraceRows = useMemo(() => {
+    if (mode !== 'bimester' || !aggregation) return [];
+
+    const capacityMap = new Map<string, {
+      competencyName: string;
+      capacityName: string;
+      source: 'primary' | 'transversal';
+      sessions: string[];
+      units: string[];
+    }>();
+
+    aggregation.sessions.forEach((session) => {
+      const sessionLabel = `U${session.unitNumber}-S${session.sessionNumber}`;
+      session.students.forEach((student) => {
+        student.capacities.forEach((capacity) => {
+          if (!capacity.code || capacity.code === 'ne') return;
+          if (!capacityMap.has(capacity.key)) {
+            capacityMap.set(capacity.key, {
+              competencyName: capacity.competencyName,
+              capacityName: capacity.capacityName,
+              source: capacity.source,
+              sessions: [],
+              units: []
+            });
+          }
+          const target = capacityMap.get(capacity.key)!;
+          if (!target.sessions.includes(sessionLabel)) target.sessions.push(sessionLabel);
+          const unitLabel = `U${session.unitNumber}`;
+          if (!target.units.includes(unitLabel)) target.units.push(unitLabel);
+        });
+      });
+    });
+
+    return Array.from(capacityMap.entries())
+      .map(([capacityKey, item]) => ({
+        capacityKey,
+        ...item,
+        sessions: item.sessions.sort((left, right) => {
+          const [leftUnit, leftSession] = left.replace('U', '').split('-S').map(Number);
+          const [rightUnit, rightSession] = right.replace('U', '').split('-S').map(Number);
+          if (leftUnit !== rightUnit) return leftUnit - rightUnit;
+          return leftSession - rightSession;
+        }),
+        units: item.units.sort((left, right) => Number(left.replace('U', '')) - Number(right.replace('U', '')))
+      }))
+      .sort((left, right) => {
+        if (left.source !== right.source) return left.source === 'primary' ? -1 : 1;
+        const competencyCompare = left.competencyName.localeCompare(right.competencyName, 'es');
+        if (competencyCompare !== 0) return competencyCompare;
+        return left.capacityName.localeCompare(right.capacityName, 'es');
+      });
+  }, [aggregation, mode]);
 
   const studentCapacitySessionMap = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -539,14 +1067,17 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
           if (!capacity.code || capacity.code === 'ne') return;
           const key = `${student.studentId}::${capacity.key}`;
           const current = map.get(key) || [];
-          const sessionLabel = `S${session.sessionNumber}`;
+          const baseLabel = mode === 'bimester'
+            ? `U${session.unitNumber}-S${session.sessionNumber}`
+            : `S${session.sessionNumber}`;
+          const sessionLabel = `${baseLabel} (${(LEVEL_LABEL_MAP[capacity.code] || 'NE').toUpperCase()})`;
           if (!current.includes(sessionLabel)) current.push(sessionLabel);
           map.set(key, current);
         });
       });
     });
     return map;
-  }, [aggregation]);
+  }, [aggregation, mode]);
 
   const studentCompetencySessionMap = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -556,14 +1087,17 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
           if (!competency.code || competency.code === 'ne') return;
           const key = `${student.studentId}::${competency.key}`;
           const current = map.get(key) || [];
-          const sessionLabel = `S${session.sessionNumber}`;
+          const baseLabel = mode === 'bimester'
+            ? `U${session.unitNumber}-S${session.sessionNumber}`
+            : `S${session.sessionNumber}`;
+          const sessionLabel = `${baseLabel} (${(LEVEL_LABEL_MAP[competency.code] || 'NE').toUpperCase()})`;
           if (!current.includes(sessionLabel)) current.push(sessionLabel);
           map.set(key, current);
         });
       });
     });
     return map;
-  }, [aggregation]);
+  }, [aggregation, mode]);
 
   const formatSessionSources = (sources: string[]) => {
     if (!sources.length) return 'Sin sesiones con evaluación registrada';
@@ -683,6 +1217,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
 
   return (
     <div className="space-y-6">
+      {toastData ? <FloatingToast message={toastData.msg} subtext={toastData.sub} type={toastData.type} onClose={() => setToastData(null)} /> : null}
       <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-xl overflow-hidden print:rounded-none print:border-none print:shadow-none">
         <div className={`h-2 ${accentClassName} print:hidden`}></div>
         <div className="p-8 space-y-6 print:p-0">
@@ -692,9 +1227,43 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
               <div>
                 <h2 className="text-2xl font-black italic uppercase tracking-tight text-slate-800">{title}</h2>
                 <p className="mt-2 max-w-3xl text-sm font-medium leading-relaxed text-slate-500">{description}</p>
+                {aiConclusionMessage ? (
+                  <div className={`mt-3 inline-flex rounded-2xl px-4 py-2 text-[11px] font-bold ${aiConclusionMessage.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                    {aiConclusionMessage.text}
+                  </div>
+                ) : null}
+                {copySiagieMessage ? (
+                  <div className={`mt-3 ml-2 inline-flex rounded-2xl px-4 py-2 text-[11px] font-bold ${copySiagieMessage.type === 'success' ? 'bg-sky-50 text-sky-700' : 'bg-rose-50 text-rose-700'}`}>
+                    {copySiagieMessage.text}
+                  </div>
+                ) : null}
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {mode === 'bimester' ? (
+                <button
+                  type="button"
+                  onClick={generateAiConclusions}
+                  disabled={isGeneratingAiConclusions || loading || detailLoading || !aggregation}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-amber-600 text-white shadow-lg transition hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Llenar conclusiones descriptivas con IA"
+                  aria-label="Llenar conclusiones descriptivas con IA"
+                >
+                  <SparklesMiniIcon />
+                </button>
+              ) : null}
+              {mode === 'bimester' ? (
+                <button
+                  type="button"
+                  onClick={copyAreaCompetenciesForSiagie}
+                  disabled={loading || detailLoading || !aggregation || !primaryCapacityGroups.length}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-sky-200 bg-sky-50 text-sky-700 shadow-sm transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Copiar notas y conclusiones del área para SIAGIE"
+                  aria-label="Copiar notas y conclusiones del área para SIAGIE"
+                >
+                  <CopyMiniIcon />
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => setShowSessionSources((prev) => !prev)}
@@ -970,6 +1539,50 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {mode === 'bimester' && !!bimesterCapacityTraceRows.length && (
+            <div className="rounded-[2rem] border border-slate-200 bg-white p-5 shadow-sm print:hidden">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">Trazabilidad</p>
+                  <h3 className="mt-1 text-lg font-black uppercase text-slate-800">Capacidades que forman el bimestre</h3>
+                  <p className="mt-1 text-[11px] font-medium text-slate-500">
+                    Cada capacidad del bimestre se calcula con las sesiones donde esa capacidad fue evaluada en las dos unidades del bimestre.
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-amber-50 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-amber-700">
+                  {bimesterCapacityTraceRows.length} capacidades
+                </div>
+              </div>
+
+              <div className="mt-4 overflow-x-auto rounded-[1.5rem] border border-slate-200">
+                <table className="w-full border-collapse text-[11px]">
+                  <thead>
+                    <tr className="bg-slate-900 text-white">
+                      <th className="border border-slate-200 px-3 py-3 text-left font-black uppercase">Competencia</th>
+                      <th className="border border-slate-200 px-3 py-3 text-left font-black uppercase">Capacidad</th>
+                      <th className="border border-slate-200 px-3 py-3 text-center font-black uppercase">Unidades</th>
+                      <th className="border border-slate-200 px-3 py-3 text-left font-black uppercase">Sesiones que aportan</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bimesterCapacityTraceRows.map((row, index) => (
+                      <tr key={row.capacityKey} className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'}>
+                        <td className="border border-slate-200 px-3 py-2 font-bold text-slate-800">{row.competencyName}</td>
+                        <td className="border border-slate-200 px-3 py-2 text-slate-700">{row.capacityName}</td>
+                        <td className="border border-slate-200 px-3 py-2 text-center font-black text-amber-700">{row.units.join(', ') || '-'}</td>
+                        <td className="border border-slate-200 px-3 py-2 text-slate-600">{row.sessions.join(', ') || 'Sin sesiones con evidencia'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-4 rounded-2xl bg-slate-50 px-4 py-3 text-[11px] font-medium text-slate-600">
+                Fórmula usada: primero se promedia cada capacidad con todas sus sesiones del bimestre; luego la competencia se calcula con el promedio de esas capacidades consolidadas.
               </div>
             </div>
           )}

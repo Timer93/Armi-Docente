@@ -373,6 +373,17 @@ const initDb = () => {
                 scale_data TEXT, weights TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS evaluacion_conclusiones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                year TEXT, area_id TEXT, grade TEXT, section TEXT,
+                scope_type TEXT, scope_value TEXT,
+                student_id TEXT,
+                competency_key TEXT, competency_name TEXT, competency_source TEXT,
+                conclusion_text TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(year, area_id, grade, section, scope_type, scope_value, student_id, competency_key)
+            );
         `);
 
         const dgColumns = db.prepare(`PRAGMA table_info(datos_generales)`).all();
@@ -412,6 +423,8 @@ const initDb = () => {
         checkAndAdd('evaluacion_evidencias', 'student_names', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'file_name', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'file_size', 'INTEGER DEFAULT 0');
+        checkAndAdd('evaluacion_conclusiones', 'competency_name', 'TEXT');
+        checkAndAdd('evaluacion_conclusiones', 'competency_source', 'TEXT');
 
         console.log(`✅ Base de Datos ARMI Sincronizada.`);
     } catch (e) {

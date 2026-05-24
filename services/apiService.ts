@@ -1209,6 +1209,29 @@ export const saveEvaluacionRegistros = async (data: { records: any[] }): Promise
   } catch (e: any) { return { success: false, message: e.message }; }
 };
 
+export const getEvaluacionConclusiones = async (filters?: any): Promise<ApiResponse<any[]>> => {
+    try {
+        let url = `${BACKEND_URL}/evaluacion/conclusiones`;
+        if (filters) {
+            const params = new URLSearchParams(filters);
+            url += `?${params.toString()}`;
+        }
+        const res = await safeFetch(url);
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const saveEvaluacionConclusiones = async (data: { records: any[] }): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/conclusiones`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
 export const getEvaluacionEvidencias = async (filters?: any): Promise<ApiResponse<any[]>> => {
     try {
         let url = `${BACKEND_URL}/evaluacion/evidencias`;
