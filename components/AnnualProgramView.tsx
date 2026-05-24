@@ -61,18 +61,43 @@ const LEVEL_LABELS: Record<string, string> = {
 
 const ORDERED_LEVELS = ['AD', 'A', 'B', 'C', 'NE'];
 const INITIAL_RESOURCE_FIELDS = {
-    medios: '• Presentaciones multimedia\n• Videos educativos\n• Infografías\n• Guías digitales',
-    materiales: "• Fichas de trabajo\n• Guías impresas\n• Documentos PDF\n• Plantillas de proyectos\n• Cuaderno de trabajo",
-    recursos: '• Internet\n• Laptops o PCs\n• Proyector multimedia\n• Pizarra\n• Dispositivos móviles',
-    espacios: '• Aula de innovación pedagógica\n• Aula de clase\n• Centro de cómputo',
-    apps: '• WhatsApp\n• Gmail\n• Google Forms\n• Google Meet',
-    softwares: '• Microsoft Excel\n• Microsoft Word\n• Microsoft PowerPoint',
-    plataformas: '• Google Drive\n• Google Classroom\n• OneDrive\n• Canva'
+    medios: '• Presentaciones multimedia\n• Videos educativos\n• Infografías\n• Guías digitales\n• Recursos interactivos\n• Tutoriales virtuales\n• Material audiovisual\n• Plataformas educativas\n• Formularios digitales\n• Simuladores virtuales',
+    materiales: '• Fichas de trabajo\n• Guías impresas\n• Documentos PDF\n• Plantillas de proyectos\n• Cuaderno de trabajo\n• Portafolio del estudiante\n• Instrumentos de evaluación\n• Recursos digitales descargables\n• Manuales de usuario\n• Organizadores gráficos',
+    recursos: '• Internet\n• Laptops o PCs\n• Proyector multimedia\n• Pizarra\n• Dispositivos móviles\n• Parlantes\n• Impresora\n• Memorias USB\n• Plataforma virtual\n• Cuentas institucionales\n• Software ofimático\n• Herramientas colaborativas online',
+    espacios: '• Aula de innovación pedagógica\n• Aula de clase\n• Centro de cómputo\n• Biblioteca escolar\n• Salón de usos múltiples\n• Áreas comunes del colegio\n• Entornos comunitarios\n• Espacios al aire libre',
+    apps: '• WhatsApp\n• Gmail\n• Word\n• Excel\n• PowerPoint\n• Google Drive\n• Google Meet\n• Google Forms\n• Google Classroom\n• Zoom',
+    softwares: '• Microsoft Excel\n• Microsoft Word\n• Microsoft PowerPoint\n• Softros LAN Messenger\n• Navegador web\n• Lector de PDF\n• WinRAR\n• Antivirus\n• Paint\n• Bloc de notas',
+    plataformas: '• OneDrive\n• Google Drive\n• Gmail\n• Google Forms\n• Google Meet\n• Google Classroom\n• YouTube\n• Canva\n• ChatGPT\n• Microsoft Office Online',
 };
 
-const INITIAL_BIBLIOGRAPHY_FIELDS = {
-    referencias: '• Currículo Nacional de la Educación Básica (MINEDU)\n• Programa Curricular de Educación Secundaria (MINEDU)\n• Orientaciones para el área de Educación para el Trabajo (MINEDU)',
-    linkografia: '• https://www.minedu.gob.pe\n• https://www.perueduca.pe\n• https://www.aprendoencasa.pe\n• https://www.microsoft.com\n• https://www.wikipedia.com'
+const getInitialBibliographyFields = (level?: string, areaName?: string) => {
+    const normalizedLevel = normalizeText(level || 'Secundaria');
+    const resolvedLevel = normalizedLevel.includes('INICIAL')
+        ? 'Inicial'
+        : normalizedLevel.includes('PRIMARIA')
+            ? 'Primaria'
+            : 'Secundaria';
+    const resolvedArea = String(areaName || '').trim() || 'el área seleccionada';
+
+    return {
+        referencias:
+            `• Currículo Nacional de la Educación Básica (MINEDU)\n` +
+            `• Programa Curricular de Educación ${resolvedLevel} (MINEDU)\n` +
+            `• Orientaciones pedagógicas para ${resolvedArea}\n` +
+            `• Guía de evaluación formativa (MINEDU)\n` +
+            `• Recursos TIC aplicados a ${resolvedArea}\n` +
+            `• Manuales y recursos didácticos vinculados a ${resolvedArea}\n` +
+            `• Experiencias de aprendizaje y materiales complementarios para ${resolvedArea}`,
+        linkografia:
+            '• https://www.minedu.gob.pe\n' +
+            '• https://www.perueduca.pe\n' +
+            '• https://aprendoencasa.pe\n' +
+            '• https://workspace.google.com\n' +
+            '• https://www.microsoft.com/es-pe/education\n' +
+            '• https://classroom.google.com\n' +
+            '• https://drive.google.com\n' +
+            '• https://www.canva.com/education'
+    };
 };
 
 const STATIC_TRANSVERSALS = [
@@ -575,7 +600,7 @@ export const AnnualProgramView: React.FC<{
     const [isDidacticUnitsPinned, setIsDidacticUnitsPinned] = useState(false);
 
     const [resourceFields, setResourceFields] = useState(INITIAL_RESOURCE_FIELDS);
-    const [bibliographyFields, setBibliographyFields] = useState(INITIAL_BIBLIOGRAPHY_FIELDS);
+    const [bibliographyFields, setBibliographyFields] = useState(() => getInitialBibliographyFields(INITIAL_GENERAL_DATA.level, ''));
 
     const [showPreviewMatrix, setShowPreviewMatrix] = useState(false);
     const [showCalendarSummary, setShowCalendarSummary] = useState(false);
@@ -746,6 +771,7 @@ export const AnnualProgramView: React.FC<{
     useEffect(() => {
         if (selectedAreaId && selectedGrade && selectedSection) {
             const found = assignments.find(a => (a.id === selectedAreaId || a.areaId === selectedAreaId) && a.grade === selectedGrade) || null;
+            const dynamicBibliographyDefaults = getInitialBibliographyFields(generalData?.level || 'Secundaria', found?.areaName || '');
             setCurrentAssignment(found);
             
             if (found) {
@@ -788,6 +814,7 @@ export const AnnualProgramView: React.FC<{
                         setLineaBaseStats(res.data.lineaBaseStats || []);
                     }
                 });
+
             }
             
             getProgramacionesAnuales().then(allPrograms => {
@@ -838,7 +865,7 @@ export const AnnualProgramView: React.FC<{
                         setDidacticUnits({});
                     }
                     setResourceFields(INITIAL_RESOURCE_FIELDS);
-                    setBibliographyFields(INITIAL_BIBLIOGRAPHY_FIELDS);
+                    setBibliographyFields(dynamicBibliographyDefaults);
                     setManualMetas([]);
                 }
             });
@@ -847,11 +874,11 @@ export const AnnualProgramView: React.FC<{
             setMatrixChecks({});
             setDidacticUnits({});
             setResourceFields(INITIAL_RESOURCE_FIELDS);
-            setBibliographyFields(INITIAL_BIBLIOGRAPHY_FIELDS);
+            setBibliographyFields(getInitialBibliographyFields(generalData?.level || 'Secundaria', ''));
             setCompetenciesList([]);
             setManualMetas([]);
         }
-    }, [selectedAreaId, selectedGrade, selectedSection, selectedYear, assignments, generalData.year]);
+    }, [selectedAreaId, selectedGrade, selectedSection, selectedYear, assignments, generalData.year, generalData.level]);
 
     useEffect(() => {
         const hasGlobalPinnedMatrix = !!localStorage.getItem(GLOBAL_PINNED_MATRIX_STORAGE_KEY);

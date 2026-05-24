@@ -330,6 +330,7 @@ export interface SessionAssessmentCriterionRow {
   evidenceText?: string;
   fieldText?: string;
   instrumentLabel?: string;
+  rowColor?: string;
   order: number;
 }
 

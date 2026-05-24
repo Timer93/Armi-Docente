@@ -7,6 +7,7 @@ import ImageModule from 'docxtemplater-image-module-free';
 import { exec, execFile } from 'child_process';
 import db from '../db.js';
 import { resolveTemplatePath, tempRoot } from '../paths.js';
+import { sanitizeDocxDrawingIds } from './wordDocxUtils.js';
 
 const router = express.Router();
 
@@ -132,6 +133,113 @@ const normalizeParagraphText = (value) => String(value || '')
     .map((item) => item.trim())
     .filter(Boolean)
     .join('\n');
+
+const extractRichTextItems = (value) => decodeHtmlEntities(
+    String(value || '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<\/li>/gi, '\n')
+        .replace(/<li[^>]*>/gi, '\n• ')
+        .replace(/<[^>]*>/g, ' ')
+)
+    .split(/\r?\n|•|;+/)
+    .map((part) => String(part || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+const mergeUniqueMultilineText = (...values) => {
+    const seen = new Set();
+    const lines = [];
+    values.forEach((value) => {
+        String(value || '')
+            .split(/\r?\n/)
+            .map((line) => String(line || '').trim())
+            .filter(Boolean)
+            .forEach((line) => {
+                const key = normalizeLooseText(line);
+                if (!key || seen.has(key)) return;
+                seen.add(key);
+                lines.push(line);
+            });
+    });
+    return lines.join('\n');
+};
+
+const buildSessionResourceDefaults = (sessionData = {}, annualDefaults = {}) => {
+    const resources = { rec: [], med: [], mat: [], soft: [], esp: [] };
+    const seen = {
+        rec: new Set(),
+        med: new Set(),
+        mat: new Set(),
+        soft: new Set(),
+        esp: new Set()
+    };
+
+    const pushTo = (bucket, value) => {
+        const text = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!text) return;
+        const key = normalizeLooseText(text);
+        if (!key || seen[bucket].has(key)) return;
+        seen[bucket].add(key);
+        resources[bucket].push(text);
+    };
+
+    extractRichTextItems(annualDefaults.recursos || '').forEach((item) => pushTo('rec', item));
+    extractRichTextItems(annualDefaults.medios || '').forEach((item) => pushTo('med', item));
+    extractRichTextItems(annualDefaults.materiales || '').forEach((item) => pushTo('mat', item));
+    extractRichTextItems([annualDefaults.apps, annualDefaults.softwares, annualDefaults.plataformas].filter(Boolean).join('\n'))
+        .forEach((item) => pushTo('soft', item));
+    extractRichTextItems(annualDefaults.espacios || '').forEach((item) => pushTo('esp', item));
+
+    const phaseResourceValues = [
+        sessionData?.secuencia?.inicio?.saberes_recursos,
+        sessionData?.secuencia?.inicio?.conflicto_recursos,
+        sessionData?.secuencia?.proceso?.construccion_recursos,
+        sessionData?.secuencia?.proceso?.aplicacion_recursos,
+        sessionData?.secuencia?.proceso?.metacognicion_recursos,
+        sessionData?.secuencia?.salida?.evaluacion_recursos
+    ];
+
+    const classifyDynamicItem = (item) => {
+        const text = String(item || '').replace(/\s+/g, ' ').trim();
+        const norm = normalizeLooseText(text);
+        if (!norm) return;
+
+        if (/^(software|app|web)\s*\/\s*/i.test(text)) return pushTo('soft', text);
+        if (/^ANEXO N \d+$/i.test(norm)) return pushTo('rec', text);
+        if (/^INSTRUCTIVO N \d+$/i.test(norm)) return pushTo('mat', text);
+
+        if (
+            norm.includes('RUBRICA')
+            || norm.includes('LISTA DE COTEJO')
+            || norm.includes('GUIA DE OBSERVACION')
+            || norm.includes('ESCALA DE ESTIMACION')
+            || norm.includes('FICHA DE AUTOEVALUACION')
+            || norm.includes('FICHA DE COEVALUACION')
+            || norm.includes('FICHA INFORMATIVA')
+            || norm.includes('CUESTIONARIO')
+            || norm.includes('EXAMEN')
+            || norm.includes('PORTAFOLIO DE EVIDENCIAS')
+            || norm.includes('REGISTRO ANECDOTICO')
+            || norm.includes('DIARIO DE CLASE')
+            || norm.includes('PRUEBA DE DESEMPENO')
+            || norm.includes('PRUEBA DE EJECUCION')
+        ) {
+            return pushTo('mat', text);
+        }
+    };
+
+    phaseResourceValues.forEach((value) => {
+        extractRichTextItems(value || '').forEach(classifyDynamicItem);
+    });
+
+    return {
+        rec: resources.rec.join('\n'),
+        med: resources.med.join('\n'),
+        mat: resources.mat.join('\n'),
+        soft: resources.soft.join('\n'),
+        esp: resources.esp.join('\n')
+    };
+};
 
 const formatLabeledBlock = (pairs) => (Array.isArray(pairs) ? pairs : [])
     .map(({ label, value }) => {
@@ -503,16 +611,26 @@ router.post('/sesion-word/generate', async (req, res) => {
             const seq = sessionData?.secuencia || {};
             const recursosSesion = sessionData?.recursos || {};
             const bibliografiaSesion = sessionData?.bibliografia || {};
+            const annualResourceDefaults = {
+                recursos: row.program_rec_recursos || '',
+                medios: row.program_rec_medios || '',
+                materiales: row.program_rec_materiales || '',
+                apps: row.program_rec_apps || '',
+                softwares: row.program_rec_softwares || '',
+                plataformas: row.program_rec_plataformas || '',
+                espacios: row.program_rec_espacios || ''
+            };
+            const generatedResourceDefaults = buildSessionResourceDefaults(sessionData, annualResourceDefaults);
             const durationInfo = getSequenceTimes(String(sessionData?.duracion || ''), row.program_horas_sem || '');
             const transRows = Array.isArray(sessionData?.competenciasTrans) ? sessionData.competenciasTrans : [];
             const trans1 = transRows[0] || {};
             const trans2 = transRows[1] || {};
             const extensionText = htmlToPlainText(sessionData?.extension || '');
-            const recursosText = normalizeParagraphText(recursosSesion?.rec || row.program_rec_recursos || '');
-            const mediosText = normalizeParagraphText(recursosSesion?.med || row.program_rec_medios || '');
-            const materialesText = normalizeParagraphText(recursosSesion?.mat || row.program_rec_materiales || '');
-            const softwareText = normalizeParagraphText(recursosSesion?.soft || [row.program_rec_apps, row.program_rec_softwares, row.program_rec_plataformas].filter(Boolean).join('\n'));
-            const espaciosText = normalizeParagraphText(recursosSesion?.esp || row.program_rec_espacios || '');
+            const recursosText = normalizeParagraphText(mergeUniqueMultilineText(recursosSesion?.rec, generatedResourceDefaults.rec));
+            const mediosText = normalizeParagraphText(mergeUniqueMultilineText(recursosSesion?.med, generatedResourceDefaults.med));
+            const materialesText = normalizeParagraphText(mergeUniqueMultilineText(recursosSesion?.mat, generatedResourceDefaults.mat));
+            const softwareText = normalizeParagraphText(mergeUniqueMultilineText(recursosSesion?.soft, generatedResourceDefaults.soft));
+            const espaciosText = normalizeParagraphText(mergeUniqueMultilineText(recursosSesion?.esp, generatedResourceDefaults.esp));
             const bibliografiaText = normalizeParagraphText(bibliografiaSesion?.bib || row.program_rec_referencias || '');
             const linkografiaText = normalizeParagraphText(bibliografiaSesion?.link || row.program_rec_linkografia || '');
             const bloqueRecursos = formatLabeledBlock([
@@ -661,6 +779,7 @@ router.post('/sesion-word/generate', async (req, res) => {
             const fileName = `SES ${sanitizeFileLabel(row.session_number, '1')} - ${sanitizeFileLabel(areaName, 'Area')} - ${sanitizeFileLabel(row.grade, 'Grado')} ${sanitizeFileLabel(row.section, 'Seccion')} - U${sanitizeFileLabel(row.unit_number, '1')}.docx`;
             const finalPath = path.join(outputPath, fileName);
             const tempPath = `${finalPath}.tmp`;
+            sanitizeDocxDrawingIds(doc);
             const buffer = doc.getZip().generate({ type: 'nodebuffer' });
             fs.writeFileSync(tempPath, buffer);
             fs.renameSync(tempPath, finalPath);

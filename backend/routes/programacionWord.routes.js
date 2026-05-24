@@ -8,6 +8,7 @@ import ImageModule from 'docxtemplater-image-module-free';
 import { exec, execFile } from 'child_process';
 import db from '../db.js';
 import { resolveTemplatePath, tempRoot } from '../paths.js';
+import { sanitizeDocxDrawingIds } from './wordDocxUtils.js';
 
 
 const router = express.Router();
@@ -1080,6 +1081,7 @@ router.post('/programacion-word/generate', async (req, res) => {
             const fileName = `PA - ${sanitizeFileLabel(row.area_curricular, 'Area')} - ${sanitizeFileLabel(row.grade, 'Grado')} ${sanitizeFileLabel(row.section, 'Seccion')}.docx`;
             const finalPath = path.join(outputPath, fileName);
             const tempPath = finalPath + '.tmp';
+            sanitizeDocxDrawingIds(doc);
             const buffer = doc.getZip().generate({ type: 'nodebuffer' });
             fs.writeFileSync(tempPath, buffer);
             fs.renameSync(tempPath, finalPath);

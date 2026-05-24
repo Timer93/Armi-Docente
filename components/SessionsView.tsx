@@ -51,6 +51,7 @@ import {
     superNormalize,
     stripHtml,
     normalizeLoose,
+    buildSessionResourceDefaults,
     escapeRegex,
     escapeHtml,
     colorTokenToCss,
@@ -84,6 +85,24 @@ const DEFAULT_EXTENSION_ACTIVITIES = [
     'Análisis colectivo de un caso breve de emprendimiento exitoso y otro no sostenible.',
     'Rueda de retroalimentación rápida sobre mejoras posibles del producto.'
 ].map((item) => `- ${item}`).join('\n');
+
+const mergeUniqueMultilineText = (...values: any[]) => {
+    const seen = new Set<string>();
+    const lines: string[] = [];
+    values.forEach((value) => {
+        String(value || '')
+            .split(/\r?\n/)
+            .map((line) => String(line || '').trim())
+            .filter(Boolean)
+            .forEach((line) => {
+                const key = normalizeLoose(line);
+                if (!key || seen.has(key)) return;
+                seen.add(key);
+                lines.push(line);
+            });
+    });
+    return lines.join('\n');
+};
 
 const ensureSessionExtraBlocks = (data: any) => {
     const base = cloneInitialSessionData();
@@ -1016,32 +1035,20 @@ FORMATO DE RESPUESTA:
 
             const resourceDefaults = currentProgram?.resourceFields || {};
             const bibliographyDefaults = currentProgram?.bibliographyFields || {};
-            const softwareBlock = [
-                resourceDefaults.apps || '',
-                resourceDefaults.softwares || '',
-                resourceDefaults.plataformas || ''
-            ].filter(Boolean).join('\n');
+            const generatedResourceDefaults = buildSessionResourceDefaults(nextData, resourceDefaults);
 
             const isEmpty = (value: any) => !String(value || '').trim();
             const recursosActuales = nextData?.recursos || {};
             const bibliografiaActual = nextData?.bibliografia || {};
 
-            if (
-                isEmpty(recursosActuales.rec) &&
-                isEmpty(recursosActuales.med) &&
-                isEmpty(recursosActuales.mat) &&
-                isEmpty(recursosActuales.soft) &&
-                isEmpty(recursosActuales.esp)
-            ) {
-                nextData.recursos = {
-                    ...recursosActuales,
-                    rec: String(resourceDefaults.recursos || ''),
-                    med: String(resourceDefaults.medios || ''),
-                    mat: String(resourceDefaults.materiales || ''),
-                    soft: softwareBlock,
-                    esp: String(resourceDefaults.espacios || '')
-                };
-            }
+            nextData.recursos = {
+                ...recursosActuales,
+                rec: mergeUniqueMultilineText(recursosActuales.rec, generatedResourceDefaults.rec),
+                med: mergeUniqueMultilineText(recursosActuales.med, generatedResourceDefaults.med),
+                mat: mergeUniqueMultilineText(recursosActuales.mat, generatedResourceDefaults.mat),
+                soft: mergeUniqueMultilineText(recursosActuales.soft, generatedResourceDefaults.soft),
+                esp: mergeUniqueMultilineText(recursosActuales.esp, generatedResourceDefaults.esp)
+            };
 
             if (isEmpty(bibliografiaActual.bib) && isEmpty(bibliografiaActual.link)) {
                 nextData.bibliografia = {
@@ -1616,10 +1623,11 @@ FORMATO DE RESPUESTA:
         }
     }, [selArea, selGrade, selSection, unitNumber, sessionNumber, year, assignments, allSavedPrograms]);
 
-    const handleSave = async () => {
+    const handleSave = async (options?: { silent?: boolean }) => {
+        const silent = !!options?.silent;
         if (!selArea || !selGrade || !selSection) {
-            setToast({ msg: 'Seleccione Area, Grado y Seccion.', type: 'warning' });
-            return;
+            if (!silent) setToast({ msg: 'Seleccione Area, Grado y Seccion.', type: 'warning' });
+            return false;
         }
 
         
@@ -1687,11 +1695,26 @@ FORMATO DE RESPUESTA:
 
         const res = await saveSesion(payload);
         if (res.success) {
-            setToast({ msg: '✅ Sesión sincronizada correctamente en SQL.', type: 'success' });
+            if (!silent) setToast({ msg: '✅ Sesión sincronizada correctamente en SQL.', type: 'success' });
             onSuccess();
+            return true;
         } else {
-            setToast({ msg: '❌ Error al guardar en SQL: ' + res.message, type: 'error' });
+            if (!silent) setToast({ msg: '❌ Error al guardar en SQL: ' + res.message, type: 'error' });
+            return false;
         }
+    };
+
+    const handleOpenTemplateMode = async () => {
+        const hasSessionContext = !!(selArea && selGrade && selSection && unitNumber && sessionNumber);
+        if (hasSessionContext) {
+            const saved = await handleSave({ silent: true });
+            if (!saved) {
+                setToast({ msg: '❌ No se pudo sincronizar la sesión actual antes de abrir la exportación Word.', type: 'error' });
+                return;
+            }
+            setToast({ msg: '✅ Sesión actual sincronizada antes de exportar Word.', type: 'success' });
+        }
+        setShowTemplateMode(true);
     };
 
     const handleRestoreTemplate = () => {
@@ -1752,13 +1775,9 @@ FORMATO DE RESPUESTA:
 
     const handleFillResourceDefaults = () => {
         const resourceFields = currentProgram?.resourceFields || {};
-        const softwareBlock = [
-            resourceFields.apps || '',
-            resourceFields.softwares || '',
-            resourceFields.plataformas || ''
-        ].filter(Boolean).join('\n');
+        const defaults = buildSessionResourceDefaults(sessionData, resourceFields);
 
-        if (!resourceFields.recursos && !resourceFields.medios && !resourceFields.materiales && !resourceFields.espacios && !softwareBlock) {
+        if (!defaults.rec && !defaults.med && !defaults.mat && !defaults.esp && !defaults.soft) {
             setToast({ msg: '⚠️ La programación anual no tiene recursos cargados para usar como base.', type: 'warning' });
             return;
         }
@@ -1767,14 +1786,14 @@ FORMATO DE RESPUESTA:
             ...prev,
             recursos: {
                 ...prev?.recursos,
-                rec: String(resourceFields.recursos || ''),
-                med: String(resourceFields.medios || ''),
-                mat: String(resourceFields.materiales || ''),
-                soft: String(softwareBlock || ''),
-                esp: String(resourceFields.espacios || '')
+                rec: defaults.rec,
+                med: defaults.med,
+                mat: defaults.mat,
+                soft: defaults.soft,
+                esp: defaults.esp
             }
         }));
-        setToast({ msg: '✅ Recursos, medios y materiales sugeridos cargados.', type: 'success' });
+        setToast({ msg: '✅ Recursos sugeridos cargados con base anual y detecciones dinámicas de la sesión.', type: 'success' });
     };
 
     const handleFillBibliographyDefaults = () => {
@@ -3566,7 +3585,16 @@ FORMATO DE RESPUESTA:
     };
 
     if (showTemplateMode) {
-        return <SessionTemplateMergeView onBack={() => setShowTemplateMode(false)} />;
+        return (
+            <SessionTemplateMergeView
+                onBack={() => setShowTemplateMode(false)}
+                selectedAreaId={assignments.find(a => a.areaName === selArea)?.areaId || selArea}
+                selectedGrade={selGrade}
+                selectedSection={selSection}
+                selectedUnitNumber={unitNumber}
+                selectedSessionNumber={sessionNumber}
+            />
+        );
     }
 
     return (
@@ -3664,7 +3692,7 @@ FORMATO DE RESPUESTA:
                         >
                             IA
                         </button>
-                        <button onClick={handleSave} className="btn-3d-plus scale-90" title="Guardar Sesión">
+                        <button onClick={() => { void handleSave(); }} className="btn-3d-plus scale-90" title="Guardar Sesión">
                             <span>+</span>
                         </button>
                         <button onClick={() => setSessionData(cloneInitialSessionData())} className="btn-3d-clear scale-90" title="Limpiar Formulario">
@@ -3673,7 +3701,7 @@ FORMATO DE RESPUESTA:
                         <button onClick={handleOpenManager} className="btn-3d-purple scale-90" title="Ver Database">
                             <span>🗄️</span>
                         </button>
-                        <button onClick={() => setShowTemplateMode(true)} className="btn-3d-blue scale-90" title="Ver Plantilla">
+                        <button onClick={() => { void handleOpenTemplateMode(); }} className="btn-3d-blue scale-90" title="Ver Plantilla">
                             <span>📄</span>
                         </button>
                     </div>

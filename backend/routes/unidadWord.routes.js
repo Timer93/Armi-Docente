@@ -7,6 +7,7 @@ import ImageModule from 'docxtemplater-image-module-free';
 import { exec, execFile } from 'child_process';
 import db from '../db.js';
 import { resolveTemplatePath, tempRoot } from '../paths.js';
+import { sanitizeDocxDrawingIds } from './wordDocxUtils.js';
 
 const router = express.Router();
 
@@ -72,6 +73,17 @@ const formatGenerationDateLong = (date = new Date()) => {
     const month = date.toLocaleDateString('es-ES', { month: 'long' }).toUpperCase();
     const year = String(date.getFullYear());
     return `${day} DE ${month} DE ${year}`;
+};
+
+const formatDateLongFromValue = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:\s+\d{2}:\d{2}(?::\d{2})?)?$/);
+    if (!match) return '';
+    const [, year, month, day] = match;
+    const date = new Date(Number(year), Number(month) - 1, Number(day));
+    if (Number.isNaN(date.getTime())) return '';
+    return formatGenerationDateLong(date);
 };
 
 const toProperName = (value) => {
@@ -617,19 +629,22 @@ const formatDateTimeSlash = (value) => {
 };
 
 const getUnitCreationDate = (row) => {
+    const updatedAt = formatDateLongFromValue(row?.updated_at || '');
+    if (updatedAt) return updatedAt;
+
     const id = String(row?.id_unidad || '').trim();
     const parts = id.split('-');
     const timestampCandidate = Number(parts[1] || '');
     if (Number.isFinite(timestampCandidate) && timestampCandidate > 0) {
         const date = new Date(timestampCandidate);
-        if (!Number.isNaN(date.getTime())) {
-            const day = String(date.getDate()).padStart(2, '0');
-            const month = String(date.getMonth() + 1).padStart(2, '0');
-            const year = String(date.getFullYear());
-            return `${day}/${month}/${year}`;
+        const now = Date.now();
+        const tenYearsMs = 10 * 365 * 24 * 60 * 60 * 1000;
+        if (!Number.isNaN(date.getTime()) && Math.abs(now - date.getTime()) <= tenYearsMs) {
+            return formatGenerationDateLong(date);
         }
     }
-    return formatDateTimeSlash(row?.updated_at || '');
+
+    return '';
 };
 
 const getMineduDuration = (startStr, endStr) => {
@@ -1214,6 +1229,8 @@ router.post('/unidad-word/generate', async (req, res) => {
                 duracion: unitDuration,
                 fecha_creacion_unidad: getUnitCreationDate(row),
                 fecha_registro_unidad: getUnitCreationDate(row),
+                FECHA_CREACION_UNIDAD: getUnitCreationDate(row),
+                FECHA_REGISTRO_UNIDAD: getUnitCreationDate(row),
                 purpose: row.purpose || '',
                 proposito: row.purpose || '',
                 product: row.product || '',
@@ -1282,6 +1299,7 @@ router.post('/unidad-word/generate', async (req, res) => {
                 espacios: normalizeParagraphs(recursos.espacios)
             });
             doc.getZip().file('word/document.xml', renderedDocumentXml);
+            sanitizeDocxDrawingIds(doc);
 
             const fileName = `UD ${sanitizeFileLabel(row.unit_number, '1')} - ${sanitizeFileLabel(areaName, 'area')} - ${sanitizeFileLabel(row.grade, 'grado')} ${sanitizeFileLabel(row.section, 'seccion')}.docx`;
             const finalPath = path.join(outputPath, fileName);

@@ -262,7 +262,7 @@ const getGuideHierarchyFromTemplate = (structure: any, assessmentModel?: any) =>
         const criteriaBuckets = splitCriteriaAcrossCapacities(modelCriterios, normalizedCapacityNames.length);
         return [{
             name: modelCompetencia || normalizeCompetencyName(templateCompetency, 'COMPETENCIA 1'),
-            capacities: normalizedCapacityNames.map((capName, idx) => ({
+            capacities: normalizedCapacityNames.map((capName: string, idx: number) => ({
                 name: capName,
                 criteria: criteriaBuckets[idx].length > 0
                     ? criteriaBuckets[idx]
@@ -440,7 +440,7 @@ const normalizeChecklistStructureForTemplate = (structure: any, assessmentModel?
         return [
             {
                 name: modelCompetencia || normalizeCompetencyName(templateCompetency, 'COMPETENCIA 1'),
-                capacities: normalizedCapacityNames.map((capName, idx) => ({
+                capacities: normalizedCapacityNames.map((capName: string, idx: number) => ({
                     name: capName,
                     criteria: criteriaBuckets[idx].length > 0
                         ? criteriaBuckets[idx]
@@ -516,7 +516,7 @@ const buildChecklistVisualRowsForTemplate = (structure: any, assessmentModel?: a
                 out.push({ kind: 'crit', comp: String(compIdx + 1), cap: String(capIdx + 1), text: '', source: capSource });
                 return;
             }
-            criteria.forEach((criterion) => {
+            criteria.forEach((criterion: string) => {
                 out.push({ kind: 'crit', comp: String(compIdx + 1), cap: String(capIdx + 1), text: criterion, source: capSource });
             });
         });
@@ -582,7 +582,7 @@ const normalizeScaleStructureForTemplate = (structure: any, assessmentModel?: an
 
         return [{
             name: modelCompetencia || normalizeCompetencyName(templateCompetency, 'COMPETENCIA 1'),
-            capacities: normalizedCapacityNames.map((capName, idx) => ({
+            capacities: normalizedCapacityNames.map((capName: string, idx: number) => ({
                 name: capName,
                 criteria: criteriaBuckets[idx].length > 0
                     ? criteriaBuckets[idx]
@@ -644,7 +644,7 @@ const buildScaleVisualRowsForTemplate = (structure: any, assessmentModel?: any):
                 out.push({ kind: 'crit', comp: String(compIdx + 1), cap: String(capIdx + 1), text: '' });
                 return;
             }
-            criteria.forEach((criterion) => {
+            criteria.forEach((criterion: string) => {
                 out.push({ kind: 'crit', comp: String(compIdx + 1), cap: String(capIdx + 1), text: criterion });
             });
         });
@@ -864,11 +864,27 @@ const normalizeFilterValue = (value: any) => normalizeLoose(String(value || ''))
 
 const cloneInitialSessionData = () => JSON.parse(JSON.stringify(INITIAL_SESSION_DATA));
 
-const extractCapacidades = (value: string) =>
-    String(value || '')
+const extractCapacidades = (value: string) => {
+    const raw = String(value || '').trim();
+    if (!raw) return [];
+
+    const normalizedRaw = normalizeLoose(raw);
+    const officialMatches = Object.values(TRANSVERSAL_CAPACITY_MAP)
+        .flat()
+        .filter((capacityName, index, arr) =>
+            arr.findIndex(item => normalizeLoose(item) === normalizeLoose(capacityName)) === index
+        )
+        .filter((capacityName) => normalizedRaw.includes(normalizeLoose(capacityName)));
+
+    if (officialMatches.length > 1) {
+        return officialMatches;
+    }
+
+    return raw
         .split(/[\n;,]|(?:\s+-\s+)|(?:\s+[•·]\s+)|(?:\r?\n\s*\d+[.)]\s*)/)
         .map(v => String(v || '').trim())
         .filter(Boolean);
+};
 
 const isGenericCurricularLabel = (value: string, prefix: 'competencia' | 'capacidad') => {
     const norm = normalizeLoose(String(value || ''));
@@ -923,7 +939,7 @@ const buildAssessmentModelFromData = (data: any, source: 'unit' | 'sql' | 'ai' |
     const existingCapacidades = Array.isArray(existing?.capacidades) && existing.capacidades.length > 0
         ? existing.capacidades.map((cap: any) => String(cap || '').trim()).filter(Boolean)
         : [];
-    const existingCapacidadesAreGeneric = existingCapacidades.length > 0 && existingCapacidades.every((cap) => isGenericCurricularLabel(cap, 'capacidad'));
+    const existingCapacidadesAreGeneric = existingCapacidades.length > 0 && existingCapacidades.every((cap: string) => isGenericCurricularLabel(cap, 'capacidad'));
     const capacidades = directCapacidades.length > 0 && (
         existingCapacidades.length === 0
         || existingCapacidadesAreGeneric
@@ -1036,9 +1052,9 @@ const buildSessionAssessmentRowsFromData = (data: any): SessionAssessmentCriteri
                 order: primaryRows.length + transIdx + criterionIdx + 1
             }));
         })
-        .filter((row) => !!normalizeLoose(row.criterionText || row.capacityName || row.competencyName));
+        .filter((row: any) => !!normalizeLoose(row.criterionText || row.capacityName || row.competencyName));
 
-    return [...primaryRows, ...transversalRows].map((row, idx) => ({ ...row, order: idx + 1 }));
+    return [...primaryRows, ...transversalRows].map((row: any, idx: number) => ({ ...row, order: idx + 1 }));
 };
 
 const buildSessionAssessmentModel = (data: any, meta: any = {}): SessionAssessmentModel => ({
@@ -1262,6 +1278,107 @@ const extractRichTextItems = (value: string) => {
         .split(/\r?\n|•|\u2022|;+/)
         .map((part) => String(part || '').replace(/\s+/g, ' ').trim())
         .filter(Boolean);
+};
+
+const addUniqueNormalized = (bucket: string[], seen: Set<string>, value: string) => {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    const key = normalizeLoose(text);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    bucket.push(text);
+};
+
+const buildSessionResourceDefaults = (sessionData: any, annualDefaults: any = {}) => {
+    const resources = {
+        rec: [] as string[],
+        med: [] as string[],
+        mat: [] as string[],
+        soft: [] as string[],
+        esp: [] as string[]
+    };
+
+    const seen = {
+        rec: new Set<string>(),
+        med: new Set<string>(),
+        mat: new Set<string>(),
+        soft: new Set<string>(),
+        esp: new Set<string>()
+    };
+
+    const pushTo = (bucket: keyof typeof resources, value: string) => {
+        addUniqueNormalized(resources[bucket], seen[bucket], value);
+    };
+
+    extractRichTextItems(String(annualDefaults.recursos || '')).forEach((item) => pushTo('rec', item));
+    extractRichTextItems(String(annualDefaults.medios || '')).forEach((item) => pushTo('med', item));
+    extractRichTextItems(String(annualDefaults.materiales || '')).forEach((item) => pushTo('mat', item));
+    extractRichTextItems([
+        annualDefaults.apps || '',
+        annualDefaults.softwares || '',
+        annualDefaults.plataformas || ''
+    ].filter(Boolean).join('\n')).forEach((item) => pushTo('soft', item));
+    extractRichTextItems(String(annualDefaults.espacios || '')).forEach((item) => pushTo('esp', item));
+
+    const phaseResourcePaths = [
+        'secuencia.inicio.saberes_recursos',
+        'secuencia.inicio.conflicto_recursos',
+        'secuencia.proceso.construccion_recursos',
+        'secuencia.proceso.aplicacion_recursos',
+        'secuencia.proceso.metacognicion_recursos',
+        'secuencia.salida.evaluacion_recursos'
+    ];
+
+    const classifyDynamicItem = (item: string) => {
+        const text = String(item || '').replace(/\s+/g, ' ').trim();
+        const norm = normalizeLoose(text);
+        if (!norm) return;
+
+        if (/^(software|app|web)\s*\/\s*/i.test(text)) {
+            pushTo('soft', text);
+            return;
+        }
+        if (/^anexo n \d+$/i.test(norm)) {
+            pushTo('rec', text);
+            return;
+        }
+        if (/^instructivo n \d+$/i.test(norm)) {
+            pushTo('mat', text);
+            return;
+        }
+        if (
+            norm.includes('rubrica')
+            || norm.includes('lista de cotejo')
+            || norm.includes('guia de observacion')
+            || norm.includes('escala de estimacion')
+            || norm.includes('ficha de autoevaluacion')
+            || norm.includes('ficha de coevaluacion')
+            || norm.includes('ficha informativa')
+            || norm.includes('cuestionario')
+            || norm.includes('examen')
+            || norm.includes('portafolio de evidencias')
+            || norm.includes('registro anecdótico')
+            || norm.includes('registro anecdotico')
+            || norm.includes('diario de clase')
+            || norm.includes('prueba de desempeno')
+            || norm.includes('prueba de ejecucion')
+        ) {
+            pushTo('mat', text);
+            return;
+        }
+    };
+
+    phaseResourcePaths.forEach((path) => {
+        extractRichTextItems(String(getPathByString(sessionData, path) || '')).forEach(classifyDynamicItem);
+    });
+
+    return {
+        rec: resources.rec.join('\n'),
+        med: resources.med.join('\n'),
+        mat: resources.mat.join('\n'),
+        soft: resources.soft.join('\n'),
+        esp: resources.esp.join('\n')
+    };
 };
 
 const normalizeLoose = (value: string) =>
@@ -1577,6 +1694,7 @@ export {
     superNormalize,
     stripHtml,
     normalizeLoose,
+    extractRichTextItems,
     escapeRegex,
     escapeHtml,
     colorTokenToCss,
@@ -1586,6 +1704,7 @@ export {
     detectTransversalByCapacity,
     isMeaningfulRichText,
     syncResourcesFromActivity,
+    buildSessionResourceDefaults,
     getFlexValue,
     autoResizeTextarea,
     AI_ACTIVITY_RESOURCE_PAIRS,
