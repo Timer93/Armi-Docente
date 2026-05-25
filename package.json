@@ -1,7 +1,7 @@
 {
   "name": "armi-docente-web",
   "private": true,
-  "version": "11.1.4",
+  "version": "11.1.5",
   "description": "ARMI Docente",
   "author": "ARMI",
   "type": "module",

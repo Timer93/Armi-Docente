@@ -2,7 +2,7 @@ import type { AuthSession } from '../types';
 
 const PROFILE_IMAGE_KEY = 'armi_profile_image';
 const PROFILE_IMAGE_PREFIX = 'armi_profile_image::';
-const MAX_LOCAL_PROFILE_IMAGE_LENGTH = 1_200_000;
+const MAX_LOCAL_PROFILE_IMAGE_LENGTH = 4_000_000;
 export const PROFILE_IMAGE_UPDATED_EVENT = 'armi-profile-image-updated';
 
 export const readImageFileAsDataUrl = (file: File) =>
@@ -56,6 +56,18 @@ export const readStoredProfileImage = (session?: AuthSession | null) => {
   }
 
   return legacyValue;
+};
+
+export const resolveProfileImageSource = (
+  session?: AuthSession | null,
+  fallbackUrl?: string | null,
+) => {
+  return (
+    readStoredProfileImage(session) ||
+    (session ? readStoredProfileImage(null) : null) ||
+    fallbackUrl ||
+    null
+  );
 };
 
 const safeStoreProfileImage = (key: string, imageData: string) => {

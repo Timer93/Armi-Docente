@@ -7,7 +7,7 @@ import {
   PROFILE_IMAGE_UPDATED_EVENT,
   persistProfileImage,
   readImageFileAsDataUrl,
-  readStoredProfileImage,
+  resolveProfileImageSource,
 } from '../utils/imageStorage';
 
 const ACADEMIC_TITLE_PATTERNS = [
@@ -61,8 +61,8 @@ const buildSidebarDisplayName = (rawName?: string, session?: AuthSession | null)
   const nameTokens = hasAcademicTitle ? words.slice(1) : words;
 
   let visibleNames = nameTokens;
-  if (nameTokens.length >= 4) {
-    visibleNames = nameTokens.slice(-3);
+  if (nameTokens.length > 2) {
+    visibleNames = nameTokens.slice(2, 5);
   }
 
   const baseName = visibleNames.join(' ').trim() || source;
@@ -216,18 +216,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
   const sidebarDisplayName = buildSidebarDisplayName(teacherName, profileSession);
 
   useEffect(() => {
-    const savedImg = readStoredProfileImage(profileSession);
-    if (savedImg) {
-      setProfileImage(savedImg);
-    } else if (profileSession?.user?.avatarUrl) {
-      setProfileImage(profileSession.user.avatarUrl);
-    } else {
-      setProfileImage(null);
-    }
+    setProfileImage(resolveProfileImageSource(profileSession, profileSession?.user?.avatarUrl));
 
     const handleProfileUpdated = (event: Event) => {
       const customEvent = event as CustomEvent<string | null>;
-      setProfileImage(customEvent.detail || readStoredProfileImage(profileSession) || profileSession?.user?.avatarUrl || null);
+      setProfileImage(customEvent.detail || resolveProfileImageSource(profileSession, profileSession?.user?.avatarUrl));
     };
 
     window.addEventListener(PROFILE_IMAGE_UPDATED_EVENT, handleProfileUpdated as EventListener);
