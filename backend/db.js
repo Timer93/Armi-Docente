@@ -37,6 +37,50 @@ seedDatabaseFromBundleIfNeeded();
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 
+const GENERAL_DATA_COLUMN_DEFINITIONS = {
+    b1_start: 'TEXT',
+    b1_end: 'TEXT',
+    b2_start: 'TEXT',
+    b2_end: 'TEXT',
+    b3_start: 'TEXT',
+    b3_end: 'TEXT',
+    b4_start: 'TEXT',
+    b4_end: 'TEXT',
+    vac_start: 'TEXT',
+    vac_end: 'TEXT',
+    u1_start: 'TEXT',
+    u1_end: 'TEXT',
+    u2_start: 'TEXT',
+    u2_end: 'TEXT',
+    u3_start: 'TEXT',
+    u3_end: 'TEXT',
+    u4_start: 'TEXT',
+    u4_end: 'TEXT',
+    u5_start: 'TEXT',
+    u5_end: 'TEXT',
+    u6_start: 'TEXT',
+    u6_end: 'TEXT',
+    u7_start: 'TEXT',
+    u7_end: 'TEXT',
+    u8_start: 'TEXT',
+    u8_end: 'TEXT',
+    u_vac_start: 'TEXT',
+    u_vac_end: 'TEXT',
+    ie_anniversary_date: 'TEXT',
+    achievement_day_1_date: 'TEXT',
+    community_anniversary_date: 'TEXT',
+    achievement_day_2_date: 'TEXT',
+    province_anniversary_date: 'TEXT',
+    other_important_date: 'TEXT',
+    gemini_api_key: 'TEXT',
+    openai_api_key: 'TEXT',
+    ai_provider: "TEXT DEFAULT 'gemini'",
+    ai_pedagogical_route: "TEXT DEFAULT ''",
+    ai_institutional_problems: "TEXT DEFAULT ''",
+    ai_unit_pedagogical_focus: "TEXT DEFAULT ''",
+    year_name: 'TEXT',
+};
+
 const SYNC_EXCLUDED_TABLES = new Set([
     'padron_colegios',
     'db_areas',
@@ -400,13 +444,9 @@ const initDb = () => {
             }
         };
 
-        checkAndAdd('datos_generales', 'gemini_api_key', 'TEXT');
-        checkAndAdd('datos_generales', 'openai_api_key', 'TEXT');
-        checkAndAdd('datos_generales', 'ai_provider', "TEXT DEFAULT 'gemini'");
-        checkAndAdd('datos_generales', 'ai_pedagogical_route', "TEXT DEFAULT ''");
-        checkAndAdd('datos_generales', 'ai_institutional_problems', "TEXT DEFAULT ''");
-        checkAndAdd('datos_generales', 'ai_unit_pedagogical_focus', "TEXT DEFAULT ''");
-        checkAndAdd('datos_generales', 'year_name', 'TEXT');
+        Object.entries(GENERAL_DATA_COLUMN_DEFINITIONS).forEach(([column, type]) => {
+            checkAndAdd('datos_generales', column, type);
+        });
         checkAndAdd('resultados_diagnóstico', 'nivel', 'TEXT');
         checkAndAdd('resultados_diagnóstico', 'estudiante_nombre', 'TEXT');
         checkAndAdd('programacion_anual', 'metas_datos', 'TEXT');

@@ -4,6 +4,7 @@ import {
   CloudSyncStatusData,
   discardPendingCloudSync,
   getCloudSyncStatus,
+  getLocalCloudSyncStatus,
   markPendingCloudSync,
   pullCloudSync,
   pushCloudSync,
@@ -632,13 +633,22 @@ export const SyncLifecycleManager: React.FC = () => {
           return;
         }
 
-        const freshStatus = await getCloudSyncStatus();
-        const effectiveStatus = freshStatus.success ? freshStatus.data || null : null;
-        setStatus(effectiveStatus);
+        const localStatusResponse = await getLocalCloudSyncStatus();
+        const localStatus = localStatusResponse.success ? localStatusResponse.data || null : null;
 
-        if (!effectiveStatus || effectiveStatus.config.mode !== 'apps_script_drive' || !effectiveStatus.config.autoSyncOnClose) {
+        if (!localStatus || localStatus.config.mode !== 'apps_script_drive' || !localStatus.config.autoSyncOnClose) {
           setCloseFlow('ready-to-close');
           setCloseMessage('La copia local quedo guardada. Cerrando aplicativo...');
+          await continueDesktopClose();
+          return;
+        }
+
+        if (!localStatus.hasUnsyncedChanges) {
+          if (localStatus.pendingLocal) {
+            await discardPendingCloudSync();
+          }
+          setCloseFlow('ready-to-close');
+          setCloseMessage('No habia cambios nuevos por subir. Cerrando aplicativo...');
           await continueDesktopClose();
           return;
         }

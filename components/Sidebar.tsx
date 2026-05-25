@@ -2,12 +2,72 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ModuleStatus, ModuleKey, AuthSession } from '../types';
 import { saveImageAssetFile } from '../services/apiService';
+import { CloudSyncPanel } from './CloudSyncPanel';
 import {
   PROFILE_IMAGE_UPDATED_EVENT,
   persistProfileImage,
   readImageFileAsDataUrl,
   readStoredProfileImage,
 } from '../utils/imageStorage';
+
+const ACADEMIC_TITLE_PATTERNS = [
+  'lic.',
+  'lic',
+  'mg.',
+  'mg',
+  'mgs.',
+  'mgs',
+  'msc.',
+  'msc',
+  'mag.',
+  'mag',
+  'dr.',
+  'dr',
+  'dra.',
+  'dra',
+  'ing.',
+  'ing',
+  'prof.',
+  'prof',
+  'mtro.',
+  'mtro',
+  'mtra.',
+  'mtra',
+];
+
+const normalizeAcademicToken = (value: string) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+const toTitleToken = (value: string) => {
+  const cleaned = String(value || '').trim().replace(/\.+$/g, '');
+  if (!cleaned) return '';
+  return `${cleaned.charAt(0).toUpperCase()}${cleaned.slice(1).toLowerCase()}.`;
+};
+
+const buildSidebarDisplayName = (rawName?: string, session?: AuthSession | null) => {
+  const source = String(rawName || session?.user?.displayName || session?.user?.username || '').trim();
+  if (!source) return 'Docente';
+
+  const words = source.split(/\s+/).filter(Boolean);
+  if (!words.length) return 'Docente';
+
+  const firstTokenNormalized = normalizeAcademicToken(words[0]);
+  const hasAcademicTitle = ACADEMIC_TITLE_PATTERNS.includes(firstTokenNormalized);
+  const title = hasAcademicTitle ? toTitleToken(words[0]) : '';
+  const nameTokens = hasAcademicTitle ? words.slice(1) : words;
+
+  let visibleNames = nameTokens;
+  if (nameTokens.length >= 4) {
+    visibleNames = nameTokens.slice(-3);
+  }
+
+  const baseName = visibleNames.join(' ').trim() || source;
+  return [title, baseName].filter(Boolean).join(' ').trim();
+};
 
 interface SidebarProps {
   status: ModuleStatus;
@@ -153,14 +213,21 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
         }
       : item
     );
+  const sidebarDisplayName = buildSidebarDisplayName(teacherName, profileSession);
 
   useEffect(() => {
     const savedImg = readStoredProfileImage(profileSession);
-    if (savedImg) setProfileImage(savedImg);
+    if (savedImg) {
+      setProfileImage(savedImg);
+    } else if (profileSession?.user?.avatarUrl) {
+      setProfileImage(profileSession.user.avatarUrl);
+    } else {
+      setProfileImage(null);
+    }
 
     const handleProfileUpdated = (event: Event) => {
       const customEvent = event as CustomEvent<string | null>;
-      setProfileImage(customEvent.detail || readStoredProfileImage(profileSession));
+      setProfileImage(customEvent.detail || readStoredProfileImage(profileSession) || profileSession?.user?.avatarUrl || null);
     };
 
     window.addEventListener(PROFILE_IMAGE_UPDATED_EVENT, handleProfileUpdated as EventListener);
@@ -264,7 +331,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
         </button>
 
       <div className={`
-        relative flex-1 rounded-3xl flex flex-col shadow-2xl overflow-hidden transition-all duration-500
+        relative flex-1 min-h-0 rounded-3xl flex flex-col shadow-2xl overflow-visible transition-all duration-500
         ${isDarkMode 
             ? 'bg-gradient-to-b from-[#18181b] to-[#09090b] text-slate-200 border border-white/5' 
             : 'bg-white text-slate-700 border border-slate-200'
@@ -282,7 +349,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
                         <img src={profileImage} alt="Perfil" className="w-full h-full object-cover" />
                     ) : (
                         <span className="text-white font-bold text-sm">
-                            {getInitials(teacherName || '')}
+                            {getInitials(sidebarDisplayName)}
                         </span>
                     )}
                 </div>
@@ -304,7 +371,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
               </div>
               <div className={`flex flex-col transition-all duration-300 overflow-hidden ${isCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
                   <span className={`text-sm font-bold leading-tight whitespace-nowrap ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>
-                    {teacherName ? teacherName.split(' ')[0] : 'Docente'}
+                    {sidebarDisplayName}
                   </span>
                   <span className="text-[10px] text-slate-500 font-medium uppercase tracking-wider whitespace-nowrap">{userRoleLabel || 'Maestro EPT'}</span>
               </div>
@@ -315,7 +382,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
              <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest pl-8">Menu Principal</h3>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-3 custom-scrollbar">
+        <div className="flex-1 min-h-0 overflow-y-auto px-3 custom-scrollbar">
             <div className="space-y-2">
                 {visibleMenuItems.map((item, index) => {
                     const locked = isLocked(item.key, index);
@@ -436,7 +503,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
         </div>
 
         <div className={`
-             mt-auto transition-all duration-500 border-t 
+             mt-auto shrink-0 transition-all duration-500 border-t 
              ${isDarkMode ? 'border-white/5 bg-black/20' : 'border-slate-100 bg-slate-50'}
         `}>
              {onLogout ? (
@@ -452,6 +519,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
              ) : null}
              <div className={`flex items-center py-4 ${isCollapsed ? 'flex-col gap-4' : 'justify-around px-2'}`}>
                 <button className={`p-2 rounded-full transition-colors ${isDarkMode ? 'text-slate-500 hover:text-white hover:bg-white/10' : 'text-slate-400 hover:text-slate-800 hover:bg-slate-200'}`}>{Icons.Help}</button>
+                <CloudSyncPanel compact />
                 <button 
                     onClick={() => setIsDarkMode(!isDarkMode)}
                     className={`p-2 rounded-full transition-all ${isDarkMode ? 'text-amber-400 hover:bg-white/10' : 'text-slate-400 hover:text-slate-800 hover:bg-slate-200'}`}

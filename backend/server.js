@@ -15,7 +15,7 @@ import programacionWordRoutes from './routes/programacionWord.routes.js';
 import unidadWordRoutes from './routes/unidadWord.routes.js';
 import sesionWordRoutes from './routes/sesionWord.routes.js';
 import { checkPurchaseStatus, getAuthProviderInfo, getPurchaseConfig, loginUser, submitPurchase } from './auth.js';
-import { applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, getSyncStatus, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, resolveCloudConflict, saveFrontendStateSnapshot, updateSyncConfig } from './sync.js';
+import { applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, getLocalSyncStatus, getSyncStatus, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, resolveCloudConflict, saveFrontendStateSnapshot, updateSyncConfig } from './sync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,6 +24,50 @@ const uploadsFolder = uploadsRoot;
 const evidenceUploadsFolder = path.join(uploadsFolder, 'evaluacion-evidencias');
 const remoteCameraSessions = new Map();
 const REMOTE_CAMERA_TTL_MS = 1000 * 60 * 45;
+
+const GENERAL_DATA_COLUMN_DEFINITIONS = {
+  b1_start: 'TEXT',
+  b1_end: 'TEXT',
+  b2_start: 'TEXT',
+  b2_end: 'TEXT',
+  b3_start: 'TEXT',
+  b3_end: 'TEXT',
+  b4_start: 'TEXT',
+  b4_end: 'TEXT',
+  vac_start: 'TEXT',
+  vac_end: 'TEXT',
+  u1_start: 'TEXT',
+  u1_end: 'TEXT',
+  u2_start: 'TEXT',
+  u2_end: 'TEXT',
+  u3_start: 'TEXT',
+  u3_end: 'TEXT',
+  u4_start: 'TEXT',
+  u4_end: 'TEXT',
+  u5_start: 'TEXT',
+  u5_end: 'TEXT',
+  u6_start: 'TEXT',
+  u6_end: 'TEXT',
+  u7_start: 'TEXT',
+  u7_end: 'TEXT',
+  u8_start: 'TEXT',
+  u8_end: 'TEXT',
+  u_vac_start: 'TEXT',
+  u_vac_end: 'TEXT',
+  ie_anniversary_date: 'TEXT',
+  achievement_day_1_date: 'TEXT',
+  community_anniversary_date: 'TEXT',
+  achievement_day_2_date: 'TEXT',
+  province_anniversary_date: 'TEXT',
+  other_important_date: 'TEXT',
+  gemini_api_key: 'TEXT',
+  openai_api_key: 'TEXT',
+  ai_provider: "TEXT DEFAULT 'gemini'",
+  ai_pedagogical_route: "TEXT DEFAULT ''",
+  ai_institutional_problems: "TEXT DEFAULT ''",
+  ai_unit_pedagogical_focus: "TEXT DEFAULT ''",
+  year_name: 'TEXT',
+};
 
 ensureDir(evidenceUploadsFolder);
 
@@ -961,40 +1005,48 @@ app.get('/api/datos-generales', (req, res) => {
 app.post('/api/datos-generales', (req, res) => {
   try {
     const data = req.body;
-    const dgColumns = db.prepare(`PRAGMA table_info(datos_generales)`).all();
-    const hasManagementWeeksColumn = dgColumns.some(column => column.name === 'management_weeks_u1');
-    if (!hasManagementWeeksColumn && Object.prototype.hasOwnProperty.call(data, 'management_weeks_u1')) {
-      db.exec(`ALTER TABLE datos_generales ADD COLUMN management_weeks_u1 TEXT DEFAULT '0';`);
-    }
     const ensureGeneralDataColumn = (col, type) => {
       const info = db.prepare(`PRAGMA table_info(datos_generales)`).all();
       if (!info.some((column) => column.name === col)) {
         db.exec(`ALTER TABLE datos_generales ADD COLUMN ${col} ${type}`);
       }
     };
-    if (Object.prototype.hasOwnProperty.call(data, 'ai_pedagogical_route')) {
-      ensureGeneralDataColumn('ai_pedagogical_route', `TEXT DEFAULT ''`);
+    if (Object.prototype.hasOwnProperty.call(data, 'management_weeks_u1')) {
+      ensureGeneralDataColumn('management_weeks_u1', `TEXT DEFAULT '0'`);
     }
-    if (Object.prototype.hasOwnProperty.call(data, 'ai_institutional_problems')) {
-      ensureGeneralDataColumn('ai_institutional_problems', `TEXT DEFAULT ''`);
-    }
-    if (Object.prototype.hasOwnProperty.call(data, 'ai_unit_pedagogical_focus')) {
-      ensureGeneralDataColumn('ai_unit_pedagogical_focus', `TEXT DEFAULT ''`);
-    }
+    Object.keys(data).forEach((key) => {
+      if (key === 'id') return;
+      const columnType = GENERAL_DATA_COLUMN_DEFINITIONS[key];
+      if (columnType) {
+        ensureGeneralDataColumn(key, columnType);
+      }
+    });
+    const validColumns = new Set(db.prepare(`PRAGMA table_info(datos_generales)`).all().map((column) => column.name));
+    const sanitizedData = Object.fromEntries(
+      Object.entries(data || {}).filter(([key]) => key === 'id' || validColumns.has(key))
+    );
     const check = db.prepare('SELECT id FROM datos_generales LIMIT 1').get();
     if (check) {
-      const keys = Object.keys(data).filter(k => k !== 'id');
+      const keys = Object.keys(sanitizedData).filter(k => k !== 'id');
       const setClause = keys.map(k => `${k} = @${k}`).join(', ');
-      db.prepare(`UPDATE datos_generales SET ${setClause} WHERE id = @id`).run({ ...data, id: check.id });
+      db.prepare(`UPDATE datos_generales SET ${setClause} WHERE id = @id`).run({ ...sanitizedData, id: check.id });
     } else {
-      const keys = Object.keys(data).filter(k => k !== 'id');
+      const keys = Object.keys(sanitizedData).filter(k => k !== 'id');
       const cols = keys.join(', ');
       const vals = keys.map(k => `@${k}`).join(', ');
-      db.prepare(`INSERT INTO datos_generales (${cols}) VALUES (${vals})`).run(data);
+      db.prepare(`INSERT INTO datos_generales (${cols}) VALUES (${vals})`).run(sanitizedData);
     }
     try { db.prepare('UPDATE estado_modulos SET datos_generales = 1 WHERE id = 1').run(); } catch {}
     res.json({ success: true, message: 'Guardado OK' });
   } catch (error) { res.status(500).json({ success: false, message: error.message }); }
+});
+
+app.get('/api/sync/status/local', async (req, res) => {
+  try {
+    res.json(await getLocalSyncStatus());
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 app.get('/api/estado-modulos', (req, res) => {

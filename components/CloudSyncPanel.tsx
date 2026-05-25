@@ -15,6 +15,7 @@ import {
 } from '../services/apiService';
 import { useAuth } from './auth/AuthContext';
 import { applyArmiLocalState, CLOUD_SYNC_EVENT, collectArmiLocalState, emitCloudSyncUpdated } from '../utils/cloudSyncState';
+import driveIcon from '../src/Google_Drive_icon.svg';
 
 type SyncAction = 'push' | 'pull' | null;
 
@@ -169,6 +170,14 @@ const ArchiveIcon = () => (
   </svg>
 );
 
+const LocalPcIcon = ({ className = 'h-4 w-4' }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="3" y="4" width="18" height="12" rx="2.5" />
+    <path d="M8 20h8" />
+    <path d="M12 16v4" />
+  </svg>
+);
+
 const VersionActionButton: React.FC<{
   label: string;
   title: string;
@@ -215,7 +224,7 @@ const ConflictActionButton: React.FC<{
   </button>
 );
 
-export const CloudSyncPanel: React.FC = () => {
+export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   const { session } = useAuth();
   const [status, setStatus] = useState<CloudSyncStatusData | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
@@ -238,6 +247,7 @@ export const CloudSyncPanel: React.FC = () => {
   const [syncUserLabel, setSyncUserLabel] = useState('Usuario local');
   const autoBoundIdentityRef = useRef('');
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const detailsBodyRef = useRef<HTMLDivElement | null>(null);
 
   const refreshStatus = async () => {
     setLoadingStatus(true);
@@ -355,6 +365,11 @@ export const CloudSyncPanel: React.FC = () => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (!detailsOpen) return;
+    detailsBodyRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+  }, [detailsOpen]);
 
   const sessionSyncProfile = useMemo(() => {
     const rawKey = session?.user?.sync?.userKey || session?.user?.id || session?.user?.username || '';
@@ -587,10 +602,32 @@ export const CloudSyncPanel: React.FC = () => {
   const mirrorDate = status?.mirrorManifest?.generatedAt
     ? new Date(status.mirrorManifest.generatedAt).toLocaleString()
     : 'Sin copia en Drive';
+  const toggleButtonClass = `
+    relative group ${compact ? '-mr-[12rem] origin-left scale-[0.34]' : ''} flex h-[4.4rem] w-[18.5rem] items-center overflow-hidden rounded-full border
+    bg-white/25 px-2 backdrop-blur-xl transition-all duration-500
+    shadow-[inset_0_1px_1px_rgba(255,255,255,0.95),inset_0_-8px_18px_rgba(15,23,42,0.10),0_14px_28px_rgba(15,23,42,0.18)]
+    disabled:opacity-60
+    ${isDriveMode ? 'border-sky-200/80' : 'border-amber-200/80'}
+  `;
+  const toggleGlowClass = `
+    pointer-events-none absolute top-[0.45rem] h-[3.5rem] w-[3.5rem] rounded-full transition-all duration-500
+    ${isDriveMode
+      ? 'left-[14.45rem] bg-sky-400/80 shadow-[0_0_18px_rgba(56,189,248,0.95),0_0_38px_rgba(37,99,235,0.55)]'
+      : 'left-[0.45rem] bg-amber-300/90 shadow-[0_0_18px_rgba(251,191,36,0.95),0_0_38px_rgba(245,158,11,0.55)]'}
+  `;
+  const infoButtonClass = compact
+    ? 'flex h-7 w-7 items-center justify-center rounded-full border border-slate-300/80 bg-white/95 text-[10px] font-black text-slate-600 shadow-sm transition hover:border-slate-400 hover:bg-slate-50'
+    : 'flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-sm font-black text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50';
+  const toastPositionClass = compact
+    ? 'absolute bottom-full left-0 z-[240] mb-3 w-[18rem]'
+    : 'absolute right-0 top-[4.65rem] z-50 w-[20rem]';
+  const detailsPositionClass = compact
+    ? 'absolute bottom-full left-0 z-[230] mb-3 w-[21rem] max-h-[75vh] overflow-hidden rounded-[1.75rem] border border-slate-200 bg-white/98 p-4 shadow-[0_24px_50px_rgba(15,23,42,0.18)] backdrop-blur'
+    : 'absolute right-0 top-[4.1rem] z-40 w-[21rem] rounded-[1.75rem] border border-slate-200 bg-white/98 p-4 shadow-[0_24px_50px_rgba(15,23,42,0.18)] backdrop-blur';
 
   return (
     <>
-      <div ref={rootRef} className="relative flex items-center gap-2 print:hidden">
+      <div ref={rootRef} className={`relative flex items-center print:hidden ${compact ? 'gap-1.5 overflow-visible' : 'gap-2'}`}>
         <button
           type="button"
           aria-label={isDriveMode ? 'Cambiar a modo local' : 'Cambiar a modo Drive'}
@@ -612,24 +649,32 @@ export const CloudSyncPanel: React.FC = () => {
             }
           }}
           disabled={savingConfig || loadingStatus || activeAction !== null}
-          className={`
-            group relative flex h-[4.4rem] w-[18.5rem] items-center overflow-hidden rounded-full border
-            bg-white/25 px-2 backdrop-blur-xl transition-all duration-500
-            shadow-[inset_0_1px_1px_rgba(255,255,255,0.95),inset_0_-8px_18px_rgba(15,23,42,0.10),0_14px_28px_rgba(15,23,42,0.18)]
-            disabled:opacity-60
-            ${isDriveMode ? 'border-sky-200/80' : 'border-amber-200/80'}
-          `}
+          className={
+            compact
+              ? `group relative h-7 w-[4.6rem] overflow-hidden rounded-full border bg-white/20 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),0_8px_18px_rgba(15,23,42,0.16)] backdrop-blur transition disabled:opacity-60 ${isDriveMode ? 'border-sky-200/80' : 'border-amber-200/80'}`
+              : toggleButtonClass
+          }
         >
+          {compact ? (
+            <>
+              <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.78),rgba(255,255,255,0.16)_48%,rgba(255,255,255,0.34))]" />
+              <div className={`pointer-events-none absolute left-[0.12rem] top-[0.12rem] h-[1.48rem] w-[1.48rem] rounded-full opacity-80 blur-[2px] transition-transform duration-500 ${isDriveMode ? 'translate-x-[2.7rem] bg-sky-300/70 shadow-[0_0_10px_rgba(56,189,248,0.65)]' : 'translate-x-0 bg-amber-200/75 shadow-[0_0_10px_rgba(251,191,36,0.65)]'}`} />
+              <div className="pointer-events-none absolute left-[0.28rem] top-[0.28rem] z-20 flex h-[1.15rem] w-[1.15rem] items-center justify-center rounded-full border border-white/85 bg-white text-slate-700 shadow-[0_4px_10px_rgba(15,23,42,0.18)] transition-transform duration-500" style={{ transform: isDriveMode ? 'translateX(2.7rem)' : 'translateX(0)' }}>
+                {isDriveMode ? <img src={driveIcon} alt="" className="h-3 w-3 object-contain" /> : <LocalPcIcon className="h-3 w-3" />}
+              </div>
+              <div className="pointer-events-none absolute left-[0.58rem] top-1/2 -translate-y-1/2 text-slate-400/80">
+                <LocalPcIcon className="h-3.5 w-3.5" />
+              </div>
+              <div className="pointer-events-none absolute right-[0.58rem] top-1/2 -translate-y-1/2">
+                <img src={driveIcon} alt="" className={`h-3.5 w-3.5 object-contain transition-opacity ${isDriveMode ? 'opacity-100' : 'opacity-40 grayscale'}`} />
+              </div>
+            </>
+          ) : null}
+          {!compact ? (
+            <>
           <div className="pointer-events-none absolute inset-0 rounded-full bg-[linear-gradient(135deg,rgba(255,255,255,0.75),rgba(255,255,255,0.18)_48%,rgba(255,255,255,0.42))]" />
 
-          <div
-            className={`
-              pointer-events-none absolute top-[0.45rem] h-[3.5rem] w-[3.5rem] rounded-full transition-all duration-500
-              ${isDriveMode
-                ? 'left-[14.45rem] bg-sky-400/80 shadow-[0_0_18px_rgba(56,189,248,0.95),0_0_38px_rgba(37,99,235,0.55)]'
-                : 'left-[0.45rem] bg-amber-300/90 shadow-[0_0_18px_rgba(251,191,36,0.95),0_0_38px_rgba(245,158,11,0.55)]'}
-            `}
-          />
+          <div className={toggleGlowClass} />
 
           <div
             className={`
@@ -651,7 +696,9 @@ export const CloudSyncPanel: React.FC = () => {
                 ${isDriveMode ? 'text-slate-400/70' : 'text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.30)]'}
               `}
             >
-              <span className="block text-[1.05rem] font-black leading-none">Local</span>
+              <span className="flex items-center justify-center">
+                <LocalPcIcon className={`h-5 w-5 ${isDriveMode ? 'opacity-45' : 'opacity-100'}`} />
+              </span>
             </div>
 
             <div
@@ -660,7 +707,9 @@ export const CloudSyncPanel: React.FC = () => {
                 ${isDriveMode ? 'text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.30)]' : 'text-slate-400/70'}
               `}
             >
-              <span className="block text-[1.05rem] font-black leading-none">Drive</span>
+              <span className="flex items-center justify-center">
+                <img src={driveIcon} alt="" className={`h-5 w-5 object-contain ${isDriveMode ? 'brightness-0 invert opacity-100' : 'grayscale opacity-45'}`} />
+              </span>
             </div>
           </div>
 
@@ -672,19 +721,21 @@ export const CloudSyncPanel: React.FC = () => {
                 : 'bg-[radial-gradient(circle_at_18%_50%,rgba(245,158,11,0.45),transparent_34%)]'}
             `}
           />
+            </>
+          ) : null}
         </button>
 
         <button
           type="button"
           onClick={() => setDetailsOpen((current) => !current)}
-          className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-sm font-black text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+          className={infoButtonClass}
           title="Informacion de sincronizacion"
         >
           i
         </button>
 
         {toast ? (
-          <div className="absolute right-0 top-[4.65rem] z-50 w-[20rem]">
+          <div className={toastPositionClass}>
             <div
               className={`rounded-2xl border px-4 py-3 text-sm font-semibold shadow-[0_18px_34px_rgba(15,23,42,0.16)] backdrop-blur ${
                 toast.type === 'success'
@@ -698,7 +749,7 @@ export const CloudSyncPanel: React.FC = () => {
         ) : null}
 
         {detailsOpen ? (
-          <div className="absolute right-0 top-[4.1rem] z-40 w-[21rem] rounded-[1.75rem] border border-slate-200 bg-white/98 p-4 shadow-[0_24px_50px_rgba(15,23,42,0.18)] backdrop-blur">
+          <div className={detailsPositionClass}>
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-400">Sincronizacion</p>
@@ -714,7 +765,7 @@ export const CloudSyncPanel: React.FC = () => {
               </button>
             </div>
 
-            <div className="mt-3 space-y-2">
+            <div ref={detailsBodyRef} className="mt-3 max-h-[calc(75vh-4.5rem)] space-y-2 overflow-y-auto pr-1 custom-scrollbar">
               <div className="rounded-2xl bg-slate-50 px-3 py-3 text-xs text-slate-500">
                 <p className="font-black uppercase tracking-[0.14em] text-slate-400">Usuario</p>
                 <p className="mt-1 text-sm font-semibold text-slate-800">{syncUserLabel}</p>

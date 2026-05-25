@@ -1351,6 +1351,33 @@ export const getSyncStatus = async () => {
   };
 };
 
+export const getLocalSyncStatus = async () => {
+  const config = readConfig();
+  const localManifest = buildLocalManifest();
+  const savedManifest = readJsonFile(localManifestPath, null);
+  const pendingLocal = readPendingLocalState();
+  const localDigest = getComparableManifestDigest(localManifest);
+  const savedDigest = getComparableManifestDigest(savedManifest);
+  const hasUnsyncedChanges = !savedDigest || localDigest !== savedDigest;
+
+  return {
+    success: true,
+    data: {
+      config: {
+        ...config,
+        syncUserKey: sanitizeUserScope(config.syncUserKey),
+        syncUserLabel: normalizeUserLabel(config.syncUserLabel),
+      },
+      localManifest,
+      savedManifest,
+      pendingLocal,
+      hasUnsyncedChanges,
+      lastFrontendStateAt: readJsonFile(frontendStatePath, null)?.exportedAt || null,
+      frontendState: readJsonFile(frontendStatePath, { keys: {} }),
+    },
+  };
+};
+
 export const updateSyncConfig = async (payload = {}) => {
   const mode = payload.mode === 'drive_mirror'
     ? 'drive_mirror'

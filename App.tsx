@@ -11,7 +11,6 @@ import { DatabaseManager } from './components/DatabaseManager';
 import { UnitsView } from './components/UnitsView';
 import { SessionsView } from './components/SessionsView';
 import { EvaluationView } from './components/evaluation/EvaluationView';
-import { CloudSyncPanel } from './components/CloudSyncPanel';
 import { SyncLifecycleManager } from './components/SyncLifecycleManager';
 import { AppUpdaterOverlay } from './components/AppUpdaterOverlay';
 import { AppErrorBoundary } from './components/AppErrorBoundary';
@@ -319,9 +318,6 @@ const App: React.FC = () => {
         >
           <div className="max-w-6xl mx-auto pt-2 print:max-w-none print:mx-0 print:pt-0">
              <SyncLifecycleManager />
-             <div className="mb-4 flex justify-end">
-               <CloudSyncPanel />
-             </div>
              {renderContent()}
           </div>
         </main>

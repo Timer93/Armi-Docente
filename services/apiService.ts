@@ -199,6 +199,31 @@ export interface CloudSyncStatusData {
     };
 }
 
+export interface LocalCloudSyncStatusData {
+    config: {
+        mode: 'local' | 'drive_mirror' | 'apps_script_drive';
+        autoSyncOnClose: boolean;
+        syncUserKey: string;
+        syncUserLabel: string;
+    };
+    localManifest: CloudSyncManifest | null;
+    savedManifest: CloudSyncManifest | null;
+    pendingLocal?: {
+        createdAt?: string;
+        reason?: string;
+        restorePoint?: string;
+        manifest?: CloudSyncManifest | null;
+        counts?: Record<string, number> | null;
+        note?: string;
+    } | null;
+    hasUnsyncedChanges: boolean;
+    lastFrontendStateAt: string | null;
+    frontendState?: {
+        exportedAt?: string | null;
+        keys: Record<string, string>;
+    } | null;
+}
+
 export interface RemoteCameraSessionData {
     sessionId: string;
     phoneUrl: string;
@@ -504,6 +529,15 @@ export const markPendingCloudSync = async (data?: { reason?: string; note?: stri
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data || {}),
         }, 120000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const getLocalCloudSyncStatus = async (): Promise<ApiResponse<LocalCloudSyncStatusData>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/status/local`, undefined, 12000);
         return await readJsonResponse(res);
     } catch (e: any) {
         return { success: false, message: e.message };
