@@ -216,6 +216,62 @@ const ensureInitialModuleStatusRow = () => {
     }
 };
 
+const ensureGeneralDataIntegrity = () => {
+    const ensureColumn = (column, type) => {
+        const info = db.prepare(`PRAGMA table_info("datos_generales")`).all();
+        if (!info.some((item) => item.name === column)) {
+            db.exec(`ALTER TABLE "datos_generales" ADD COLUMN ${column} ${type}`);
+            console.log(`🔹 Columna ${column} añadida a datos_generales`);
+        }
+    };
+
+    Object.entries(GENERAL_DATA_COLUMN_DEFINITIONS).forEach(([column, type]) => {
+        ensureColumn(column, type);
+    });
+
+    const existingRow = db.prepare('SELECT id FROM datos_generales ORDER BY id ASC LIMIT 1').get();
+    if (!existingRow) {
+        db.prepare(`
+            INSERT INTO datos_generales (
+                year,
+                lugar,
+                school_shift,
+                level,
+                motto,
+                year_name,
+                management_weeks_u1,
+                context_description,
+                gemini_api_key,
+                openai_api_key,
+                ai_provider,
+                ai_pedagogical_route,
+                ai_institutional_problems,
+                ai_unit_pedagogical_focus,
+                updated_at
+            ) VALUES (
+                @year,
+                '',
+                '',
+                '',
+                '',
+                '',
+                '0',
+                '',
+                '',
+                '',
+                'gemini',
+                '',
+                '',
+                '',
+                CURRENT_TIMESTAMP
+            )
+        `).run({
+            year: new Date().getFullYear().toString(),
+        });
+        console.log('✅ Fila base de datos_generales creada automáticamente.');
+    }
+};
+
 const initDb = () => {
     try {
         db.exec(`
@@ -430,12 +486,6 @@ const initDb = () => {
             );
         `);
 
-        const dgColumns = db.prepare(`PRAGMA table_info(datos_generales)`).all();
-        const hasManagementWeeksColumn = dgColumns.some(column => column.name === 'management_weeks_u1');
-        if (!hasManagementWeeksColumn) {
-            db.exec(`ALTER TABLE datos_generales ADD COLUMN management_weeks_u1 TEXT DEFAULT '0';`);
-        }
-        
         const checkAndAdd = (table, col, type) => {
             const info = db.prepare(`PRAGMA table_info("${table}")`).all();
             if (!info.map(c => c.name).includes(col)) {
@@ -444,9 +494,7 @@ const initDb = () => {
             }
         };
 
-        Object.entries(GENERAL_DATA_COLUMN_DEFINITIONS).forEach(([column, type]) => {
-            checkAndAdd('datos_generales', column, type);
-        });
+        ensureGeneralDataIntegrity();
         checkAndAdd('resultados_diagnóstico', 'nivel', 'TEXT');
         checkAndAdd('resultados_diagnóstico', 'estudiante_nombre', 'TEXT');
         checkAndAdd('programacion_anual', 'metas_datos', 'TEXT');
@@ -474,6 +522,7 @@ const initDb = () => {
 
 initDb();
 syncReferenceTablesFromBundledDatabase();
+ensureGeneralDataIntegrity();
 ensureInitialModuleStatusRow();
 const listUserTables = () => db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")

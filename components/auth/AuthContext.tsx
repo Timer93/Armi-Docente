@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { AuthSession } from '../../types';
 import { loginUser, saveImageAssetFile } from '../../services/apiService';
-import { persistProfileImage, readStoredProfileImage } from '../../utils/imageStorage';
+import { persistProfileImage, persistProfileImageAsset, readStoredProfileImage } from '../../utils/imageStorage';
 import { INITIAL_MODULE_STATUS } from '../../constants';
 
 interface AuthContextValue {
@@ -158,6 +158,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         imageData: pendingProfileImage,
         kind: 'profile',
         userKey: normalizedSession.user.sync.userKey || normalizedSession.user.id || normalizedSession.user.username,
+      }).then((response) => {
+        if (response.success && response.data?.fileUrl) {
+          persistProfileImageAsset(response.data.fileUrl, normalizedSession);
+        }
       });
     }
 

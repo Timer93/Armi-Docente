@@ -12,7 +12,8 @@ import { UnitsView } from './components/UnitsView';
 import { SessionsView } from './components/SessionsView';
 import { EvaluationView } from './components/evaluation/EvaluationView';
 import { SyncLifecycleManager } from './components/SyncLifecycleManager';
-import { AppUpdaterOverlay } from './components/AppUpdaterOverlay';
+import { AppUpdaterOverlay, APP_UPDATER_EXPANDED_EVENT } from './components/AppUpdaterOverlay';
+import { GeneralNotesOverlay, GeneralNotesFloatingButton } from './components/GeneralNotesOverlay';
 import { AppErrorBoundary } from './components/AppErrorBoundary';
 import { ModuleStatus, ModuleKey } from './types';
 import { INITIAL_MODULE_STATUS } from './constants';
@@ -127,7 +128,8 @@ const App: React.FC = () => {
   const [moduleStatus, setModuleStatus] = useState<ModuleStatus>(INITIAL_MODULE_STATUS);
   const [teacherName, setTeacherName] = useState<string>('');
   const [birthdayToast, setBirthdayToast] = useState<{ title: string; message: string } | null>(null);
-  
+  const [generalNotesOpen, setGeneralNotesOpen] = useState(false);
+  const [isUpdaterExpanded, setIsUpdaterExpanded] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   const refreshData = async () => {
@@ -204,6 +206,18 @@ const App: React.FC = () => {
       setTeacherName(session.user.displayName || '');
     }
   }, [currentModule, currentSection, session, teacherName]);
+
+  useEffect(() => {
+    const handleUpdaterExpanded = (event: Event) => {
+      const customEvent = event as CustomEvent<boolean>;
+      setIsUpdaterExpanded(Boolean(customEvent.detail));
+    };
+
+    window.addEventListener(APP_UPDATER_EXPANDED_EVENT, handleUpdaterExpanded as EventListener);
+    return () => {
+      window.removeEventListener(APP_UPDATER_EXPANDED_EVENT, handleUpdaterExpanded as EventListener);
+    };
+  }, []);
 
   const handleModuleSuccess = () => {
     refreshData();
@@ -288,6 +302,8 @@ const App: React.FC = () => {
     <AppErrorBoundary onReset={logout}>
       <div className="flex min-h-screen bg-[#eaebef] print:block print:bg-white">
         <AppUpdaterOverlay />
+        {!isUpdaterExpanded ? <GeneralNotesFloatingButton onClick={() => setGeneralNotesOpen(true)} /> : null}
+        <GeneralNotesOverlay visible={generalNotesOpen} onClose={() => setGeneralNotesOpen(false)} />
         {birthdayToast ? (
           <div className="fixed right-5 top-5 z-[95] max-w-md rounded-[1.8rem] border border-amber-200 bg-white/95 px-5 py-4 text-slate-800 shadow-[0_18px_45px_rgba(15,23,42,0.18)] backdrop-blur print:hidden">
             <p className="text-[10px] font-black uppercase tracking-[0.22em] text-amber-500">{birthdayToast.title}</p>

@@ -16,9 +16,10 @@ import {
 } from '../../utils/generalImageHelpers';
 import {
   PROFILE_IMAGE_UPDATED_EVENT,
+  persistProfileImageAsset,
   persistProfileImage,
   readImageFileAsDataUrl,
-  readStoredProfileImage,
+  resolveBestProfileImageSource,
   resolveProfileImageStorageKey,
 } from '../../utils/imageStorage';
 
@@ -384,7 +385,8 @@ export const LoginScreen: React.FC = () => {
       setInsigniaImage(effectiveInsignia);
       setLogoImage(effectiveLogo);
 
-      const savedProfile = readStoredProfileImage(session);
+      const savedProfile = await resolveBestProfileImageSource(session);
+      if (!active) return;
       setProfileImage(savedProfile || null);
     };
 
@@ -392,7 +394,13 @@ export const LoginScreen: React.FC = () => {
 
     const handleProfileUpdated = (event: Event) => {
       const customEvent = event as CustomEvent<string | null>;
-      setProfileImage(customEvent.detail || readStoredProfileImage(session));
+      if (customEvent.detail) {
+        setProfileImage(customEvent.detail);
+        return;
+      }
+      void resolveBestProfileImageSource(session).then((nextImage) => {
+        if (active) setProfileImage(nextImage || null);
+      });
     };
 
     const handleGeneralImagesUpdated = (event: Event) => {
@@ -440,6 +448,10 @@ export const LoginScreen: React.FC = () => {
           imageData: dataUrl,
           kind: 'profile',
           userKey: resolveProfileImageStorageKey(session).replace('armi_profile_image::', ''),
+        }).then((response) => {
+          if (response.success && response.data?.fileUrl) {
+            persistProfileImageAsset(response.data.fileUrl, session);
+          }
         });
         return;
       }

@@ -69,6 +69,60 @@ const GENERAL_DATA_COLUMN_DEFINITIONS = {
   year_name: 'TEXT',
 };
 
+const ensureGeneralDataColumn = (col, type) => {
+  const info = db.prepare(`PRAGMA table_info(datos_generales)`).all();
+  if (!info.some((column) => column.name === col)) {
+    db.exec(`ALTER TABLE datos_generales ADD COLUMN ${col} ${type}`);
+  }
+};
+
+const ensureGeneralDataReady = () => {
+  Object.entries(GENERAL_DATA_COLUMN_DEFINITIONS).forEach(([column, type]) => {
+    ensureGeneralDataColumn(column, type);
+  });
+
+  const row = db.prepare('SELECT id FROM datos_generales ORDER BY id ASC LIMIT 1').get();
+  if (!row) {
+    db.prepare(`
+      INSERT INTO datos_generales (
+        year,
+        lugar,
+        school_shift,
+        level,
+        motto,
+        year_name,
+        management_weeks_u1,
+        context_description,
+        gemini_api_key,
+        openai_api_key,
+        ai_provider,
+        ai_pedagogical_route,
+        ai_institutional_problems,
+        ai_unit_pedagogical_focus,
+        updated_at
+      ) VALUES (
+        @year,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '0',
+        '',
+        '',
+        '',
+        'gemini',
+        '',
+        '',
+        '',
+        CURRENT_TIMESTAMP
+      )
+    `).run({
+      year: new Date().getFullYear().toString(),
+    });
+  }
+};
+
 ensureDir(evidenceUploadsFolder);
 
 const getLanIpv4Addresses = () => {
@@ -997,6 +1051,7 @@ app.get('/api/ubigeo/colegios', (req, res) => {
 
 app.get('/api/datos-generales', (req, res) => {
   try {
+    ensureGeneralDataReady();
     const data = db.prepare('SELECT * FROM datos_generales ORDER BY id DESC LIMIT 1').get();
     res.json({ success: true, data: data || {} });
   } catch { res.json({ success: true, data: {} }); }
@@ -1004,13 +1059,8 @@ app.get('/api/datos-generales', (req, res) => {
 
 app.post('/api/datos-generales', (req, res) => {
   try {
+    ensureGeneralDataReady();
     const data = req.body;
-    const ensureGeneralDataColumn = (col, type) => {
-      const info = db.prepare(`PRAGMA table_info(datos_generales)`).all();
-      if (!info.some((column) => column.name === col)) {
-        db.exec(`ALTER TABLE datos_generales ADD COLUMN ${col} ${type}`);
-      }
-    };
     if (Object.prototype.hasOwnProperty.call(data, 'management_weeks_u1')) {
       ensureGeneralDataColumn('management_weeks_u1', `TEXT DEFAULT '0'`);
     }

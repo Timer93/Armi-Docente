@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 
+export const APP_UPDATER_EXPANDED_EVENT = 'armi-app-updater-expanded';
+
 type UpdaterSnapshot = {
   available: boolean;
   configured: boolean;
@@ -67,6 +69,13 @@ export const AppUpdaterOverlay: React.FC = () => {
       setDismissed(false);
     }
   }, [snapshot.status]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent(APP_UPDATER_EXPANDED_EVENT, { detail: expanded }));
+    return () => {
+      window.dispatchEvent(new CustomEvent(APP_UPDATER_EXPANDED_EVENT, { detail: false }));
+    };
+  }, [expanded]);
 
   const isBlocking = ['downloading', 'installing'].includes(snapshot.status);
   const isError = snapshot.status === 'error';

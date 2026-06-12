@@ -113,10 +113,132 @@ const superNormalize = (str: string) => {
     return String(str).toLowerCase().replace(/[^a-z0-9 áéíóúñ]/gi, "").trim();
 };
 
+const normalizeLoose = (value: string) =>
+    String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+const BULLET_PREFIX_RE = /^\s*(?:[-*•▪◦‣·]|(?:\d+[\.\)]))\s+/;
+const LIST_BREAK_RE = /^\s*(?:[-*•▪◦‣·]|(?:\d+[\.\)]))\s+/;
+const SESSION_TOKEN_STOPWORDS = new Set([
+    'para', 'con', 'como', 'desde', 'entre', 'sobre', 'hacia', 'hasta', 'los', 'las', 'del', 'por',
+    'que', 'una', 'uno', 'unos', 'unas', 'este', 'esta', 'estos', 'estas', 'segun', 'mediante', 'proceso',
+    'sesion', 'aprendizaje', 'campo', 'tematico', 'area', 'grado', 'grupo', 'estudiantes', 'trabajo',
+    'producto', 'actividad', 'actividades', 'propuesta', 'valor', 'desarrollo', 'final', 'inicio'
+]);
+
+type SessionEvidenceOption = {
+    id: string;
+    text: string;
+    color: string;
+    capacidad: string;
+    competencia: string;
+    matrixIdx: number;
+    isTrans: boolean;
+    rowType: 'area' | 'transversal';
+    tokens: string[];
+};
+
+const cleanListLine = (line: string) => String(line || '').replace(BULLET_PREFIX_RE, '').trim();
+
+const normalizeBulletArtifacts = (value: string) =>
+    String(value || '')
+        .replace(/Ã¢â‚¬Â¢/g, '•')
+        .replace(/â€¢/g, '•')
+        .replace(/Â·/g, '•');
+
+const splitBulletLikeText = (value: string) => {
+    const raw = normalizeBulletArtifacts(String(value || '').replace(/\r/g, ''));
+    if (!normalizeLoose(raw)) return [];
+
+    const lines = raw.split('\n').map((line) => String(line || '').trim()).filter(Boolean);
+    const items: string[] = [];
+    let current = '';
+
+    lines.forEach((line) => {
+        const isListBreak = LIST_BREAK_RE.test(line);
+        const cleaned = cleanListLine(line);
+        if (!cleaned) return;
+        if (!current || isListBreak) {
+            if (current) items.push(current.trim());
+            current = cleaned;
+        } else {
+            current = `${current} ${cleaned}`.trim();
+        }
+    });
+
+    if (current) items.push(current.trim());
+
+    return items.filter((item, index, arr) =>
+        normalizeLoose(item).length > 0 &&
+        arr.findIndex((candidate) => normalizeLoose(candidate) === normalizeLoose(item)) === index
+    );
+};
+
+const extractMeaningfulTokens = (value: string) =>
+    normalizeLoose(value)
+        .split(' ')
+        .filter((token) => token.length >= 4 && !SESSION_TOKEN_STOPWORDS.has(token));
+
+const normalizeListText = (value: string) => {
+    const raw = String(value || '')
+        .replace(/\\r\\n/g, '\n')
+        .replace(/\\n/g, '\n')
+        .replace(/\r\n/g, '\n')
+        .trim();
+
+    if (!raw) return '';
+
+    const items = splitBulletLikeText(raw);
+    if (items.length <= 1) return raw;
+    return items.map((item) => `• ${item}`).join('\n');
+};
+
 const autoResizeTextarea = (el: HTMLTextAreaElement | null) => {
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = el.scrollHeight + 'px';
+};
+
+const buildEmptySessionFromDetail = (detail?: { id: number; date: string; combinations?: string[] }) => ({
+    id: detail?.id ?? 1,
+    date: detail?.date || '',
+    title: '',
+    cap: '',
+    des: '',
+    con: '',
+    evi: '',
+    eval: '',
+    competencia: '',
+    transversales: [],
+    capacidades: [],
+    selectedCriteriaTexts: [],
+    selectedEvidenceIds: [],
+    availableEvidenceOptions: [],
+    fechasPorSeccion: detail?.combinations || []
+});
+
+const syncSessionsWithDetails = (sessions: any[], details: { id: number; date: string; combinations: string[] }[]) => {
+    if (!Array.isArray(details) || details.length === 0) return Array.isArray(sessions) ? sessions : [];
+    const existing = Array.isArray(sessions) ? sessions : [];
+    return details.map((detail, idx) => {
+        const byId = existing.find((session: any) => Number(session?.id) === Number(detail.id));
+        const byIndex = existing[idx];
+        const source = byId || byIndex;
+        if (!source) return buildEmptySessionFromDetail(detail);
+        return {
+            ...buildEmptySessionFromDetail(detail),
+            ...source,
+            id: detail.id,
+            date: detail.date,
+            fechasPorSeccion: detail.combinations || []
+        };
+    });
 };
 
 const groupRows = (base: any[], estandares: any[]) => {
@@ -381,6 +503,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [isDirty, setIsDirty] = useState(false);
     const [fieldsGenerating, setFieldsGenerating] = useState<Record<string, boolean>>({});
     const [collapsedSessions, setCollapsedSessions] = useState<Record<number, boolean>>({});
+    const [evidenceDropdownOpen, setEvidenceDropdownOpen] = useState<Record<number, boolean>>({});
     const [cursorPos, setCursorPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
     const [collapseEligible, setCollapseEligible] = useState<Record<number, boolean>>({});
 
@@ -395,8 +518,8 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         criteriosTrans: {}, evidenciasTrans: {}, instrumentosTrans: {},
         enfoques: {}, 
         sesiones: [
-            { id: 1, title: '', cap: '', des: '', con: '', evi: '', eval: '', competencia: '', transversales: [], capacidades: [] },
-            { id: 2, title: '', cap: '', des: '', con: '', evi: '', eval: '', competencia: '', transversales: [], capacidades: [] }
+            { id: 1, title: '', cap: '', des: '', con: '', evi: '', eval: '', competencia: '', transversales: [], capacidades: [], selectedEvidenceIds: [], availableEvidenceOptions: [] },
+            { id: 2, title: '', cap: '', des: '', con: '', evi: '', eval: '', competencia: '', transversales: [], capacidades: [], selectedEvidenceIds: [], availableEvidenceOptions: [] }
         ],
         recursos: { actividades: '', medios: '', materiales: '', software: '', espacios: '' },
         bibliografia: { libros: '', links: '' },
@@ -710,6 +833,68 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         return groupedByCompetency.filter(g => !!unitData.selectedComps[g.id]);
     }, [groupedByCompetency, unitData.selectedComps]);
 
+    const sessionEvidenceCatalog = useMemo(() => {
+        const areaOptions: SessionEvidenceOption[] = prioritizedCompetencies.flatMap((group) =>
+            (group.rows || []).flatMap((row: any) =>
+                splitBulletLikeText(unitData.evidencias?.[row.originalIdx] || '').map((text, evidenceIdx) => ({
+                    id: `area-${row.originalIdx}-${evidenceIdx}`,
+                    text,
+                    color: AREA_TEXT_COLOR,
+                    capacidad: String(row.capacidades || ''),
+                    competencia: String(group.id || group.competencia || ''),
+                    matrixIdx: Number(row.originalIdx),
+                    isTrans: false,
+                    rowType: 'area' as const,
+                    tokens: extractMeaningfulTokens(`${row.capacidades || ''} ${text}`)
+                }))
+            )
+        );
+
+        const transOptions: SessionEvidenceOption[] = groupedTransversales.flatMap((group, transIdx) =>
+            (group.rows || []).flatMap((row: any) =>
+                splitBulletLikeText(unitData.evidenciasTrans?.[row.originalIdx] || '').map((text, evidenceIdx) => ({
+                    id: `trans-${row.originalIdx}-${evidenceIdx}`,
+                    text,
+                    color: TRANS_TEXT_COLORS_STRONG[transIdx % TRANS_TEXT_COLORS_STRONG.length],
+                    capacidad: String(row.capacidades || ''),
+                    competencia: String(group.id || group.competencia || ''),
+                    matrixIdx: Number(row.originalIdx),
+                    isTrans: true,
+                    rowType: 'transversal' as const,
+                    tokens: extractMeaningfulTokens(`${row.capacidades || ''} ${text}`)
+                }))
+            )
+        );
+
+        return [...areaOptions, ...transOptions];
+    }, [prioritizedCompetencies, groupedTransversales, unitData.evidencias, unitData.evidenciasTrans]);
+
+    const sessionEvidenceContextSignature = useMemo(() => JSON.stringify(
+        (unitData.sesiones || []).map((session: any) => ({
+            id: session?.id,
+            title: session?.title || '',
+            con: session?.con || '',
+            competencia: session?.competencia || '',
+            transversales: session?.transversales || [],
+            capacidades: session?.capacidades || [],
+            selectedEvidenceIds: session?.selectedEvidenceIds || []
+        }))
+    ), [unitData.sesiones]);
+
+    const evidenceUsageMap = useMemo(() => {
+        const usage = new Map<string, number[]>();
+        (unitData.sesiones || []).forEach((session: any) => {
+            const sessionId = Number(session?.id);
+            const evidenceIds = Array.isArray(session?.selectedEvidenceIds) ? session.selectedEvidenceIds : [];
+            evidenceIds.forEach((evidenceId: string) => {
+                if (!usage.has(evidenceId)) usage.set(evidenceId, []);
+                const sessions = usage.get(evidenceId)!;
+                if (!sessions.includes(sessionId)) sessions.push(sessionId);
+            });
+        });
+        return usage;
+    }, [unitData.sesiones]);
+
     // Lógica para autoseleccionar competencia si solo hay una
     useEffect(() => {
         if (prioritizedCompetencies.length === 1) {
@@ -777,25 +962,16 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                         desempenos: {}, criterios: {}, evidencias: {}, instrumentos: {},
                         criteriosTrans: {}, evidenciasTrans: {}, instrumentosTrans: {},
                         sesiones: sessionDetails.length > 0 
-                            ? sessionDetails.map(d => ({
-                                id: d.id,
-                                date: d.date, 
-                                title: '',
-                                cap: '',
-                                des: '',
-                                con: '',
-                                evi: '',
-                                eval: '',
-                                competencia: '', transversales: [], capacidades: []
-                            }))
+                            ? sessionDetails.map(d => buildEmptySessionFromDetail(d))
                             : [
-                                { id: 1, title: '', cap: '', des: '', con: '', evi: '', eval: '', competencia: '', transversales: [], capacidades: [] },
-                                { id: 2, title: '', cap: '', des: '', con: '', evi: '', eval: '', competencia: '', transversales: [], capacidades: [] }
+                                buildEmptySessionFromDetail({ id: 1, date: '', combinations: [] }),
+                                buildEmptySessionFromDetail({ id: 2, date: '', combinations: [] })
                               ],
                         recursos: { actividades: '', medios: '', materiales: '', software: '', espacios: '' },
                         bibliografia: { libros: '', links: '' },
                         evaluacion: DEFAULT_EVAL_TEXT
                     }),
+                    sesiones: syncSessionsWithDetails(sqlData?.sesiones || [], sessionDetails),
                     title: syncTitle || (sqlData?.title || ''),
                     situation: sqlData?.situation || '',
                     enfoques: Object.keys(syncEnfoques).length > 0 ? syncEnfoques : (sqlData?.enfoques || {})
@@ -869,7 +1045,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             const transIdx = transGroup ? Number(transIdxById.get(transGroup.id) ?? 0) : -1;
             const isTrans = transIdx !== -1;
             const rawCriteria = isTrans ? (sourceData.criteriosTrans[matrixIdx] || "") : (sourceData.criterios[matrixIdx] || "");
-            const normalizedRaw = rawCriteria.replace(/^\s*•\s*•\s*/gm, "• ");
+            const normalizedRaw = normalizeBulletArtifacts(rawCriteria).replace(/^\s*•\s*•\s*/gm, "• ");
             const hasBullets = /^\s*[•-]\s+/m.test(normalizedRaw);
             const cleaned = normalizedRaw.replace(/^\s*[•-]\s*/gm, "").trim();
             const colorClass = isTrans ? TRANS_TEXT_COLORS_STRONG[transIdx % TRANS_TEXT_COLORS_STRONG.length] : AREA_TEXT_COLOR;
@@ -895,12 +1071,158 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             }
         });
 
+        const persistedCriteriaTexts = Array.isArray(session.selectedCriteriaTexts)
+            ? session.selectedCriteriaTexts.map((text: string) => cleanListLine(String(text || ''))).filter(Boolean)
+            : [];
+
+        if (persistedCriteriaTexts.length > 0) {
+            criteriaItems.length = 0;
+            criteriaText = '';
+            persistedCriteriaTexts.forEach((text, idx) => {
+                const line = `${persistedCriteriaTexts.length > 1 ? '• ' : '• '}${text}`.trim();
+                criteriaItems.push({ text: line, color: AREA_TEXT_COLOR });
+                criteriaText += `${line}${idx < persistedCriteriaTexts.length - 1 ? '\n' : ''}`;
+            });
+        } else if (normalizeLoose(session.des || '')) {
+            criteriaItems.length = 0;
+            criteriaText = String(session.des || '').trim();
+            const existingCriteriaItems = Array.isArray(session.criteriaItems) ? session.criteriaItems : [];
+            if (existingCriteriaItems.length > 0) {
+                existingCriteriaItems.forEach((item: any) => {
+                    criteriaItems.push({
+                        ...item,
+                        text: normalizeBulletArtifacts(String(item?.text || '')).trim() || '•'
+                    });
+                });
+            } else {
+                splitBulletLikeText(session.des || '').forEach((line) => {
+                    criteriaItems.push({
+                        text: `• ${cleanListLine(line)}`.trim(),
+                        color: AREA_TEXT_COLOR
+                    });
+                });
+            }
+        }
+
+        const availableEvidenceOptions = sessionEvidenceCatalog.filter((candidate) => {
+            if (!selectedCapacities.includes(candidate.capacidad)) return false;
+            if (candidate.isTrans) {
+                return (session.transversales || []).includes(candidate.competencia);
+            }
+            return !session.competencia || candidate.competencia === session.competencia;
+        });
+
+        const sessionContextTokens = new Set(extractMeaningfulTokens([
+            session.title || '',
+            session.con || '',
+            selectedCapacities.join(' '),
+            session.competencia || ''
+        ].join(' ')));
+
+        const scoreCandidate = (candidate: SessionEvidenceOption) => {
+            let score = 0;
+            candidate.tokens.forEach((token) => {
+                if (sessionContextTokens.has(token)) score += 1;
+            });
+            if (normalizeLoose(candidate.capacidad) && selectedCapacities.some((cap: string) => normalizeLoose(cap) === normalizeLoose(candidate.capacidad))) {
+                score += 2;
+            }
+            if (!candidate.isTrans && candidate.competencia === session.competencia) {
+                score += 1;
+            }
+            return score;
+        };
+
+        const validExistingIds = Array.isArray(session.selectedEvidenceIds)
+            ? session.selectedEvidenceIds.filter((id: string) => availableEvidenceOptions.some((candidate) => candidate.id === id))
+            : [];
+        const hasPersistedEvidenceText = normalizeLoose(session.evi || '').length > 0;
+
+        const inferredExistingIds = validExistingIds.length > 0
+            ? []
+            : Array.from(
+                new Set(
+                    [
+                        ...(Array.isArray(session.evidenceItems) ? session.evidenceItems.map((item: any) => item?.text || '') : []),
+                        ...splitBulletLikeText(session.evi || '')
+                    ]
+                        .map((text) => cleanListLine(normalizeBulletArtifacts(text)))
+                        .filter(Boolean)
+                        .flatMap((text) =>
+                            availableEvidenceOptions
+                                .filter((candidate) => normalizeLoose(candidate.text) === normalizeLoose(text))
+                                .map((candidate) => candidate.id)
+                        )
+                )
+            );
+
+        const autoSelectedIds = (() => {
+            if (validExistingIds.length > 0) return validExistingIds;
+            if (inferredExistingIds.length > 0) return inferredExistingIds;
+            if (hasPersistedEvidenceText) return [];
+
+            const ranked = [...availableEvidenceOptions]
+                .map((candidate) => ({
+                    id: candidate.id,
+                    score: scoreCandidate(candidate),
+                    isTrans: candidate.isTrans
+                }))
+                .sort((left, right) => {
+                    if (right.score !== left.score) return right.score - left.score;
+                    if (left.isTrans !== right.isTrans) return Number(left.isTrans) - Number(right.isTrans);
+                    return left.id.localeCompare(right.id);
+                });
+
+            const best = ranked.find((candidate) => candidate.score > 0) || ranked[0];
+            return best ? [best.id] : [];
+        })();
+
+        const selectedEvidenceIds = autoSelectedIds;
+        const selectedEvidenceOptions = availableEvidenceOptions.filter((candidate) => selectedEvidenceIds.includes(candidate.id));
+
+        if (selectedEvidenceOptions.length > 0) {
+            evidenceItems.length = 0;
+            evidenceText = '';
+            selectedEvidenceOptions.forEach((candidate, idx) => {
+                const prefix = selectedEvidenceOptions.length > 1 ? '• ' : '';
+                const line = `${prefix}${normalizeBulletArtifacts(candidate.text)}`.trim();
+                evidenceItems.push({
+                    text: line,
+                    color: candidate.color,
+                    sourceEvidenceId: candidate.id,
+                    capacidad: candidate.capacidad
+                } as any);
+                evidenceText += `${line}${idx < selectedEvidenceOptions.length - 1 ? '\n' : ''}`;
+            });
+        } else if (normalizeLoose(session.evi || '')) {
+            evidenceText = String(session.evi || '').trim();
+            evidenceItems.length = 0;
+            const existingEvidenceItems = Array.isArray(session.evidenceItems) ? session.evidenceItems : [];
+            if (existingEvidenceItems.length > 0) {
+                existingEvidenceItems.forEach((item: any) => {
+                    evidenceItems.push({
+                        ...item,
+                        text: normalizeBulletArtifacts(String(item?.text || '')).trim() || '•'
+                    });
+                });
+            } else {
+                splitBulletLikeText(session.evi || '').forEach((line) => {
+                    evidenceItems.push({
+                        text: `• ${cleanListLine(line)}`.trim(),
+                        color: AREA_TEXT_COLOR
+                    } as any);
+                });
+            }
+        }
+
         return {
             des: criteriaText.trim(),
             evi: evidenceText.trim(),
             eval: evalInstrument,
             criteriaItems,
-            evidenceItems
+            evidenceItems,
+            selectedEvidenceIds,
+            availableEvidenceOptions
         };
     };
 
@@ -930,7 +1252,9 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     session.evi === derived.evi &&
                     session.eval === derived.eval &&
                     JSON.stringify(session.criteriaItems || []) === JSON.stringify(derived.criteriaItems || []) &&
-                    JSON.stringify(session.evidenceItems || []) === JSON.stringify(derived.evidenceItems || []);
+                    JSON.stringify(session.evidenceItems || []) === JSON.stringify(derived.evidenceItems || []) &&
+                    JSON.stringify(session.selectedEvidenceIds || []) === JSON.stringify(derived.selectedEvidenceIds || []) &&
+                    JSON.stringify(session.availableEvidenceOptions || []) === JSON.stringify(derived.availableEvidenceOptions || []);
 
                 if (same) return session;
                 changed = true;
@@ -946,9 +1270,20 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         unitData.criteriosTrans,
         unitData.evidenciasTrans,
         unitData.instrumentosTrans,
+        sessionEvidenceCatalog,
+        sessionEvidenceContextSignature,
         prioritizedCompetencies,
         groupedTransversales
     ]);
+
+    useEffect(() => {
+        if (!Array.isArray(sessionDetails) || sessionDetails.length === 0) return;
+        setUnitData((prev: any) => {
+            const syncedSessions = syncSessionsWithDetails(prev?.sesiones || [], sessionDetails);
+            const same = JSON.stringify(prev?.sesiones || []) === JSON.stringify(syncedSessions);
+            return same ? prev : { ...prev, sesiones: syncedSessions };
+        });
+    }, [sessionDetails]);
 
     const handleSessionInputChange = (index: number, field: string, value: any) => {
         setIsDirty(true);
@@ -993,9 +1328,42 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             const itemsKey = kind === 'criteria' ? 'criteriaItems' : 'evidenceItems';
             const textKey = kind === 'criteria' ? 'des' : 'evi';
             const items = Array.isArray(session[itemsKey]) ? [...session[itemsKey]] : [];
+            const removedItem = items[itemIdx];
             items.splice(itemIdx, 1);
             session[itemsKey] = items;
             session[textKey] = items.map((it: any) => it.text).join('\n').trim();
+            if (kind === 'evidence' && removedItem?.sourceEvidenceId) {
+                session.selectedEvidenceIds = (Array.isArray(session.selectedEvidenceIds) ? session.selectedEvidenceIds : [])
+                    .filter((id: string) => id !== removedItem.sourceEvidenceId);
+            }
+            newSesiones[index] = session;
+            return { ...prev, sesiones: newSesiones };
+        });
+    };
+
+    const handleSessionEvidenceSelection = (sessionId: number, evidenceId: string, checked: boolean) => {
+        setIsDirty(true);
+        setUnitData((prev: any) => {
+            const index = prev.sesiones.findIndex((s: any) => s.id === sessionId);
+            if (index === -1) return prev;
+            const newSesiones = [...prev.sesiones];
+            const session = { ...newSesiones[index] };
+            const current = Array.isArray(session.selectedEvidenceIds) ? [...session.selectedEvidenceIds] : [];
+            const nextIds = checked
+                ? Array.from(new Set([...current, evidenceId]))
+                : current.filter((id: string) => id !== evidenceId);
+            const available = Array.isArray(session.availableEvidenceOptions) ? session.availableEvidenceOptions : [];
+            const selectedItems = available.filter((candidate: SessionEvidenceOption) => nextIds.includes(candidate.id));
+
+            session.selectedEvidenceIds = nextIds;
+            session.evidenceItems = selectedItems.map((candidate: SessionEvidenceOption) => ({
+                text: `${selectedItems.length > 1 ? '• ' : ''}${normalizeBulletArtifacts(candidate.text)}`.trim(),
+                color: candidate.color,
+                sourceEvidenceId: candidate.id,
+                capacidad: candidate.capacidad
+            }));
+            session.evi = session.evidenceItems.map((item: any) => item.text).join('\n').trim();
+
             newSesiones[index] = session;
             return { ...prev, sesiones: newSesiones };
         });
@@ -1017,7 +1385,9 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     eval: '',
                     competencia: prioritizedCompetencies.length === 1 ? prioritizedCompetencies[0].id : '',
                     transversales: [],
-                    capacidades: []
+                    capacidades: [],
+                    selectedEvidenceIds: [],
+                    availableEvidenceOptions: []
                 }
             ]
         }));
@@ -1057,9 +1427,15 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const startTypingField = async (fieldPath: string, targetText: string, ref?: any) => {
-        if (!targetText) return;
+        const shouldNormalizeAsList =
+            fieldPath.startsWith('evidencias.') ||
+            fieldPath.startsWith('evidenciasTrans.') ||
+            fieldPath.startsWith('criterios.') ||
+            fieldPath.startsWith('criteriosTrans.');
+        const normalizedTargetText = shouldNormalizeAsList ? normalizeListText(targetText) : targetText;
+        if (!normalizedTargetText) return;
         
-        typingTargets.current[fieldPath] = targetText;
+        typingTargets.current[fieldPath] = normalizedTargetText;
         
         const isNewTask = !activeTypingTasks.current.has(fieldPath);
         if (isNewTask) {
@@ -1257,6 +1633,11 @@ Devuelve SOLO JSON: {"purpose": "...", "product": "...", "situation": "..."}`;
             const promptEvaluacion = `Genera Criterio, Evidencia e Instrumento para los desempeños: ${allDesempenos.map((r, i) => `${i + 1}. ${r.desempenos_dcbn}`).join('\n')}.
 
 ${aiExtraContext}
+
+Reglas:
+- La evidencia debe ser coherente con la capacidad y el desempeÃ±o.
+- Si una fila admite varias evidencias, devuÃ©lvelas en lista con viÃ±etas y saltos de lÃ­nea.
+- Evita mezclar en una misma evidencia productos de etapas pedagÃ³gicas distintas si pueden separarse.
 
 Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "instrumento": "..."}]}`;
             if (aiProvider === 'openai') {
@@ -1767,8 +2148,8 @@ const handleFillDefaultBiblio = () => {
                                             {group.rows.map((row, i) => (
                                                 <tr key={i} className="align-top group hover:bg-white/95 transition-colors">{row.isFirstCap && (<td rowSpan={row.capSpan} className="p-4 bg-white/80 text-black/60 font-black italic leading-tight text-center align-middle border-b border-r border-black/20 uppercase text-[10px]">{row.capacidades}</td>)}<td className="p-4 text-justify font-medium text-slate-700 bg-white/90 border-b border-r border-black/20 leading-relaxed">{row.desempenos_dcbn}</td>
                                                 <td className={`p-4 bg-white/90 border-b border-r border-black/20 transition-all duration-500 align-top ${fieldsGenerating[`criterios.${row.originalIdx}`] ? 'generating-glow' : ''}`}>
-                                                <textarea ref={el => { tableFieldRefs.current[`criterios.${row.originalIdx}`] = el; }} className="block w-full min-h-[120px] border-0 outline-none bg-transparent focus:bg-white transition-all text-slate-700 font-medium text-justify resize-none text-[11px] leading-relaxed overflow-hidden" value={unitData.criterios[row.originalIdx] || ''} onChange={e => handleInputChange('criterios', row.originalIdx.toString(), e.target.value)} onInput={e => {e.currentTarget.style.height = 'auto';e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';}} placeholder="Defina los criterios..."/></td>
-                                                <td className={`p-4 bg-white/90 border-b border-r border-black/20 transition-all duration-500 align-top ${fieldsGenerating[`evidencias.${row.originalIdx}`] ? 'generating-glow' : ''}`}><textarea ref={el => { tableFieldRefs.current[`evidencias.${row.originalIdx}`] = el; }} className="block w-full min-h-[120px] border-0 outline-none bg-transparent focus:bg-white transition-all text-blue-800 font-bold italic text-[10px] leading-relaxed resize-none overflow-hidden" value={unitData.evidencias[row.originalIdx] || ''} onChange={e => handleInputChange('evidencias', row.originalIdx.toString(), e.target.value)} onInput={e => {e.currentTarget.style.height = 'auto';e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';}} placeholder="Describa evidencia..."/></td><td className="p-4 border-b border-black/20 bg-white/90 align-middle"><Select label="" name={`instrumento-${row.originalIdx}`} options={INSTRUMENTS_OPTIONS} value={unitData.instrumentos[row.originalIdx] || ''} onChange={e => handleInputChange('instrumentos', row.originalIdx.toString(), e.target.value)} placeholder="Seleccionar..." className="h-auto w-[160px]" valueClassName="text-[10px] font-bold" /></td></tr>
+                                                <textarea ref={el => { tableFieldRefs.current[`criterios.${row.originalIdx}`] = el; }} className="block w-full min-h-[120px] border-0 outline-none bg-transparent focus:bg-white transition-all text-slate-700 font-medium text-justify resize-none text-[11px] leading-relaxed overflow-hidden" value={unitData.criterios[row.originalIdx] || ''} onChange={e => handleInputChange('criterios', row.originalIdx.toString(), e.target.value)} onKeyDown={e => handleBulletKeyDown(e, 'criterios', row.originalIdx.toString(), '•')} onInput={e => {e.currentTarget.style.height = 'auto';e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';}} placeholder="Defina los criterios..."/></td>
+                                                <td className={`p-4 bg-white/90 border-b border-r border-black/20 transition-all duration-500 align-top ${fieldsGenerating[`evidencias.${row.originalIdx}`] ? 'generating-glow' : ''}`}><textarea ref={el => { tableFieldRefs.current[`evidencias.${row.originalIdx}`] = el; }} className="block w-full min-h-[120px] border-0 outline-none bg-transparent focus:bg-white transition-all text-blue-800 font-bold italic text-[10px] leading-relaxed resize-none overflow-hidden" value={unitData.evidencias[row.originalIdx] || ''} onChange={e => handleInputChange('evidencias', row.originalIdx.toString(), e.target.value)} onKeyDown={e => handleBulletKeyDown(e, 'evidencias', row.originalIdx.toString(), '•')} onInput={e => {e.currentTarget.style.height = 'auto';e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';}} placeholder="Describa evidencia..."/></td><td className="p-4 border-b border-black/20 bg-white/90 align-middle"><Select label="" name={`instrumento-${row.originalIdx}`} options={INSTRUMENTS_OPTIONS} value={unitData.instrumentos[row.originalIdx] || ''} onChange={e => handleInputChange('instrumentos', row.originalIdx.toString(), e.target.value)} placeholder="Seleccionar..." className="h-auto w-[160px]" valueClassName="text-[10px] font-bold" /></td></tr>
                                             ))}
                                         </React.Fragment>
                                     ))}
@@ -1779,7 +2160,7 @@ const handleFillDefaultBiblio = () => {
                                         <th className="p-2.5 w-64">DESEMPEÑO CNEB</th>
                                         <th className="p-2.5">CRITERIOS DE EVALUACIÓN</th>
                                         <th className="p-2.5 w-52">EVIDENCIA</th>
-                                        <th className="p-2.5 w-56">INSTRUMENTO</th></tr>{group.rows.map((row, i) => (<tr key={`tr-row-${i}`} className="divide-x divide-black/30 align-top group hover:bg-white/90 transition-colors">{row.isFirstCap && (<td rowSpan={row.capSpan} className="p-4 bg-white/70 text-black/60 font-black italic leading-tight text-center align-middle border-b border-black/30 uppercase text-[10px]">{row.capacidades}</td>)}<td className="p-4 text-justify font-medium text-slate-700 bg-white/90 border-b border-black/30 leading-relaxed">{row.desempenos_dcbn}</td><td className={`p-4 border-b border-emerald-400 bg-white/95 align-top transition-all duration-500 ${fieldsGenerating[`criteriosTrans.${row.originalIdx}`] ? 'generating-glow' : ''}`}><textarea ref={el => { tableFieldRefs.current[`criteriosTrans.${row.originalIdx}`] = el; }} className="block w-full min-h-[120px] border-0 outline-none bg-transparent focus:bg-white/80 transition-all text-black/60 font-bold italic text-[11px] leading-relaxed resize-none overflow-hidden" value={unitData.criteriosTrans[row.originalIdx] || ''} onChange={e => handleInputChange('criteriosTrans', row.originalIdx.toString(), e.target.value)} onInput={e => {e.currentTarget.style.height = 'auto';e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';}} placeholder="Defina los criterios..." /></td><td className={`p-4 border-b border-orange-400 bg-white/95 align-top transition-all duration-500 ${fieldsGenerating[`evidenciasTrans.${row.originalIdx}`] ? 'generating-glow' : ''}`}><textarea ref={el => { tableFieldRefs.current[`evidenciasTrans.${row.originalIdx}`] = el; }} className="block w-full min-h-[120px] border-0 outline-none bg-transparent focus:bg-white/80 transition-all text-black/70 font-bold italic text-[10px] leading-relaxed resize-none overflow-hidden" value={unitData.evidenciasTrans[row.originalIdx] || ''} onChange={e => handleInputChange('evidenciasTrans', row.originalIdx.toString(), e.target.value)} onInput={e => {e.currentTarget.style.height = 'auto';e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';}} placeholder="Describa evidencia..." /></td><td className="p-4 border-b border-orange-400 bg-white align-top"><Select label="" name={`instrumentoTrans-${row.originalIdx}`} options={INSTRUMENTS_OPTIONS} value={unitData.instrumentosTrans[row.originalIdx] || ''} onChange={e => handleInputChange('instrumentosTrans', row.originalIdx.toString(), e.target.value)} placeholder="Seleccionar..." className="h-auto w-[140px]" valueClassName="text-[10px] font-bold"/></td></tr>))}</React.Fragment>
+                                        <th className="p-2.5 w-56">INSTRUMENTO</th></tr>{group.rows.map((row, i) => (<tr key={`tr-row-${i}`} className="divide-x divide-black/30 align-top group hover:bg-white/90 transition-colors">{row.isFirstCap && (<td rowSpan={row.capSpan} className="p-4 bg-white/70 text-black/60 font-black italic leading-tight text-center align-middle border-b border-black/30 uppercase text-[10px]">{row.capacidades}</td>)}<td className="p-4 text-justify font-medium text-slate-700 bg-white/90 border-b border-black/30 leading-relaxed">{row.desempenos_dcbn}</td><td className={`p-4 border-b border-emerald-400 bg-white/95 align-top transition-all duration-500 ${fieldsGenerating[`criteriosTrans.${row.originalIdx}`] ? 'generating-glow' : ''}`}><textarea ref={el => { tableFieldRefs.current[`criteriosTrans.${row.originalIdx}`] = el; }} className="block w-full min-h-[120px] border-0 outline-none bg-transparent focus:bg-white/80 transition-all text-black/60 font-bold italic text-[11px] leading-relaxed resize-none overflow-hidden" value={unitData.criteriosTrans[row.originalIdx] || ''} onChange={e => handleInputChange('criteriosTrans', row.originalIdx.toString(), e.target.value)} onKeyDown={e => handleBulletKeyDown(e, 'criteriosTrans', row.originalIdx.toString(), '•')} onInput={e => {e.currentTarget.style.height = 'auto';e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';}} placeholder="Defina los criterios..." /></td><td className={`p-4 border-b border-orange-400 bg-white/95 align-top transition-all duration-500 ${fieldsGenerating[`evidenciasTrans.${row.originalIdx}`] ? 'generating-glow' : ''}`}><textarea ref={el => { tableFieldRefs.current[`evidenciasTrans.${row.originalIdx}`] = el; }} className="block w-full min-h-[120px] border-0 outline-none bg-transparent focus:bg-white/80 transition-all text-black/70 font-bold italic text-[10px] leading-relaxed resize-none overflow-hidden" value={unitData.evidenciasTrans[row.originalIdx] || ''} onChange={e => handleInputChange('evidenciasTrans', row.originalIdx.toString(), e.target.value)} onKeyDown={e => handleBulletKeyDown(e, 'evidenciasTrans', row.originalIdx.toString(), '•')} onInput={e => {e.currentTarget.style.height = 'auto';e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';}} placeholder="Describa evidencia..." /></td><td className="p-4 border-b border-orange-400 bg-white align-top"><Select label="" name={`instrumentoTrans-${row.originalIdx}`} options={INSTRUMENTS_OPTIONS} value={unitData.instrumentosTrans[row.originalIdx] || ''} onChange={e => handleInputChange('instrumentosTrans', row.originalIdx.toString(), e.target.value)} placeholder="Seleccionar..." className="h-auto w-[140px]" valueClassName="text-[10px] font-bold"/></td></tr>))}</React.Fragment>
                                     ))}
                                 </tbody>
                             </table>
@@ -1831,6 +2212,14 @@ const handleFillDefaultBiblio = () => {
                                 <tbody className="divide-y divide-white/80">
                                     {unitData.sesiones.map((ses: any, idx: number) => {
                                         const detail = sessionDetails.find(d => d.id === ses.id);
+                                        const sessionEvidenceOptions: SessionEvidenceOption[] = Array.isArray(ses.availableEvidenceOptions) ? ses.availableEvidenceOptions : [];
+                                        const selectedEvidenceIds = Array.isArray(ses.selectedEvidenceIds) ? ses.selectedEvidenceIds : [];
+                                        const selectedEvidenceCount = selectedEvidenceIds.length;
+                                        const usedEvidenceCount = sessionEvidenceOptions.filter((option) => {
+                                            const usage = evidenceUsageMap.get(option.id) || [];
+                                            return usage.some((sessionId) => sessionId !== ses.id);
+                                        }).length;
+                                        const allEvidenceAlreadyUsed = sessionEvidenceOptions.length > 0 && usedEvidenceCount === sessionEvidenceOptions.length;
                                         
                                         // Extraer capacidades basadas en competencias seleccionadas
                                         const areaComp = prioritizedCompetencies.find(pc => pc.id === ses.competencia);
@@ -2015,7 +2404,7 @@ const handleFillDefaultBiblio = () => {
                                                                         type="button"
                                                                         className="absolute right-0 top-0 w-4 h-4 rounded-full bg-slate-200 text-slate-700 text-[10px] leading-[14px] font-black hover:bg-slate-300"
                                                                         onClick={() => handleSessionItemRemove(ses.id, 'evidence', itemIdx)}
-                                                                        title="Eliminar"
+                                                                title="Eliminar"
                                                                     >
                                                                         -
                                                                     </button>
@@ -2030,6 +2419,69 @@ const handleFillDefaultBiblio = () => {
                                                             onInput={e => autoResizeTextarea(e.currentTarget)}
                                                             placeholder="Evidencia..."
                                                         />
+                                                        )}
+                                                        {sessionEvidenceOptions.length > 0 && (
+                                                            <div className="mt-3 border-t border-slate-200 pt-2 text-left">
+                                                                <button
+                                                                    type="button"
+                                                                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:bg-slate-100 transition-colors"
+                                                                    onClick={() => setEvidenceDropdownOpen((prev) => ({ ...prev, [ses.id]: !prev[ses.id] }))}
+                                                                >
+                                                                    <span className="flex items-center justify-between gap-3">
+                                                                        <span className="min-w-0">
+                                                                            <span className="block text-[8px] font-black uppercase tracking-widest text-slate-500">
+                                                                                Evidencias sugeridas por capacidad y campo temático
+                                                                            </span>
+                                                                            <span className="block text-[9px] font-bold text-slate-700 mt-1">
+                                                                                {selectedEvidenceCount > 0
+                                                                                    ? `${selectedEvidenceCount} evidencia${selectedEvidenceCount === 1 ? '' : 's'} seleccionada${selectedEvidenceCount === 1 ? '' : 's'}`
+                                                                                    : 'Seleccionar evidencias'}
+                                                                            </span>
+                                                                            {allEvidenceAlreadyUsed && (
+                                                                                <span className="block text-[8px] font-bold text-amber-600 mt-1">
+                                                                                    Todas las evidencias de esta capacidad ya se usan en otra sesión.
+                                                                                </span>
+                                                                            )}
+                                                                        </span>
+                                                                        <span className="shrink-0 text-slate-500 text-xs font-black">
+                                                                            {evidenceDropdownOpen[ses.id] ? '▲' : '▼'}
+                                                                        </span>
+                                                                    </span>
+                                                                </button>
+                                                                {evidenceDropdownOpen[ses.id] && (
+                                                                    <div className="mt-2 space-y-1.5 rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+                                                                        {sessionEvidenceOptions.map((option: SessionEvidenceOption) => {
+                                                                            const isChecked = selectedEvidenceIds.includes(option.id);
+                                                                            const usage = evidenceUsageMap.get(option.id) || [];
+                                                                            const usedInOtherSessions = usage.filter((sessionId) => sessionId !== ses.id);
+                                                                            const isUsedElsewhere = usedInOtherSessions.length > 0;
+                                                                            return (
+                                                                                <label
+                                                                                    key={option.id}
+                                                                                    className={`flex items-start gap-2 rounded border px-2 py-1 cursor-pointer transition-colors ${isChecked ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-slate-50 hover:bg-slate-100'} ${isUsedElsewhere && !isChecked ? 'opacity-55' : ''}`}
+                                                                                    title={option.capacidad}
+                                                                                >
+                                                                                    <input
+                                                                                        type="checkbox"
+                                                                                        checked={isChecked}
+                                                                                        onChange={e => handleSessionEvidenceSelection(ses.id, option.id, e.target.checked)}
+                                                                                        className="mt-0.5"
+                                                                                    />
+                                                                                    <span className="min-w-0 flex-1">
+                                                                                        <span className={`block text-[9px] leading-tight font-semibold ${option.color}`}>{option.text}</span>
+                                                                                        <span className="block text-[7px] uppercase tracking-wide text-slate-400 mt-1">{option.capacidad}</span>
+                                                                                        {isUsedElsewhere && (
+                                                                                            <span className="block text-[8px] font-bold text-amber-600 mt-1">
+                                                                                                Ya usada en sesi{usedInOtherSessions.length > 1 ? 'ones' : 'ón'} {usedInOtherSessions.join(', ')}
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </span>
+                                                                                </label>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                )}
+                                                            </div>
                                                         )}
                                                     </div>
                                                 </td>

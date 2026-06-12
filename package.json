@@ -1,7 +1,7 @@
 {
   "name": "armi-docente-web",
   "private": true,
-  "version": "11.1.5",
+  "version": "11.1.6",
   "description": "ARMI Docente",
   "author": "ARMI",
   "type": "module",
@@ -36,6 +36,7 @@
     "electron-updater": "^6.6.2",
     "express": "^5.2.1",
     "fs": "^0.0.1-security",
+    "lucide-react": "^1.17.0",
     "path": "^0.12.7",
     "pizzip": "^3.1.7",
     "qrcode": "^1.5.4",

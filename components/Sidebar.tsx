@@ -5,9 +5,10 @@ import { saveImageAssetFile } from '../services/apiService';
 import { CloudSyncPanel } from './CloudSyncPanel';
 import {
   PROFILE_IMAGE_UPDATED_EVENT,
+  persistProfileImageAsset,
   persistProfileImage,
   readImageFileAsDataUrl,
-  resolveProfileImageSource,
+  resolveBestProfileImageSource,
 } from '../utils/imageStorage';
 
 const ACADEMIC_TITLE_PATTERNS = [
@@ -216,16 +217,27 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
   const sidebarDisplayName = buildSidebarDisplayName(teacherName, profileSession);
 
   useEffect(() => {
-    setProfileImage(resolveProfileImageSource(profileSession, profileSession?.user?.avatarUrl));
+    let active = true;
+
+    void resolveBestProfileImageSource(profileSession, profileSession?.user?.avatarUrl).then((nextImage) => {
+      if (active) setProfileImage(nextImage);
+    });
 
     const handleProfileUpdated = (event: Event) => {
       const customEvent = event as CustomEvent<string | null>;
-      setProfileImage(customEvent.detail || resolveProfileImageSource(profileSession, profileSession?.user?.avatarUrl));
+      if (customEvent.detail) {
+        setProfileImage(customEvent.detail);
+        return;
+      }
+      void resolveBestProfileImageSource(profileSession, profileSession?.user?.avatarUrl).then((nextImage) => {
+        if (active) setProfileImage(nextImage);
+      });
     };
 
     window.addEventListener(PROFILE_IMAGE_UPDATED_EVENT, handleProfileUpdated as EventListener);
 
     return () => {
+      active = false;
       window.removeEventListener(PROFILE_IMAGE_UPDATED_EVENT, handleProfileUpdated as EventListener);
     };
   }, [profileSession]);
@@ -286,6 +298,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
                   imageData: result,
                   kind: 'profile',
                   userKey: profileSession?.user?.sync?.userKey || profileSession?.user?.id || profileSession?.user?.username,
+              }).then((response) => {
+                  if (response.success && response.data?.fileUrl) {
+                      persistProfileImageAsset(response.data.fileUrl, profileSession);
+                  }
               });
           });
       }
