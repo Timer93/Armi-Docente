@@ -1217,23 +1217,51 @@ const setPathByString = (obj: any, path: string, value: any) => {
 
 const extractBracketTokens = (value: string) => {
     const out = new Set<string>();
+    const plainValue = decodeBasicHtmlEntities(stripHtml(String(value || '')))
+        .replace(/\s+/g, ' ')
+        .trim();
     const re = /\[([^\[\]]{2,120})\]/g;
     let m: RegExpExecArray | null = null;
-    while ((m = re.exec(String(value || ''))) !== null) {
+    while ((m = re.exec(plainValue)) !== null) {
         const token = String(m[1] || '').trim();
         if (token) out.add(token);
     }
     return Array.from(out);
 };
 
-const replaceBracketTokens = (value: string, replacements: Record<string, string>) =>
-    String(value || '').replace(/\[([^\[\]]{2,120})\]/g, (_full, rawToken) => {
+const replaceBracketTokens = (value: string, replacements: Record<string, string>) => {
+    const sourceValue = String(value || '');
+    const tokenBoundaryGap = '(?:<[^>]*>|\\s|&nbsp;|&#160;|&amp;nbsp;)*';
+    const buildFragmentedTokenPattern = (token: string) => {
+        const chars = Array.from(String(token || ''));
+        const inner = chars
+            .map((char) => escapeRegex(char))
+            .join(tokenBoundaryGap);
+        return new RegExp(`\\[${tokenBoundaryGap}${inner}${tokenBoundaryGap}\\]`, 'gi');
+    };
+
+    let replacedValue = sourceValue.replace(/\[([^\[\]]{2,120})\]/g, (_full, rawToken) => {
         const token = String(rawToken || '').trim();
         const direct = replacements[token];
         if (direct && String(direct).trim()) return String(direct).trim();
         const normalizedKey = Object.keys(replacements).find(k => normalizeLoose(k) === normalizeLoose(token));
         return normalizedKey ? String(replacements[normalizedKey]).trim() : `[${token}]`;
     });
+
+    const normalizedReplacementEntries = Object.entries(replacements || {})
+        .map(([key, replacement]) => ({
+            key: String(key || '').trim(),
+            replacement: String(replacement || '').trim()
+        }))
+        .filter((entry) => entry.key && entry.replacement)
+        .sort((a, b) => b.key.length - a.key.length);
+
+    normalizedReplacementEntries.forEach(({ key, replacement }) => {
+        replacedValue = replacedValue.replace(buildFragmentedTokenPattern(key), replacement);
+    });
+
+    return replacedValue;
+};
 
 const hasPendingTemplateHints = (value: string) => {
     const norm = normalizeLoose(stripHtml(String(value || '')));

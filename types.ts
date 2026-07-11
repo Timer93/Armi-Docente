@@ -37,6 +37,8 @@ export interface GeneralData {
   gemini_api_key?: string;
   openai_api_key?: string;
   ai_provider?: 'gemini' | 'openai';
+  gemini_model?: string;
+  openai_model?: string;
   ai_pedagogical_route?: string;
   ai_institutional_problems?: string;
   ai_unit_pedagogical_focus?: string;

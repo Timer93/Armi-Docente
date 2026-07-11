@@ -1,4 +1,6 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { fetchGeminiImageCapability, fetchGeminiTextModels, getDefaultModelForProvider, getFallbackModelOptions, type AiImageCapability, type AiModelOption } from '../../utils/aiModels';
+import type { AiUsageProgress } from '../../utils/aiUsage';
 
 const CustomDatePicker: React.FC<{
     value: string;
@@ -30,7 +32,7 @@ const CustomDatePicker: React.FC<{
     const monthNames = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
     const currentMonth = viewDate.getMonth();
     const currentYear = viewDate.getFullYear();
-    
+
     const days = [];
     const firstDay = new Date(currentYear, currentMonth, 1).getDay();
     const prevDaysCount = firstDay === 0 ? 6 : firstDay - 1;
@@ -56,9 +58,9 @@ const CustomDatePicker: React.FC<{
                     const isSelected = value === iso;
                     const isToday = new Date().toISOString().split('T')[0] === iso;
                     return (
-                        <button 
-                            key={i} 
-                            type="button" 
+                        <button
+                            key={i}
+                            type="button"
                             onClick={() => { onChange(iso); }}
                             className={`h-8 rounded-xl flex items-center justify-center text-[11px] transition-all font-bold ${isSelected ? 'bg-blue-600 text-white shadow-lg scale-110' : 'hover:bg-blue-50 text-slate-600'} ${isToday && !isSelected ? 'ring-2 ring-inset ring-blue-100' : ''} ${date.getDay() === 0 || date.getDay() === 6 ? 'text-red-500' : ''}`}
                         >
@@ -71,11 +73,28 @@ const CustomDatePicker: React.FC<{
     );
 };
 
-const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'warning'; onClose: () => void }> = ({ message, type, onClose }) => {
+const getToastDurationMs = ({
+    message,
+    type,
+    usage,
+}: {
+    message: string;
+    type: 'success' | 'error' | 'warning';
+    usage?: AiUsageProgress | null;
+}) => {
+    const base = type === 'success' ? 1800 : type === 'warning' ? 2400 : 2800;
+    const textWeight = Math.ceil(String(message || '').trim().length * 22);
+    const usageWeight = usage ? 500 : 0;
+    return Math.min(4000, Math.max(1600, base + textWeight + usageWeight));
+};
+
+const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'warning'; onClose: () => void; usage?: AiUsageProgress | null }> = ({ message, type, onClose, usage = null }) => {
+    const durationMs = getToastDurationMs({ message, type, usage });
+
     useEffect(() => {
-        const timer = setTimeout(onClose, 5000);
+        const timer = setTimeout(onClose, durationMs);
         return () => clearTimeout(timer);
-    }, [onClose]);
+    }, [durationMs, onClose]);
 
     const tone = type === 'success'
         ? {
@@ -105,6 +124,13 @@ const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'wa
         <div className="w-full animate-fly-in-right pointer-events-auto">
             <div className={`relative overflow-hidden rounded-[1.6rem] border backdrop-blur-xl transition-all ${tone.shell}`}>
                 <div className={`absolute inset-y-0 left-0 w-1.5 ${tone.stripe}`} aria-hidden="true" />
+                <div
+                    className={`absolute left-0 right-0 top-0 h-1 origin-left ${tone.stripe}`}
+                    style={{
+                        animation: `toast-progress-shrink ${durationMs}ms linear forwards`
+                    }}
+                    aria-hidden="true"
+                />
                 <div className="flex items-center gap-3 px-4 py-2.5 pl-5">
                     <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-lg font-black ${tone.iconWrap}`}>
                         {tone.icon}
@@ -116,6 +142,18 @@ const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'wa
                         <p className="mt-0.5 text-[12px] font-bold leading-5 break-words">
                             {message}
                         </p>
+                        {usage ? (
+                            <div className="mt-2">
+                                <div className="flex items-center justify-between text-[10px] font-black uppercase">
+                                    <span>Uso local IA hoy</span>
+                                    <span>{usage.label}</span>
+                                </div>
+                                <div className="mt-1 h-2 rounded-full bg-black/10 overflow-hidden">
+                                    <div className={`h-full rounded-full ${tone.stripe}`} style={{ width: `${usage.percent}%` }} />
+                                </div>
+                                <p className="mt-1 text-[9px] font-bold opacity-70">{usage.note}</p>
+                            </div>
+                        ) : null}
                     </div>
                     <button
                         onClick={onClose}
@@ -125,26 +163,75 @@ const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'wa
                         ×
                     </button>
                 </div>
+                <style>{`
+                    @keyframes toast-progress-shrink {
+                        from { transform: scaleX(1); }
+                        to { transform: scaleX(0); }
+                    }
+                `}</style>
             </div>
         </div>
     );
 };
 
 const AuthOverlay: React.FC<{
-    onSave: (key: string) => void;
+    onSave: (key: string, model: string) => void;
     onClose: () => void;
     isSaving: boolean;
-}> = ({ onSave, onClose, isSaving }) => {
-    const [inputKey, setInputKey] = useState('');
+    initialKey?: string;
+    initialModel?: string;
+}> = ({ onSave, onClose, isSaving, initialKey = '', initialModel = '' }) => {
+    const [inputKey, setInputKey] = useState(initialKey);
+    const [selectedModel, setSelectedModel] = useState(initialModel || getDefaultModelForProvider('gemini'));
+    const [modelOptions, setModelOptions] = useState<AiModelOption[]>(getFallbackModelOptions('gemini'));
+    const [isLoadingModels, setIsLoadingModels] = useState(false);
+    const [modelsMessage, setModelsMessage] = useState('');
+    const [imageCapability, setImageCapability] = useState<AiImageCapability>({ available: false, models: [], source: 'unknown' });
+
+    useEffect(() => {
+        let cancelled = false;
+        const loadModels = async () => {
+            const key = inputKey.trim();
+            if (!key) {
+                setModelsMessage('Ingresa una clave para cargar modelos actuales.');
+                return;
+            }
+            setIsLoadingModels(true);
+            setModelsMessage('');
+            try {
+                const options = await fetchGeminiTextModels(key);
+                const nextImageCapability = await fetchGeminiImageCapability(key);
+                if (cancelled) return;
+                setModelOptions(options);
+                setImageCapability(nextImageCapability);
+                if (!options.some((item) => item.id === selectedModel)) {
+                    setSelectedModel(options[0]?.id || getDefaultModelForProvider('gemini'));
+                }
+            } catch (error: any) {
+                if (cancelled) return;
+                const fallback = getFallbackModelOptions('gemini');
+                setModelOptions(fallback);
+                setImageCapability({ available: false, models: [], source: 'unknown' });
+                setModelsMessage(String(error?.message || 'No se pudieron cargar modelos actuales. Se usarán opciones seguras.'));
+                if (!fallback.some((item) => item.id === selectedModel)) {
+                    setSelectedModel(fallback[0]?.id || getDefaultModelForProvider('gemini'));
+                }
+            } finally {
+                if (!cancelled) setIsLoadingModels(false);
+            }
+        };
+        void loadModels();
+        return () => { cancelled = true; };
+    }, [inputKey, selectedModel]);
 
     return (
-        <div className="fixed inset-0 z-[5000] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
-            <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col md:flex-row">
+        <div className="fixed inset-0 z-[5000] flex items-start justify-center overflow-y-auto p-4 pt-10 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
+            <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col md:flex-row my-auto md:my-0">
                 <div className="bg-blue-600 w-full md:w-72 p-8 text-white flex flex-col justify-between">
                     <div>
                         <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center text-3xl mb-6 shadow-inner">🤖</div>
                         <h3 className="text-xl font-black uppercase tracking-tight leading-tight mb-4">Asistente IA Armi</h3>
-                        <p className="text-[10px] font-bold text-blue-100 leading-relaxed uppercase tracking-wider">Configura tu API key para completar sesiones automáticamente.</p>
+                        <p className="text-[10px] font-bold text-blue-100 leading-relaxed uppercase tracking-wider">Configura tu API key y el modelo actual para completar sesiones automáticamente.</p>
                     </div>
                     <div className="mt-8 space-y-4">
                         <div className="flex gap-3 items-start">
@@ -153,11 +240,11 @@ const AuthOverlay: React.FC<{
                         </div>
                         <div className="flex gap-3 items-start">
                             <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-[10px] font-black shrink-0">2</span>
-                            <p className="text-[9px] font-bold leading-tight uppercase">Pulsa "Create API Key".</p>
+                            <p className="text-[9px] font-bold leading-tight uppercase">Usa la misma clave para leer modelos disponibles.</p>
                         </div>
                         <div className="flex gap-3 items-start">
                             <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-[10px] font-black shrink-0">3</span>
-                            <p className="text-[9px] font-bold leading-tight uppercase">Pégala aquí y guarda.</p>
+                            <p className="text-[9px] font-bold leading-tight uppercase">Guarda la clave y el modelo que prefieras.</p>
                         </div>
                     </div>
                 </div>
@@ -185,14 +272,35 @@ const AuthOverlay: React.FC<{
                                 <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300">🔑</div>
                             </div>
                         </div>
+                        <div className="group">
+                            <label className="block text-[10px] font-black text-slate-500 mb-3 ml-1 uppercase tracking-widest">Modelo actual:</label>
+                            <select
+                                value={selectedModel}
+                                onChange={(e) => setSelectedModel(e.target.value)}
+                                className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-5 py-4 text-sm font-bold focus:border-blue-500 focus:bg-white transition-all outline-none shadow-inner"
+                            >
+                                {modelOptions.map((option) => (
+                                    <option key={option.id} value={option.id}>{option.label}</option>
+                                ))}
+                            </select>
+                            <div className="mt-2 flex items-center justify-between gap-3 text-[10px] font-bold uppercase">
+                                <span className="text-slate-400">{isLoadingModels ? 'Cargando modelos vigentes...' : 'Solo se muestran modelos de texto útiles y no preview.'}</span>
+                                {modelsMessage ? <span className="text-amber-600">{modelsMessage}</span> : null}
+                            </div>
+                            <p className={`mt-2 text-[10px] font-black uppercase ${imageCapability.available ? 'text-emerald-600' : 'text-slate-400'}`}>
+                                {imageCapability.available
+                                    ? `Imágenes detectadas: ${imageCapability.models.slice(0, 2).map((item) => item.label).join(', ')}${imageCapability.models.length > 2 ? '...' : ''}`
+                                    : 'Imágenes no detectadas con esta clave en este momento.'}
+                            </p>
+                        </div>
                         <div className="bg-amber-50 p-5 rounded-2xl border border-amber-100 flex gap-4">
                             <span className="text-xl shrink-0">🛡️</span>
-                            <p className="text-[10px] text-amber-700 font-bold leading-relaxed uppercase">La llave se guarda en tu configuración de datos generales.</p>
+                            <p className="text-[10px] text-amber-700 font-bold leading-relaxed uppercase">La llave y el modelo se guardan en tu configuración de datos generales.</p>
                         </div>
                     </div>
 
                     <button
-                        onClick={() => onSave(inputKey.trim())}
+                        onClick={() => onSave(inputKey.trim(), selectedModel)}
                         disabled={isSaving || inputKey.trim().length < 10}
                         className="mt-8 w-full py-4 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-black uppercase tracking-widest text-[10px] disabled:opacity-50"
                     >
@@ -204,7 +312,4 @@ const AuthOverlay: React.FC<{
     );
 };
 
-
-
 export { CustomDatePicker, InternalToast, AuthOverlay };
-

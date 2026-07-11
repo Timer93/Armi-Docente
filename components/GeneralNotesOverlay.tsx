@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import NotesIcon from "../src/Notes_Ico.svg";
 import EtiquetasIcon from "../src/Etiquetas_Ico.svg";
 import NotasButtonIcon from "../src/Notas_button.svg";
@@ -134,8 +134,9 @@ export const GeneralNotesOverlay: React.FC<GeneralNotesOverlayProps> = ({ visibl
   const [notesFilter, setNotesFilter] = useState<string>('all');
   const [newTagLabel, setNewTagLabel] = useState('');
   const [showTagInput, setShowTagInput] = useState(false);
-  const [activeBlockByNote, setActiveBlockByNote] = useState<Record<string, string>>({});
+  const [activeBlockByNote, setActiveBlockByNote] = useState<Record<string, string>>({}); 
   const blockTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const noteCardRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const [board, setBoard] = useState<StickyNotesBoardState>(() => {
     const initial = readStickyNotesBoardState();
@@ -151,6 +152,53 @@ export const GeneralNotesOverlay: React.FC<GeneralNotesOverlayProps> = ({ visibl
       notes: board.notes,
     }));
   }, [board]);
+
+  const resizeAllBlockTextareas = () => {
+    Object.values(blockTextareaRefs.current).forEach((element) => {
+      if (element) autoResizeBlockTextarea(element);
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!visible) return;
+    resizeAllBlockTextareas();
+  }, [visible, board.notes, notesFilter]);
+
+  useEffect(() => {
+    if (!visible) return;
+
+    resizeAllBlockTextareas();
+    const frameA = window.requestAnimationFrame(() => {
+      resizeAllBlockTextareas();
+      window.requestAnimationFrame(() => {
+        resizeAllBlockTextareas();
+      });
+    });
+    const timeout = window.setTimeout(() => {
+      resizeAllBlockTextareas();
+    }, 120);
+
+    return () => {
+      window.cancelAnimationFrame(frameA);
+      window.clearTimeout(timeout);
+    };
+  }, [visible, board.notes, notesFilter]);
+
+  useEffect(() => {
+    if (!visible || typeof window === 'undefined' || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(() => {
+      resizeAllBlockTextareas();
+    });
+
+    Object.values(noteCardRefs.current).forEach((element) => {
+      if (element) observer.observe(element);
+    });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [visible, board.notes, notesFilter]);
 
   if (!visible) return null;
 
@@ -554,6 +602,9 @@ export const GeneralNotesOverlay: React.FC<GeneralNotesOverlayProps> = ({ visibl
                   return (
                     <article
                       key={note.id}
+                      ref={(element) => {
+                        noteCardRefs.current[note.id] = element;
+                      }}
                       className="group relative mb-5 break-inside-avoid rounded-[1.55rem] border border-white/80 bg-white p-2.5 shadow-[0_16px_38px_rgba(15,23,42,0.08)] transition hover:-translate-y-1 hover:shadow-[0_22px_55px_rgba(15,23,42,0.14)]"
                       style={{ transform: `rotate(${rotation})` }}
                     >
@@ -665,11 +716,12 @@ export const GeneralNotesOverlay: React.FC<GeneralNotesOverlayProps> = ({ visibl
                                   onInput={(e) => autoResizeBlockTextarea(e.currentTarget)}
                                   placeholder={block.type === 'check' ? 'Escribe una tarea...' : 'Escribe un parrafo...'}
                                   rows={1}
-                                  className={`min-h-[24px] flex-1 resize-none overflow-hidden bg-transparent text-[12px] font-medium leading-[1.45] outline-none ${
+                                  className={`min-h-[24px] flex-1 resize-none overflow-hidden break-words whitespace-pre-wrap bg-transparent text-[12px] font-medium leading-[1.45] outline-none ${
                                     block.type === 'check' && block.checked
                                       ? 'text-slate-400 line-through'
                                       : 'text-slate-700'
                                   }`}
+                                  style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
                                 />
 
                                 <button

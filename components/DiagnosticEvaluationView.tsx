@@ -1,7 +1,8 @@
 ﻿
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { getEstudiantes, saveResultadosDiagnostico, getResultadosDiagnostico, deleteResultadosDiagnostico, getDatosGenerales, saveDatosGenerales, getCompetencias } from '../services/apiService';
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
+import { createGeminiClient, generateGeminiContent } from '../utils/gemini';
 import * as XLSX from 'xlsx';
 import Header from './Header';
 import EvaluationTable from './EvaluationTable';
@@ -432,13 +433,13 @@ export const DiagnosticEvaluationView: React.FC = () => {
     setToastData(null);
     
     try {
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = createGeminiClient(apiKey);
+      const preferredGeminiModel = String(generalData?.gemini_model || '').trim();
       
       // AHORA USA LA CONSTANTE PARA EL PROMPT
       const prompt = PROMPT_SISTEMA(headerInfo.area, competenciesList);
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
+      const response = await generateGeminiContent(ai, {
         contents: [{ parts: [{ text: prompt }] }],
         config: { 
           responseMimeType: "application/json", 
@@ -461,7 +462,7 @@ export const DiagnosticEvaluationView: React.FC = () => {
             required: ["conclusiones"]
           }
         }
-      });
+      }, preferredGeminiModel);
 
       if (!response.text) throw new Error("EMPTY_RESPONSE");
       

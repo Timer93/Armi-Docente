@@ -5,8 +5,9 @@ const Database = require('better-sqlite3');
 const dbPath = path.join(process.env.APPDATA, 'ARMI Docente', 'database', 'armi.db');
 const reportPath = path.join(process.cwd(), 'temp', 'crea-emprende-db-report-combined.json');
 
-const db = new Database(dbPath);
+const db = new Database(dbPath, { timeout: 20000 });
 db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 20000');
 
 const AREA_ID = '1774917929135';
 const COMPETENCY = 'GESTIONA PROYECTOS DE EMPRENDIMIENTO ECONÓMICO Y SOCIAL.';

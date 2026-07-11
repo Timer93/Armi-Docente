@@ -14,9 +14,13 @@ import {
     deleteUnidadDidactica
 } from '../services/apiService';
 import { Select } from './Select';
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
 import { UnitTemplateMergeView } from './UnitTemplateMergeView';
 import { readStoredViewSelection, writeStoredViewSelection } from '../utils/viewSelectionStorage';
+import { createGeminiClient, generateGeminiContent, generateGeminiContentStream } from '../utils/gemini';
+import { fetchGeminiImageCapability, fetchGeminiTextModels, fetchOpenAIImageCapability, fetchOpenAITextModels, getDefaultModelForProvider, getFallbackModelOptions, type AiImageCapability, type AiModelOption } from '../utils/aiModels';
+import { getAiUsageProgress, registerAiUsage, type AiUsageProgress } from '../utils/aiUsage';
+import { classifyAiIssue } from '../utils/aiErrors';
 
 interface Props {
   activeSection: string;
@@ -271,7 +275,7 @@ const groupRows = (base: any[], estandares: any[]) => {
     });
 };
 
-const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'warning'; onClose: () => void }> = ({ message, type, onClose }) => {
+const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'warning'; onClose: () => void; usage?: AiUsageProgress | null }> = ({ message, type, onClose, usage = null }) => {
     useEffect(() => {
         const timer = setTimeout(onClose, 5000);
         return () => clearTimeout(timer);
@@ -289,6 +293,18 @@ const InternalToast: React.FC<{ message: string; type: 'success' | 'error' | 'wa
                 <div className="flex flex-col flex-1 min-w-0">
                     <span className="text-[10px] font-black uppercase tracking-[0.3em] opacity-70 mb-1">IA Armi Docente</span>
                     <p className="text-xs font-bold leading-tight uppercase tracking-tight break-words">{message}</p>
+                    {usage ? (
+                        <div className="mt-3">
+                            <div className="flex items-center justify-between text-[10px] font-black uppercase opacity-80">
+                                <span>Uso local IA hoy</span>
+                                <span>{usage.label}</span>
+                            </div>
+                            <div className="mt-1 h-2 rounded-full bg-white/20 overflow-hidden">
+                                <div className="h-full rounded-full bg-white transition-all" style={{ width: `${usage.percent}%` }} />
+                            </div>
+                            <p className="mt-1 text-[9px] font-bold opacity-75">{usage.note}</p>
+                        </div>
+                    ) : null}
                 </div>
                 <button onClick={onClose} className="w-8 h-8 rounded-full hover:bg-black/10 flex items-center justify-center transition-colors text-lg shrink-0">✕</button>
             </div>
@@ -302,6 +318,8 @@ const AuthOverlay: React.FC<{
         provider: 'gemini' | 'openai';
         geminiKey: string;
         openaiKey: string;
+        geminiModel: string;
+        openaiModel: string;
         aiPedagogicalRoute: string;
         institutionalProblems: string;
         unitPedagogicalFocus: string;
@@ -311,6 +329,8 @@ const AuthOverlay: React.FC<{
     initialProvider?: 'gemini' | 'openai';
     initialGeminiKey?: string;
     initialOpenAIKey?: string;
+    initialGeminiModel?: string;
+    initialOpenAIModel?: string;
     initialAiPedagogicalRoute?: string;
     initialInstitutionalProblems?: string;
     initialUnitPedagogicalFocus?: string;
@@ -321,6 +341,8 @@ const AuthOverlay: React.FC<{
     initialProvider = 'gemini',
     initialGeminiKey = '',
     initialOpenAIKey = '',
+    initialGeminiModel = '',
+    initialOpenAIModel = '',
     initialAiPedagogicalRoute = '',
     initialInstitutionalProblems = '',
     initialUnitPedagogicalFocus = ''
@@ -328,10 +350,73 @@ const AuthOverlay: React.FC<{
     const [provider, setProvider] = useState<'gemini' | 'openai'>(initialProvider);
     const [inputKey, setInputKey] = useState(initialGeminiKey);
     const [openaiKey, setOpenaiKey] = useState(initialOpenAIKey);
+    const [geminiModel, setGeminiModel] = useState(initialGeminiModel || getDefaultModelForProvider('gemini'));
+    const [openaiModel, setOpenaiModel] = useState(initialOpenAIModel || getDefaultModelForProvider('openai'));
+    const [geminiModelOptions, setGeminiModelOptions] = useState<AiModelOption[]>(getFallbackModelOptions('gemini'));
+    const [openaiModelOptions, setOpenaiModelOptions] = useState<AiModelOption[]>(getFallbackModelOptions('openai'));
+    const [isLoadingModels, setIsLoadingModels] = useState(false);
+    const [modelsMessage, setModelsMessage] = useState('');
+    const [imageCapability, setImageCapability] = useState<AiImageCapability>({ available: false, models: [], source: 'unknown' });
     const [aiPedagogicalRoute, setAiPedagogicalRoute] = useState(initialAiPedagogicalRoute);
     const [institutionalProblems, setInstitutionalProblems] = useState(initialInstitutionalProblems);
     const [unitPedagogicalFocus, setUnitPedagogicalFocus] = useState(initialUnitPedagogicalFocus);
     const canSave = provider === 'gemini' ? !!inputKey.trim() : !!openaiKey.trim();
+
+    useEffect(() => {
+        let cancelled = false;
+        const loadModels = async () => {
+            const activeKey = provider === 'gemini' ? inputKey.trim() : openaiKey.trim();
+            if (!activeKey) {
+                setModelsMessage('Ingresa una clave para cargar modelos actuales.');
+                return;
+            }
+
+            setIsLoadingModels(true);
+            setModelsMessage('');
+            try {
+                const options = provider === 'gemini'
+                    ? await fetchGeminiTextModels(activeKey)
+                    : await fetchOpenAITextModels(activeKey);
+                const nextImageCapability = provider === 'gemini'
+                    ? await fetchGeminiImageCapability(activeKey)
+                    : await fetchOpenAIImageCapability(activeKey);
+                if (cancelled) return;
+                setImageCapability(nextImageCapability);
+                if (provider === 'gemini') {
+                    setGeminiModelOptions(options);
+                    if (!options.some((item) => item.id === geminiModel)) {
+                        setGeminiModel(options[0]?.id || getDefaultModelForProvider('gemini'));
+                    }
+                } else {
+                    setOpenaiModelOptions(options);
+                    if (!options.some((item) => item.id === openaiModel)) {
+                        setOpenaiModel(options[0]?.id || getDefaultModelForProvider('openai'));
+                    }
+                }
+            } catch (error: any) {
+                if (cancelled) return;
+                setModelsMessage(String(error?.message || 'No se pudieron cargar modelos actuales. Se usarán opciones seguras.'));
+                setImageCapability({ available: false, models: [], source: 'unknown' });
+                if (provider === 'gemini') {
+                    const fallback = getFallbackModelOptions('gemini');
+                    setGeminiModelOptions(fallback);
+                    if (!fallback.some((item) => item.id === geminiModel)) {
+                        setGeminiModel(fallback[0]?.id || getDefaultModelForProvider('gemini'));
+                    }
+                } else {
+                    const fallback = getFallbackModelOptions('openai');
+                    setOpenaiModelOptions(fallback);
+                    if (!fallback.some((item) => item.id === openaiModel)) {
+                        setOpenaiModel(fallback[0]?.id || getDefaultModelForProvider('openai'));
+                    }
+                }
+            } finally {
+                if (!cancelled) setIsLoadingModels(false);
+            }
+        };
+        void loadModels();
+        return () => { cancelled = true; };
+    }, [provider, inputKey, openaiKey]);
 
     return (
         <div className="fixed inset-0 z-[5000] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
@@ -413,6 +498,27 @@ const AuthOverlay: React.FC<{
                                 <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300">AI</div>
                             </div>
                         </div>
+                        <div className="group">
+                            <label className="block text-[10px] font-black text-slate-500 mb-3 ml-1 uppercase tracking-widest">Modelo actual:</label>
+                            <select
+                                value={provider === 'gemini' ? geminiModel : openaiModel}
+                                onChange={(e) => provider === 'gemini' ? setGeminiModel(e.target.value) : setOpenaiModel(e.target.value)}
+                                className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-5 py-4 text-sm font-bold focus:border-blue-500 focus:bg-white transition-all outline-none shadow-inner"
+                            >
+                                {(provider === 'gemini' ? geminiModelOptions : openaiModelOptions).map((option) => (
+                                    <option key={option.id} value={option.id}>{option.label}</option>
+                                ))}
+                            </select>
+                            <div className="mt-2 flex items-center justify-between gap-3 text-[10px] font-bold uppercase">
+                                <span className="text-slate-400">{isLoadingModels ? 'Cargando modelos vigentes...' : 'Solo se muestran modelos de texto útiles y no preview.'}</span>
+                                {modelsMessage ? <span className="text-amber-600">{modelsMessage}</span> : null}
+                            </div>
+                            <p className={`mt-2 text-[10px] font-black uppercase ${imageCapability.available ? 'text-emerald-600' : 'text-slate-400'}`}>
+                                {imageCapability.available
+                                    ? `Imágenes detectadas: ${imageCapability.models.slice(0, 2).map((item) => item.label).join(', ')}${imageCapability.models.length > 2 ? '...' : ''}`
+                                    : 'Imágenes no detectadas con esta clave en este momento.'}
+                            </p>
+                        </div>
                         <div className="grid grid-cols-1 gap-4">
                             <div>
                                 <label className="block text-[10px] font-black text-slate-500 mb-3 ml-1 uppercase tracking-widest">
@@ -459,6 +565,8 @@ const AuthOverlay: React.FC<{
                             provider,
                             geminiKey: inputKey.trim(),
                             openaiKey: openaiKey.trim(),
+                            geminiModel,
+                            openaiModel,
                             aiPedagogicalRoute: aiPedagogicalRoute.trim(),
                             institutionalProblems: institutionalProblems.trim(),
                             unitPedagogicalFocus: unitPedagogicalFocus.trim()
@@ -493,7 +601,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [isGeneratingIA, setIsGeneratingIA] = useState(false);
     const [showCompSelector, setShowCompSelector] = useState(false);
     const [showTemplateMode, setShowTemplateMode] = useState(false);
-    const [toast, setToast] = useState<{ msg: string, type: 'success' | 'error' | 'warning' } | null>(null);
+    const [toast, setToast] = useState<{ msg: string, type: 'success' | 'error' | 'warning', usage?: AiUsageProgress | null } | null>(null);
     const [hasStoredUnits, setHasStoredUnits] = useState(false);
     const [assignmentsLoaded, setAssignmentsLoaded] = useState(false);
     const [isManageUnitsModalOpen, setIsManageUnitsModalOpen] = useState(false);
@@ -509,6 +617,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
     // Added missing state variables for API key auth
     const [showAuthScreen, setShowAuthScreen] = useState(false);
+    const [aiUsageProgress, setAiUsageProgress] = useState<AiUsageProgress>(() => getAiUsageProgress());
     const [savingKey, setSavingKey] = useState(false);
     
     const [unitData, setUnitData] = useState<any>({
@@ -1078,7 +1187,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         if (persistedCriteriaTexts.length > 0) {
             criteriaItems.length = 0;
             criteriaText = '';
-            persistedCriteriaTexts.forEach((text, idx) => {
+            persistedCriteriaTexts.forEach((text: string, idx: number) => {
                 const line = `${persistedCriteriaTexts.length > 1 ? '• ' : '• '}${text}`.trim();
                 criteriaItems.push({ text: line, color: AREA_TEXT_COLOR });
                 criteriaText += `${line}${idx < persistedCriteriaTexts.length - 1 ? '\n' : ''}`;
@@ -1397,6 +1506,8 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         provider: 'gemini' | 'openai';
         geminiKey: string;
         openaiKey: string;
+        geminiModel: string;
+        openaiModel: string;
         aiPedagogicalRoute: string;
         institutionalProblems: string;
         unitPedagogicalFocus: string;
@@ -1409,6 +1520,8 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 gemini_api_key: config.geminiKey,
                 openai_api_key: config.openaiKey,
                 ai_provider: config.provider,
+                gemini_model: config.geminiModel,
+                openai_model: config.openaiModel,
                 ai_pedagogical_route: config.aiPedagogicalRoute,
                 ai_institutional_problems: config.institutionalProblems,
                 ai_unit_pedagogical_focus: config.unitPedagogicalFocus
@@ -1522,7 +1635,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         throw new Error('OpenAI no devolvio texto utilizable.');
     };
 
-    const requestOpenAIJson = async (apiKey: string, prompt: string) => {
+    const requestOpenAIJson = async (apiKey: string, prompt: string, model: string) => {
         const res = await fetch('https://api.openai.com/v1/responses', {
             method: 'POST',
             headers: {
@@ -1530,7 +1643,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify({
-                model: 'gpt-4.1-mini',
+                model,
                 input: prompt
             })
         });
@@ -1541,7 +1654,10 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             throw new Error(message);
         }
 
-        return JSON.parse(extractJsonBlock(getOpenAIOutputText(payload)));
+        return {
+            data: JSON.parse(extractJsonBlock(getOpenAIOutputText(payload))),
+            totalTokens: Number(payload?.usage?.total_tokens || 0)
+        };
     };
 
     const normalizeInstrumentInternal = (inst: string) => {
@@ -1561,6 +1677,8 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         }
 
         const aiProvider = generalData?.ai_provider || 'gemini';
+        const preferredOpenAIModel = String(generalData?.openai_model || getDefaultModelForProvider('openai')).trim();
+        const preferredGeminiModel = String(generalData?.gemini_model || getDefaultModelForProvider('gemini')).trim();
         const apiKey = aiProvider === 'openai'
             ? (generalData?.openai_api_key || '').trim()
             : (generalData?.gemini_api_key || process.env.API_KEY || '').trim();
@@ -1582,7 +1700,8 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         activeTypingTasks.current.clear();
 
         try {
-            const ai = aiProvider === 'gemini' ? new GoogleGenAI({ apiKey }) : null;
+            const ai = aiProvider === 'gemini' ? createGeminiClient(apiKey) : null;
+            let totalTokensUsed = 0;
             const areaRows = activeComps.flatMap(g => g.rows);
             const transRows = groupedTransversales.flatMap(g => g.rows);
             const aiPedagogicalRoute = String((generalData as any)?.ai_pedagogical_route || '').trim();
@@ -1610,15 +1729,19 @@ ${aiExtraContext}
 
 Devuelve SOLO JSON: {"purpose": "...", "product": "...", "situation": "..."}`;
             if (aiProvider === 'openai') {
-                const step1Data = await requestOpenAIJson(apiKey, step1Prompt);
+                const step1Result = await requestOpenAIJson(apiKey, step1Prompt, preferredOpenAIModel);
+                totalTokensUsed += step1Result.totalTokens;
+                const step1Data = step1Result.data;
                 if (step1Data?.purpose) startTypingField('purpose', step1Data.purpose, purposeRef);
                 if (step1Data?.product) startTypingField('product', step1Data.product, productRef);
                 if (step1Data?.situation) startTypingField('situation', step1Data.situation, situationRef);
             } else if (ai) {
-                const step1Stream = await ai.models.generateContentStream({ model: 'gemini-3-flash-preview', contents: [{ parts: [{ text: step1Prompt }] }] });
+                const step1Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: step1Prompt }] }] }, preferredGeminiModel);
                 let fullStep1 = "";
+                let step1Tokens = 0;
                 for await (const chunk of step1Stream) {
                     fullStep1 += chunk.text;
+                    step1Tokens = Number(chunk?.usageMetadata?.totalTokenCount || step1Tokens || 0);
                     const p = extractStreamingValue(fullStep1, "purpose");
                     const pr = extractStreamingValue(fullStep1, "product");
                     const s = extractStreamingValue(fullStep1, "situation");
@@ -1626,6 +1749,7 @@ Devuelve SOLO JSON: {"purpose": "...", "product": "...", "situation": "..."}`;
                     if (pr) startTypingField('product', pr, productRef);
                     if (s) startTypingField('situation', s, situationRef);
                 }
+                totalTokensUsed += step1Tokens;
             }
 
             if (matrixRef.current) matrixRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1641,7 +1765,9 @@ Reglas:
 
 Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "instrumento": "..."}]}`;
             if (aiProvider === 'openai') {
-                const step2Data = await requestOpenAIJson(apiKey, promptEvaluacion);
+                const step2Result = await requestOpenAIJson(apiKey, promptEvaluacion, preferredOpenAIModel);
+                totalTokensUsed += step2Result.totalTokens;
+                const step2Data = step2Result.data;
                 const evaluaciones = Array.isArray(step2Data?.evaluaciones) ? step2Data.evaluaciones : [];
                 areaRows.forEach((row, i) => {
                     const item = evaluaciones[i] || {};
@@ -1656,10 +1782,12 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
                     if (item.instrumento) handleInputChange('instrumentosTrans', row.originalIdx.toString(), normalizeInstrumentInternal(item.instrumento));
                 });
             } else if (ai) {
-                const step2Stream = await ai.models.generateContentStream({ model: 'gemini-3-flash-preview', contents: [{ parts: [{ text: promptEvaluacion }] }] });
+                const step2Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: promptEvaluacion }] }] }, preferredGeminiModel);
                 let fullStep2 = "";
+                let step2Tokens = 0;
                 for await (const chunk of step2Stream) {
                     fullStep2 += chunk.text;
+                    step2Tokens = Number(chunk?.usageMetadata?.totalTokenCount || step2Tokens || 0);
                     areaRows.forEach((row, i) => {
                         const c = extractStreamingNthValue(fullStep2, "criterio", i);
                         const e = extractStreamingNthValue(fullStep2, "evidencia", i);
@@ -1678,6 +1806,7 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
                         if (inst) handleInputChange('instrumentosTrans', row.originalIdx.toString(), normalizeInstrumentInternal(inst));
                     });
                 }
+                totalTokensUsed += step2Tokens;
             }
 
             if (sessionsTableRef.current) sessionsTableRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1734,13 +1863,15 @@ Reglas:
 
             let aiAssignments: Array<{ areaIndex?: number; transversalIndexes?: number[] }> = [];
             if (aiProvider === 'openai') {
-                const assignmentData = await requestOpenAIJson(apiKey, assignmentPrompt);
+                const assignmentResult = await requestOpenAIJson(apiKey, assignmentPrompt, preferredOpenAIModel);
+                totalTokensUsed += assignmentResult.totalTokens;
+                const assignmentData = assignmentResult.data;
                 aiAssignments = Array.isArray(assignmentData?.sesiones) ? assignmentData.sesiones : [];
             } else if (ai) {
-                const assignmentResponse = await ai.models.generateContent({
-                    model: 'gemini-3-flash-preview',
+                const assignmentResponse = await generateGeminiContent(ai, {
                     contents: [{ parts: [{ text: assignmentPrompt }] }]
-                });
+                }, preferredGeminiModel);
+                totalTokensUsed += Number(assignmentResponse?.usageMetadata?.totalTokenCount || 0);
                 const assignmentText = assignmentResponse.text || '';
                 const assignmentData = JSON.parse(extractJsonBlock(assignmentText));
                 aiAssignments = Array.isArray(assignmentData?.sesiones) ? assignmentData.sesiones : [];
@@ -1792,7 +1923,9 @@ Reglas:
             Devuelve SOLO JSON: {"sesiones": [{"title": "...", "con": "..."}]}`;
 
             if (aiProvider === 'openai') {
-                const step3Data = await requestOpenAIJson(apiKey, step3Prompt);
+                const step3Result = await requestOpenAIJson(apiKey, step3Prompt, preferredOpenAIModel);
+                totalTokensUsed += step3Result.totalTokens;
+                const step3Data = step3Result.data;
                 const sesiones = Array.isArray(step3Data?.sesiones) ? step3Data.sesiones : [];
                 updatedState.sesiones.forEach((s: any, i: number) => {
                     const item = sesiones[i] || {};
@@ -1800,10 +1933,12 @@ Reglas:
                     if (item.con) startTypingField(`sesiones.${i}.con`, item.con, { current: sessionFieldRefs.current[`con-${s.id}`] });
                 });
             } else if (ai) {
-                const step3Stream = await ai.models.generateContentStream({ model: 'gemini-3-flash-preview', contents: [{ parts: [{ text: step3Prompt }] }] });
+                const step3Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: step3Prompt }] }] }, preferredGeminiModel);
                 let fullStep3 = "";
+                let step3Tokens = 0;
                 for await (const chunk of step3Stream) {
                     fullStep3 += chunk.text;
+                    step3Tokens = Number(chunk?.usageMetadata?.totalTokenCount || step3Tokens || 0);
                     updatedState.sesiones.forEach((s:any, i:number) => {
                         const title = extractStreamingNthValue(fullStep3, "title", i);
                         const con = extractStreamingNthValue(fullStep3, "con", i);
@@ -1811,11 +1946,22 @@ Reglas:
                         if (con) startTypingField(`sesiones.${i}.con`, con, { current: sessionFieldRefs.current[`con-${s.id}`] });
                     });
                 }
+                totalTokensUsed += step3Tokens;
             }
 
             setIsDirty(true);
-            setToast({ msg: "✨ IA Armi completó la unidad correctamente.", type: 'success' });
+            registerAiUsage(aiProvider, 'unit_plan', totalTokensUsed);
+            const nextUsage = getAiUsageProgress();
+            setAiUsageProgress(nextUsage);
+            setToast({ msg: "✨ IA Armi completó la unidad correctamente.", type: 'success', usage: nextUsage });
         } catch (e: any) {
+            const issue = classifyAiIssue(e);
+            if (issue.kind === 'auth') setShowAuthScreen(true);
+            if (issue.kind === 'quota_minute' || issue.kind === 'quota_daily' || issue.kind === 'quota_general' || issue.kind === 'saturation' || issue.kind === 'malformed_json' || issue.kind === 'empty_response' || issue.kind === 'model_access') {
+                const toastType = issue.kind === 'quota_minute' || issue.kind === 'quota_daily' || issue.kind === 'quota_general' || issue.kind === 'saturation' ? 'warning' : 'error';
+                setToast({ msg: `${toastType === 'warning' ? "Aviso:" : "Error:"} ${issue.userMessage}`, type: toastType });
+                return;
+            }
             const msg = String(e?.message || "");
             if (msg.includes("overloaded") || msg.includes("503") || msg.includes("UNAVAILABLE")) {
                 setToast({ msg: "⚠️ El modelo está saturado, intenta en unos minutos.", type: 'warning' });
@@ -2033,7 +2179,7 @@ const handleFillDefaultBiblio = () => {
 
             {typeof document !== 'undefined' && toast && createPortal(
                 <div className="fixed top-10 right-10 z-[2147483000] w-full max-w-md pointer-events-none">
-                    <InternalToast message={toast.msg} type={toast.type} onClose={() => setToast(null)} />
+                    <InternalToast message={toast.msg} type={toast.type} usage={toast.usage} onClose={() => setToast(null)} />
                 </div>,
                 document.body
             )}
@@ -2047,6 +2193,8 @@ const handleFillDefaultBiblio = () => {
                     initialProvider={generalData?.ai_provider || 'gemini'}
                     initialGeminiKey={generalData?.gemini_api_key || ''}
                     initialOpenAIKey={generalData?.openai_api_key || ''}
+                    initialGeminiModel={generalData?.gemini_model || ''}
+                    initialOpenAIModel={generalData?.openai_model || ''}
                     initialAiPedagogicalRoute={(generalData as any)?.ai_pedagogical_route || ''}
                     initialInstitutionalProblems={(generalData as any)?.ai_institutional_problems || ''}
                     initialUnitPedagogicalFocus={(generalData as any)?.ai_unit_pedagogical_focus || ''}
@@ -2087,10 +2235,10 @@ const handleFillDefaultBiblio = () => {
 
             <div className="text-white p-7 rounded-[3rem] shadow-2xl relative z-[100] overflow-visible" style={{ backgroundColor: themeColor }}>
                 <div className="flex flex-col lg:flex-row items-center gap-6 mb-8">
-                    <div className="flex items-center gap-5"><div className="bg-white/20 p-4 rounded-3xl border border-white/30 shadow-inner backdrop-blur-md"><span className="text-4xl drop-shadow-lg">📗</span></div><div className="flex flex-col"><h1 className="text-4xl font-black italic font-serif tracking-tight uppercase leading-none">Unidades Didácticas {year}</h1><span className="text-[10px] font-black uppercase tracking-[0.4em] text-orange-200 mt-2">Planificación de Unidades - {currentBimesterRoman} Bimestre</span></div></div>
+                    <div className="flex items-center gap-5"><div className="bg-white/20 p-4 rounded-3xl border border-white/30 shadow-inner backdrop-blur-md"><span className="text-4xl drop-shadow-lg">📗</span></div><div className="flex flex-col"><h1 className="text-3xl font-black italic font-serif tracking-tight uppercase leading-none">Unidades Didácticas {year}</h1><span className="text-[10px] font-black uppercase tracking-[0.4em] text-orange-200 mt-2">Planificación de Unidades - {currentBimesterRoman} Bimestre</span></div></div>
                     <div className="bg-white/20 p-3 rounded-[3rem] border border-white/30 shadow-inner backdrop-blur-md flex gap-3 relative z-[120] ml-auto lg:ml-40">
                         <div className="relative shrink-0">
-                            <button onClick={handleGenerateAI} disabled={!headerFilled || isGeneratingIA} className={`btn-3d-purple shrink-0 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`} title="Completar con IA Armi">{isGeneratingIA ? <span className="text-xl">⌛</span> : <span className="text-lg">🤖</span>}</button>
+                            <button onClick={handleGenerateAI} disabled={!headerFilled || isGeneratingIA} className={`btn-3d-purple shrink-0 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`} title={`Completar con IA Armi\n${aiUsageProgress.tokenLabel}`}>{isGeneratingIA ? <span className="text-xl">⌛</span> : <span className="text-lg">🤖</span>}</button>
                             <button type="button" onClick={() => setShowAuthScreen(true)} className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-white text-slate-700 border border-slate-200 shadow-lg hover:bg-slate-50 flex items-center justify-center text-[10px] font-black" title="Configuración de IA">⚙</button>
                         </div>
                         <button onClick={handleSave} disabled={!headerFilled} className={`btn-3d-plus shrink-0 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : ''}`} title="Guardar Unidad"><span>+</span></button>

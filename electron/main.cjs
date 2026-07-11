@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain } = require('electron');
 const { createUpdaterController } = require('./updater.cjs');
 
 const appRoot = path.resolve(__dirname, '..');
@@ -56,6 +56,53 @@ const waitForServer = async (url, timeoutMs = 30000) => {
   return false;
 };
 
+const showEditableContextMenu = (mainWindow, params) => {
+  const template = [];
+  const suggestions = Array.isArray(params?.dictionarySuggestions)
+    ? params.dictionarySuggestions.filter(Boolean).slice(0, 6)
+    : [];
+  const misspelledWord = String(params?.misspelledWord || '').trim();
+  const canSpellcheck = typeof mainWindow?.webContents?.replaceMisspelling === 'function';
+
+  if (misspelledWord && suggestions.length > 0 && canSpellcheck) {
+    suggestions.forEach((suggestion) => {
+      template.push({
+        label: suggestion,
+        click: () => {
+          if (!mainWindow.isDestroyed()) {
+            mainWindow.webContents.replaceMisspelling(suggestion);
+          }
+        },
+      });
+    });
+    template.push({ type: 'separator' });
+  }
+
+  if (misspelledWord && canSpellcheck && typeof mainWindow?.webContents?.session?.addWordToSpellCheckerDictionary === 'function') {
+    template.push({
+      label: 'Agregar al diccionario',
+      click: () => {
+        if (!mainWindow.isDestroyed()) {
+          mainWindow.webContents.session.addWordToSpellCheckerDictionary(misspelledWord);
+        }
+      },
+    });
+    template.push({ type: 'separator' });
+  }
+
+  template.push(
+    { role: 'undo', enabled: !!params?.editFlags?.canUndo },
+    { role: 'redo', enabled: !!params?.editFlags?.canRedo },
+    { type: 'separator' },
+    { role: 'cut', enabled: !!params?.editFlags?.canCut },
+    { role: 'copy', enabled: !!params?.editFlags?.canCopy },
+    { role: 'paste', enabled: !!params?.editFlags?.canPaste },
+    { role: 'selectAll' }
+  );
+
+  Menu.buildFromTemplate(template).popup({ window: mainWindow });
+};
+
 const createMainWindow = async () => {
   const appIconPath = getAppIconPath();
 
@@ -75,6 +122,7 @@ const createMainWindow = async () => {
       contextIsolation: true,
       nodeIntegration: false,
       preload: path.join(__dirname, 'preload.cjs'),
+      spellcheck: true,
     },
   });
 
@@ -117,6 +165,11 @@ const createMainWindow = async () => {
 
   mainWindow.webContents.once('did-finish-load', () => {
     ensureWindowVisible('did-finish-load');
+  });
+
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    if (!params?.isEditable) return;
+    showEditableContextMenu(mainWindow, params);
   });
 
   setTimeout(() => {

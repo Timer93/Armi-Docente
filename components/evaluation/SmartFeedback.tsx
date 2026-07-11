@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { GoogleGenAI } from "@google/genai";
+import { createGeminiClient, generateGeminiContent } from '../../utils/gemini';
 
 export const SmartFeedback: React.FC = () => {
   const [prompt, setPrompt] = useState('');
@@ -11,9 +11,8 @@ export const SmartFeedback: React.FC = () => {
     if (!prompt) return;
     setIsLoading(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+      const ai = createGeminiClient(process.env.GEMINI_API_KEY || '');
+      const response = await generateGeminiContent(ai, {
         contents: `Como docente experto, genera una retroalimentación constructiva y sugerencias de mejora para un estudiante con el siguiente desempeño: ${prompt}. La respuesta debe ser en formato JSON con campos: feedback (mensaje para el estudiante), suggestions (lista de 3 puntos de mejora) y risk_level (bajo, medio, alto).`,
         config: { responseMimeType: "application/json" }
       });

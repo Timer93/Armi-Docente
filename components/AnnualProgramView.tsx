@@ -1,7 +1,7 @@
 ﻿
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
-import { GoogleGenAI } from '@google/genai';
+import { createGeminiClient, generateGeminiContentStream } from '../utils/gemini';
 import { DiagnosticEvaluationView } from './DiagnosticEvaluationView';
 import { GeneralData, TeachingAssignment, Student, ScheduleEntry, MetaData, EvaluationLevel } from '../types';
 import { 
@@ -24,6 +24,9 @@ import { INITIAL_GENERAL_DATA } from '../constants';
 import { Select } from './Select';
 import { TemplateMergeView } from './TemplateMergeView'; 
 import { readStoredViewSelection, writeStoredViewSelection } from '../utils/viewSelectionStorage';
+import { fetchGeminiImageCapability, fetchGeminiTextModels, fetchOpenAIImageCapability, fetchOpenAITextModels, getDefaultModelForProvider, getFallbackModelOptions, type AiImageCapability, type AiModelOption } from '../utils/aiModels';
+import { getAiUsageProgress, registerAiUsage, type AiUsageProgress } from '../utils/aiUsage';
+import { classifyAiIssue } from '../utils/aiErrors';
 
 const superNormalize = (str: string) => {
     if (!str) return "";
@@ -242,7 +245,7 @@ const identifyManagementBlocks = (calendarMap: Record<string, string>) => {
     return blocks;
 };
 
-const InternalToast: React.FC<{ message: string; type: 'success' | 'error'; onClose: () => void }> = ({ message, type, onClose }) => {
+const InternalToast: React.FC<{ message: string; type: 'success' | 'error'; onClose: () => void; usage?: AiUsageProgress | null }> = ({ message, type, onClose, usage = null }) => {
     useEffect(() => {
         const timer = setTimeout(onClose, 5000);
         return () => clearTimeout(timer);
@@ -257,6 +260,18 @@ const InternalToast: React.FC<{ message: string; type: 'success' | 'error'; onCl
                 <div className="flex flex-col pr-4 border-r border-white/20 min-w-0 flex-1">
                     <span className="text-[10px] font-black uppercase tracking-[0.3em] opacity-70 leading-none mb-1.5">ARMI Docente</span>
                     <p className="text-sm font-black leading-tight tracking-tight uppercase whitespace-pre-wrap">{message}</p>
+                    {usage ? (
+                        <div className="mt-3">
+                            <div className="flex items-center justify-between text-[10px] font-black uppercase opacity-80">
+                                <span>Uso local IA hoy</span>
+                                <span>{usage.label}</span>
+                            </div>
+                            <div className="mt-1 h-2 rounded-full bg-white/20 overflow-hidden">
+                                <div className="h-full rounded-full bg-white transition-all" style={{ width: `${usage.percent}%` }} />
+                            </div>
+                            <p className="mt-1 text-[9px] font-bold opacity-75">{usage.note}</p>
+                        </div>
+                    ) : null}
                 </div>
                 <button onClick={onClose} className="w-10 h-10 rounded-full hover:bg-black/10 flex items-center justify-center transition-colors text-xl shrink-0">✕</button>
             </div>
@@ -300,6 +315,8 @@ const AuthOverlay: React.FC<{
         provider: 'gemini' | 'openai';
         geminiKey: string;
         openaiKey: string;
+        geminiModel: string;
+        openaiModel: string;
         aiPedagogicalRoute: string;
         institutionalProblems: string;
         unitPedagogicalFocus: string;
@@ -309,6 +326,8 @@ const AuthOverlay: React.FC<{
     initialProvider?: 'gemini' | 'openai';
     initialGeminiKey?: string;
     initialOpenAIKey?: string;
+    initialGeminiModel?: string;
+    initialOpenAIModel?: string;
     initialAiPedagogicalRoute?: string;
     initialInstitutionalProblems?: string;
     initialUnitPedagogicalFocus?: string;
@@ -319,6 +338,8 @@ const AuthOverlay: React.FC<{
     initialProvider = 'gemini',
     initialGeminiKey = '',
     initialOpenAIKey = '',
+    initialGeminiModel = '',
+    initialOpenAIModel = '',
     initialAiPedagogicalRoute = '',
     initialInstitutionalProblems = '',
     initialUnitPedagogicalFocus = ''
@@ -326,10 +347,74 @@ const AuthOverlay: React.FC<{
     const [provider, setProvider] = useState<'gemini' | 'openai'>(initialProvider);
     const [geminiKey, setGeminiKey] = useState(initialGeminiKey);
     const [openaiKey, setOpenaiKey] = useState(initialOpenAIKey);
+    const [geminiModel, setGeminiModel] = useState(initialGeminiModel || getDefaultModelForProvider('gemini'));
+    const [openaiModel, setOpenaiModel] = useState(initialOpenAIModel || getDefaultModelForProvider('openai'));
+    const [geminiModelOptions, setGeminiModelOptions] = useState<AiModelOption[]>(getFallbackModelOptions('gemini'));
+    const [openaiModelOptions, setOpenaiModelOptions] = useState<AiModelOption[]>(getFallbackModelOptions('openai'));
+    const [isLoadingModels, setIsLoadingModels] = useState(false);
+    const [modelsMessage, setModelsMessage] = useState('');
+    const [imageCapability, setImageCapability] = useState<AiImageCapability>({ available: false, models: [], source: 'unknown' });
     const [aiPedagogicalRoute, setAiPedagogicalRoute] = useState(initialAiPedagogicalRoute);
     const [institutionalProblems, setInstitutionalProblems] = useState(initialInstitutionalProblems);
     const [unitPedagogicalFocus, setUnitPedagogicalFocus] = useState(initialUnitPedagogicalFocus);
     const canSave = provider === 'gemini' ? !!geminiKey.trim() : !!openaiKey.trim();
+
+    useEffect(() => {
+        let cancelled = false;
+        const loadModels = async () => {
+            const activeKey = provider === 'gemini' ? geminiKey.trim() : openaiKey.trim();
+            if (!activeKey) {
+                setModelsMessage('Ingresa una clave para cargar modelos actuales.');
+                return;
+            }
+
+            setIsLoadingModels(true);
+            setModelsMessage('');
+            try {
+                const options = provider === 'gemini'
+                    ? await fetchGeminiTextModels(activeKey)
+                    : await fetchOpenAITextModels(activeKey);
+                const nextImageCapability = provider === 'gemini'
+                    ? await fetchGeminiImageCapability(activeKey)
+                    : await fetchOpenAIImageCapability(activeKey);
+                if (cancelled) return;
+                setImageCapability(nextImageCapability);
+                if (provider === 'gemini') {
+                    setGeminiModelOptions(options);
+                    if (!options.some((item) => item.id === geminiModel)) {
+                        setGeminiModel(options[0]?.id || getDefaultModelForProvider('gemini'));
+                    }
+                } else {
+                    setOpenaiModelOptions(options);
+                    if (!options.some((item) => item.id === openaiModel)) {
+                        setOpenaiModel(options[0]?.id || getDefaultModelForProvider('openai'));
+                    }
+                }
+            } catch (error: any) {
+                if (cancelled) return;
+                setModelsMessage(String(error?.message || 'No se pudieron cargar modelos actuales. Se usarán opciones seguras.'));
+                setImageCapability({ available: false, models: [], source: 'unknown' });
+                if (provider === 'gemini') {
+                    const fallback = getFallbackModelOptions('gemini');
+                    setGeminiModelOptions(fallback);
+                    if (!fallback.some((item) => item.id === geminiModel)) {
+                        setGeminiModel(fallback[0]?.id || getDefaultModelForProvider('gemini'));
+                    }
+                } else {
+                    const fallback = getFallbackModelOptions('openai');
+                    setOpenaiModelOptions(fallback);
+                    if (!fallback.some((item) => item.id === openaiModel)) {
+                        setOpenaiModel(fallback[0]?.id || getDefaultModelForProvider('openai'));
+                    }
+                }
+            } finally {
+                if (!cancelled) setIsLoadingModels(false);
+            }
+        };
+
+        void loadModels();
+        return () => { cancelled = true; };
+    }, [provider, geminiKey, openaiKey]);
 
     return (
         <div className="fixed inset-0 z-[5000] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
@@ -411,6 +496,29 @@ const AuthOverlay: React.FC<{
                                 <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300">🔐</div>
                             </div>
                         </div>
+                        <div>
+                            <label className="block text-[10px] font-black text-slate-500 mb-3 ml-1 uppercase tracking-widest">
+                                Modelo actual:
+                            </label>
+                            <select
+                                value={provider === 'gemini' ? geminiModel : openaiModel}
+                                onChange={(e) => provider === 'gemini' ? setGeminiModel(e.target.value) : setOpenaiModel(e.target.value)}
+                                className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-5 py-4 text-sm font-bold focus:border-blue-500 focus:bg-white transition-all outline-none shadow-inner"
+                            >
+                                {(provider === 'gemini' ? geminiModelOptions : openaiModelOptions).map((option) => (
+                                    <option key={option.id} value={option.id}>{option.label}</option>
+                                ))}
+                            </select>
+                            <div className="mt-2 flex items-center justify-between gap-3 text-[10px] font-bold uppercase">
+                                <span className="text-slate-400">{isLoadingModels ? 'Cargando modelos vigentes...' : 'Solo se muestran modelos de texto útiles y no preview.'}</span>
+                                {modelsMessage ? <span className="text-amber-600">{modelsMessage}</span> : null}
+                            </div>
+                            <p className={`mt-2 text-[10px] font-black uppercase ${imageCapability.available ? 'text-emerald-600' : 'text-slate-400'}`}>
+                                {imageCapability.available
+                                    ? `Imágenes detectadas: ${imageCapability.models.slice(0, 2).map((item) => item.label).join(', ')}${imageCapability.models.length > 2 ? '...' : ''}`
+                                    : 'Imágenes no detectadas con esta clave en este momento.'}
+                            </p>
+                        </div>
                         <div className="grid grid-cols-1 gap-4">
                             <div>
                                 <label className="block text-[10px] font-black text-slate-500 mb-3 ml-1 uppercase tracking-widest">
@@ -459,6 +567,8 @@ const AuthOverlay: React.FC<{
                             provider,
                             geminiKey: geminiKey.trim(),
                             openaiKey: openaiKey.trim(),
+                            geminiModel,
+                            openaiModel,
                             aiPedagogicalRoute: aiPedagogicalRoute.trim(),
                             institutionalProblems: institutionalProblems.trim(),
                             unitPedagogicalFocus: unitPedagogicalFocus.trim()
@@ -606,11 +716,12 @@ export const AnnualProgramView: React.FC<{
     const [showCalendarSummary, setShowCalendarSummary] = useState(false);
     const [isDraggingMatrix, setIsDraggingMatrix] = useState(false);
     const [dragCheckValue, setDragCheckValue] = useState(false);
-    const [toast, setToast] = useState<{ msg: string, type: 'success' | 'error' } | null>(null);
+    const [toast, setToast] = useState<{ msg: string, type: 'success' | 'error', usage?: AiUsageProgress | null } | null>(null);
     const [saving, setSaving] = useState(false);
     const [isGeneratingIA, setIsGeneratingIA] = useState(false);
     const [showAuthScreen, setShowAuthScreen] = useState(false);
     const [savingKey, setSavingKey] = useState(false);
+    const [aiUsageProgress, setAiUsageProgress] = useState<AiUsageProgress>(() => getAiUsageProgress());
     const [deletingProgramId, setDeletingProgramId] = useState<string | null>(null);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [showTemplateMode, setShowTemplateMode] = useState(false); 
@@ -1153,6 +1264,8 @@ export const AnnualProgramView: React.FC<{
         provider: 'gemini' | 'openai';
         geminiKey: string;
         openaiKey: string;
+        geminiModel: string;
+        openaiModel: string;
         aiPedagogicalRoute: string;
         institutionalProblems: string;
         unitPedagogicalFocus: string;
@@ -1164,6 +1277,8 @@ export const AnnualProgramView: React.FC<{
                 gemini_api_key: config.geminiKey,
                 openai_api_key: config.openaiKey,
                 ai_provider: config.provider,
+                gemini_model: config.geminiModel,
+                openai_model: config.openaiModel,
                 ai_pedagogical_route: config.aiPedagogicalRoute,
                 ai_institutional_problems: config.institutionalProblems,
                 ai_unit_pedagogical_focus: config.unitPedagogicalFocus
@@ -1204,7 +1319,7 @@ export const AnnualProgramView: React.FC<{
         throw new Error('OpenAI no devolvió texto utilizable.');
     };
 
-    const requestOpenAIJson = async (apiKey: string, prompt: string) => {
+    const requestOpenAIJson = async (apiKey: string, prompt: string, model: string) => {
         const res = await fetch('https://api.openai.com/v1/responses', {
             method: 'POST',
             headers: {
@@ -1212,7 +1327,7 @@ export const AnnualProgramView: React.FC<{
                 'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify({
-                model: 'gpt-4.1-mini',
+                model,
                 input: prompt
             })
         });
@@ -1223,7 +1338,10 @@ export const AnnualProgramView: React.FC<{
             throw new Error(message);
         }
 
-        return JSON.parse(extractJsonBlock(getOpenAIOutputText(payload)));
+        return {
+            data: JSON.parse(extractJsonBlock(getOpenAIOutputText(payload))),
+            totalTokens: Number(payload?.usage?.total_tokens || 0)
+        };
     };
 
     const getUnitPlanningSummary = (unitIdx: number) => {
@@ -1257,17 +1375,21 @@ export const AnnualProgramView: React.FC<{
         };
     };
 
-    const requestGeminiJson = async (apiKey: string, prompt: string) => {
-        const ai = new GoogleGenAI({ apiKey });
-        const stream = await ai.models.generateContentStream({
-            model: 'gemini-3-flash-preview',
+    const requestGeminiJson = async (apiKey: string, prompt: string, model: string) => {
+        const ai = createGeminiClient(apiKey);
+        const stream = await generateGeminiContentStream(ai, {
             contents: [{ parts: [{ text: prompt }] }]
-        });
+        }, model);
         let fullText = '';
+        let totalTokens = 0;
         for await (const chunk of stream) {
             fullText += chunk.text || '';
+            totalTokens = Number(chunk?.usageMetadata?.totalTokenCount || totalTokens || 0);
         }
-        return JSON.parse(extractJsonBlock(fullText));
+        return {
+            data: JSON.parse(extractJsonBlock(fullText)),
+            totalTokens
+        };
     };
 
     const handleGenerateAI = async () => {
@@ -1277,6 +1399,8 @@ export const AnnualProgramView: React.FC<{
         }
 
         const aiProvider = generalData?.ai_provider || 'gemini';
+        const preferredOpenAIModel = String(generalData?.openai_model || getDefaultModelForProvider('openai')).trim();
+        const preferredGeminiModel = String(generalData?.gemini_model || getDefaultModelForProvider('gemini')).trim();
         const apiKey = aiProvider === 'openai'
             ? String(generalData?.openai_api_key || '').trim()
             : String(generalData?.gemini_api_key || process.env.API_KEY || '').trim();
@@ -1359,9 +1483,10 @@ Instrucciones:
 
         setIsGeneratingIA(true);
         try {
-            const data = aiProvider === 'openai'
-                ? await requestOpenAIJson(apiKey, prompt)
-                : await requestGeminiJson(apiKey, prompt);
+            const result = aiProvider === 'openai'
+                ? await requestOpenAIJson(apiKey, prompt, preferredOpenAIModel)
+                : await requestGeminiJson(apiKey, prompt, preferredGeminiModel);
+            const data = result.data;
 
             if (typeof data?.areaPurpose === 'string') setAreaPurpose(data.areaPurpose);
             if (typeof data?.areaEnfoque === 'string') setAreaEnfoque(data.areaEnfoque);
@@ -1388,9 +1513,14 @@ Instrucciones:
                 setBibliographyFields((prev) => ({ ...prev, ...data.bibliographyFields }));
             }
 
-            setToast({ msg: 'IA Armi completó la programación anual.', type: 'success' });
+            registerAiUsage(aiProvider, 'annual_program', result.totalTokens);
+            const nextUsage = getAiUsageProgress();
+            setAiUsageProgress(nextUsage);
+            setToast({ msg: 'IA Armi completó la programación anual.', type: 'success', usage: nextUsage });
         } catch (e: any) {
-            setToast({ msg: `Error IA: ${e?.message || 'No se pudo completar el formulario.'}`, type: 'error' });
+            const issue = classifyAiIssue(e);
+            if (issue.kind === 'auth') setShowAuthScreen(true);
+            setToast({ msg: `Error IA: ${issue.userMessage}`, type: 'error' });
         } finally {
             setIsGeneratingIA(false);
         }
@@ -1530,7 +1660,7 @@ Instrucciones:
 
     return (
         <>
-            {toast && <InternalToast message={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
+            {toast && <InternalToast message={toast.msg} type={toast.type} usage={toast.usage} onClose={() => setToast(null)} />}
             {goalToastMsg && <InfoToast message={goalToastMsg} onClose={() => setGoalToastMsg(null)} />}
             {showAuthScreen && (
                 <AuthOverlay
@@ -1540,6 +1670,8 @@ Instrucciones:
                     initialProvider={(generalData.ai_provider as 'gemini' | 'openai') || 'gemini'}
                     initialGeminiKey={generalData?.gemini_api_key || ''}
                     initialOpenAIKey={generalData?.openai_api_key || ''}
+                    initialGeminiModel={generalData?.gemini_model || ''}
+                    initialOpenAIModel={generalData?.openai_model || ''}
                     initialAiPedagogicalRoute={(generalData as any)?.ai_pedagogical_route || ''}
                     initialInstitutionalProblems={(generalData as any)?.ai_institutional_problems || ''}
                     initialUnitPedagogicalFocus={(generalData as any)?.ai_unit_pedagogical_focus || ''}
@@ -1576,7 +1708,7 @@ Instrucciones:
                             </div>
                             <div className="flex flex-col">
                                 <div className="flex items-center gap-4">
-                                    <h1 className="text-4xl font-black italic font-serif tracking-tight uppercase leading-none">Programación Anual</h1>
+                                    <h1 className="text-3xl font-black italic font-serif tracking-tight uppercase leading-none">Programación Anual</h1>
                                     <div className="relative">
                                         <span 
                                             onClick={() => setShowYearPicker(!showYearPicker)}
@@ -1607,11 +1739,11 @@ Instrucciones:
                         
                         <div className="flex items-center gap-6 bg-white/10 p-3 rounded-full border border-white/20 shadow-inner backdrop-blur-sm mr-12 overflow-visible">
                             <div className="relative shrink-0">
-                                <button
+<button
     onClick={handleGenerateAI}
     disabled={!currentAssignment || isGeneratingIA}
     className={`btn-3d-purple shrink-0 ${!currentAssignment ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`}
-    title="Completar con IA Armi"
+    title={`Completar con IA Armi\n${aiUsageProgress.tokenLabel}`}
 >
     {isGeneratingIA ? <span className="text-xl">⌛</span> : <span className="text-lg">🤖</span>}
 </button>
@@ -1719,7 +1851,7 @@ Instrucciones:
                                                 </div>
                                                 <div className="space-y-0">
                                                     <div className="bg-slate-900 text-white text-[10px] font-black uppercase text-center py-2 tracking-[0.2em] rounded-t-2xl select-none">Unidades - {selectedGrade} {ts.section}</div>
-                                                    <div className="overflow-hidden border border-slate-300 rounded-b-2xl shadow-sm bg-white"><table className="w-full text-[10px] border-collapse text-center"><thead><tr className="bg-slate-100 text-slate-700 font-black uppercase border-b border-slate-300"><th className="p-3 border-r border-slate-200">UNIDAD</th><th className="p-3 border-r border-slate-200">INICIO</th><th className="p-3 border-r border-slate-200">FIN</th><th className="p-3 border-r border-slate-200">SEMANAS</th><th className="p-3 border-r border-slate-200">DÍAS</th><th className="p-3">HORAS</th></tr></thead><tbody className="font-bold text-slate-600">{ts.unitTableData.map((u: any, i: number) => (<tr key={i} className={`border-b border-slate-100 hover:bg-sky-50/30 ${u.target === 'B' ? 'bg-emerald-50/40 text-emerald-900 font-black italic' : ''}`}><td className="p-3 border-r border-slate-200 bg-slate-50/50 font-black italic">{u.id}</td><td className="p-3 border-r border-slate-200 italic">{formatDate(u.start)}</td><td className="p-3 border-r border-slate-200 italic">{formatDate(u.end)}</td><td className="p-3 border-r border-slate-200 italic">{u.weeks}</td><td className="p-3 border-r border-slate-200 italic">{u.days}</td><td className="p-3 italic font-black text-slate-800">{u.hours}</td></tr>))}</tbody></table></div>
+                                                    <div className="overflow-hidden border border-slate-300 rounded-b-2xl shadow-sm bg-white"><table className="w-full text-[10px] border-collapse text-center"><thead><tr className="bg-slate-100 text-emerald-800 font-black uppercase border-b border-slate-300"><th className="p-3 border-r border-slate-200">UNIDAD</th><th className="p-3 border-r border-slate-200">INICIO</th><th className="p-3 border-r border-slate-200">FIN</th><th className="p-3 border-r border-slate-200">SEMANAS</th><th className="p-3 border-r border-slate-200">DÍAS</th><th className="p-3">HORAS</th></tr></thead><tbody className="font-bold text-emerald-700">{ts.unitTableData.map((u: any, i: number) => (<tr key={i} className={`border-b border-slate-100 hover:bg-sky-50/30 ${u.target === 'B' ? 'bg-emerald-50/40 text-emerald-900 font-black italic' : ''}`}><td className="p-3 border-r border-slate-200 bg-slate-50/50 font-black italic">{u.id}</td><td className="p-3 border-r border-slate-200 italic">{formatDate(u.start)}</td><td className="p-3 border-r border-slate-200 italic">{formatDate(u.end)}</td><td className="p-3 border-r border-slate-200 italic">{u.weeks}</td><td className="p-3 border-r border-slate-200 italic">{u.days}</td><td className={`p-3 italic font-black ${u.target === 'B' ? 'text-emerald-900' : 'text-emerald-800'}`}>{u.hours}</td></tr>))}</tbody></table></div>
                                                 </div>
                                             </div>
                                         </div>

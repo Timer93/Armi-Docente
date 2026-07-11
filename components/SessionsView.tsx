@@ -8,7 +8,9 @@ import { getCompetencias, getUnidadDidactica, saveSesion, getSesion, getAllSesio
 import { Select } from './Select';
 import { SessionTemplateMergeView } from './SessionTemplateMergeView';
 import { SessionRegisterPanel } from './sessions-view/SessionRegisterPanel';
-import { GoogleGenAI } from "@google/genai";
+import { createGeminiClient, generateGeminiContent } from '../utils/gemini';
+import { getAiUsageProgress, registerAiUsage, type AiUsageProgress } from '../utils/aiUsage';
+import { classifyAiIssue } from '../utils/aiErrors';
 import {
     ENFOQUE_DETAILS,
     TRANSVERSAL_NAMES,
@@ -171,6 +173,7 @@ const buildAiDiagnosticPreview = (text: string, maxLength = 1600) => {
 const recordSessionAiDiagnostic = (payload: {
     stage: 'extract' | 'parse';
     errorMessage: string;
+    humanMessage?: string;
     rawText: string;
     cleanedText?: string;
 }) => {
@@ -178,6 +181,7 @@ const recordSessionAiDiagnostic = (payload: {
         timestamp: new Date().toISOString(),
         stage: payload.stage,
         errorMessage: payload.errorMessage,
+        humanMessage: payload.humanMessage || '',
         rawLength: String(payload.rawText || '').length,
         cleanedLength: String(payload.cleanedText || '').length,
         rawPreview: buildAiDiagnosticPreview(payload.rawText),
@@ -255,6 +259,7 @@ const extractFirstBalancedJsonBlock = (rawText: string) => {
     recordSessionAiDiagnostic({
         stage: 'extract',
         errorMessage: 'La IA no devolvió un JSON utilizable.',
+        humanMessage: 'La respuesta vino vacía, cortada o con texto extra fuera del JSON.',
         rawText,
         cleanedText: cleaned
     });
@@ -267,15 +272,152 @@ const parseAiJsonObject = (rawText: string) => {
     try {
         return JSON.parse(jsonBlock);
     } catch (error: any) {
-        const rawMessage = String(error?.message || 'JSON inválido');
-        recordSessionAiDiagnostic({
-            stage: 'parse',
-            errorMessage: rawMessage,
-            rawText,
-            cleanedText: jsonBlock
-        });
-        throw new Error(`La IA devolvió JSON malformado. ${rawMessage}`);
+        const repairMalformedJson = (input: string) => {
+            const source = String(input || '').replace(/,\s*([}\]])/g, '$1');
+            let out = '';
+            let inString = false;
+            let escaped = false;
+
+            for (let i = 0; i < source.length; i += 1) {
+                const ch = source[i];
+
+                if (!inString) {
+                    if (ch === '"') {
+                        inString = true;
+                    }
+                    out += ch;
+                    escaped = false;
+                    continue;
+                }
+
+                if (escaped) {
+                    out += ch;
+                    escaped = false;
+                    continue;
+                }
+
+                if (ch === '\\') {
+                    out += ch;
+                    escaped = true;
+                    continue;
+                }
+
+                if (ch === '\n') {
+                    out += '\\n';
+                    continue;
+                }
+
+                if (ch === '\r') {
+                    continue;
+                }
+
+                if (ch === '\t') {
+                    out += '\\t';
+                    continue;
+                }
+
+                if (ch === '"') {
+                    const rest = source.slice(i + 1);
+                    const nextVisible = rest.match(/\S/)?.[0] || '';
+                    const looksLikeClosing = nextVisible === '' || nextVisible === ',' || nextVisible === '}' || nextVisible === ']' || nextVisible === ':';
+                    if (looksLikeClosing) {
+                        inString = false;
+                        out += ch;
+                    } else {
+                        out += '\\"';
+                    }
+                    continue;
+                }
+
+                out += ch;
+            }
+
+            return out;
+        };
+
+        try {
+            return JSON.parse(repairMalformedJson(jsonBlock));
+        } catch {
+            const rawMessage = String(error?.message || 'JSON inválido');
+            recordSessionAiDiagnostic({
+                stage: 'parse',
+                errorMessage: rawMessage,
+                humanMessage: rawMessage.toLowerCase().includes('expected')
+                    ? 'El modelo devolvió un JSON casi válido, pero con comillas, llaves o separadores rotos.'
+                    : 'El modelo devolvió un JSON con formato inválido.',
+                rawText,
+                cleanedText: jsonBlock
+            });
+            throw new Error(`La IA devolvió JSON malformado. ${rawMessage}`);
+        }
     }
+};
+
+const normalizeConstructionStageTitle = (value: string) => {
+    const normalized = normalizeLoose(String(value || ''));
+    if (normalized.startsWith('primero')) return 'PRIMERO';
+    if (normalized.startsWith('segundo')) return 'SEGUNDO';
+    if (normalized.startsWith('tercero')) return 'TERCERO';
+    return '';
+};
+
+const normalizeConstructionStepHtml = (rawValue: string) => {
+    const raw = String(rawValue || '').trim();
+    if (!raw) return raw;
+
+    const plainText = raw
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<li[^>]*>/gi, '\n- ')
+        .replace(/<\/li>/gi, '')
+        .replace(/<\/ul>/gi, '\n')
+        .replace(/<\/ol>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/\r/g, '')
+        .replace(/\u00a0/g, ' ')
+        .trim();
+
+    const sectionRegex = /(PRIMERO|SEGUNDO|TERCERO)\s*:\s*([\s\S]*?)(?=(?:PRIMERO|SEGUNDO|TERCERO)\s*:|$)/gi;
+    const sections = Array.from(plainText.matchAll(sectionRegex)).map((match) => {
+        const title = normalizeConstructionStageTitle(match[1] || '');
+        const body = String(match[2] || '').trim();
+        const bulletLines = body
+            .split(/\n+/)
+            .map(line => line.replace(/^[\s\-•*·]+/, '').trim())
+            .filter(Boolean);
+
+        return {
+            title,
+            bulletLines
+        };
+    }).filter(section => section.title);
+
+    if (sections.length < 3) {
+        return raw;
+    }
+
+    const introText = plainText
+        .split(/PRIMERO\s*:/i)[0]
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .join(' ');
+
+    const htmlParts: string[] = [];
+    if (introText) {
+        htmlParts.push(`<p>${escapeHtml(introText)}</p>`);
+    }
+
+    sections.forEach(section => {
+        htmlParts.push(`<p><strong>${section.title}:</strong></p>`);
+        if (section.bulletLines.length > 0) {
+            htmlParts.push(`<ul>${section.bulletLines.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`);
+        } else {
+            htmlParts.push('<ul><li></li></ul>');
+        }
+    });
+
+    return htmlParts.join('');
 };
 
 export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
@@ -303,10 +445,11 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [dateOptions, setDateOptions] = useState<{value: string, label: string}[]>([]);
     const [year, setYear] = useState(initialSelection.year || new Date().getFullYear().toString());
     const [themeColor, setThemeColor] = useState(localStorage.getItem('armi_sessions_theme') || '#6b21a8');
-    const [toasts, setToasts] = useState<Array<{ id: string; msg: string; type: 'success' | 'error' | 'warning' }>>([]);
+    const [toasts, setToasts] = useState<Array<{ id: string; msg: string; type: 'success' | 'error' | 'warning'; usage?: AiUsageProgress | null }>>([]);
     const [allSavedPrograms, setAllSavedPrograms] = useState<Record<string, any>>({});
     const [generalData, setGeneralData] = useState<GeneralData | null>(null);
     const [isGeneratingIA, setIsGeneratingIA] = useState(false);
+    const [aiUsageProgress, setAiUsageProgress] = useState<AiUsageProgress>(() => getAiUsageProgress());
     const [showAuthScreen, setShowAuthScreen] = useState(false);
     const [savingKey, setSavingKey] = useState(false);
     
@@ -319,6 +462,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [showMotiveModal, setShowMotiveModal] = useState(false);
     const [motiveInput, setMotiveInput] = useState('');
     const lastToastRef = useRef<{ msg: string; type: 'success' | 'error' | 'warning'; at: number } | null>(null);
+    const lastAiPromptRef = useRef('');
 
     const bimesterLabel = useMemo(() => {
         const u = parseInt(unitNumber);
@@ -369,7 +513,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         bimester: bimesterLabel
     }), [sessionData, assignments, selArea, selGrade, selSection, unitNumber, sessionNumber, bimesterLabel]);
 
-    const setToast = useCallback((nextToast: { msg: string, type: 'success' | 'error' | 'warning' } | null) => {
+    const setToast = useCallback((nextToast: { msg: string, type: 'success' | 'error' | 'warning'; usage?: AiUsageProgress | null } | null) => {
         if (!nextToast) {
             setToasts([]);
             lastToastRef.current = null;
@@ -395,30 +539,400 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         setToasts(prev => prev.filter(t => t.id !== id));
     }, []);
 
-    const handleOpenLastAiDiagnostic = useCallback(() => {
+    const aiDynamicHoursLabel = useMemo(() => {
+        if (!selArea || !selGrade || !selSection) return "-----";
+
+        const datesToProcess = dateOptions.length > 0
+            ? dateOptions.map(d => d.value)
+            : (sessionDate ? [sessionDate] : []);
+
+        if (datesToProcess.length === 0) return "-----";
+
+        const savedSchedule = localStorage.getItem('armi_schedule_entries');
+        const savedConfig = localStorage.getItem('armi_schedule_config');
+        if (!savedSchedule) return "-----";
+
         try {
-            const raw = localStorage.getItem(SESSION_AI_DIAGNOSTIC_STORAGE_KEY);
-            if (!raw) {
-                setToast({ msg: 'No hay diagnóstico IA guardado.', type: 'warning' });
-                return;
+            const scheduleEntries: ScheduleEntry[] = JSON.parse(savedSchedule);
+            const scheduleConfig: ScheduleConfig = savedConfig ? JSON.parse(savedConfig) : { breaks: [] } as any;
+            const breaks = scheduleConfig.breaks || [];
+            const sectionsToCalculate = selSection.split(/, | y /).map(s => s.trim().toUpperCase());
+            const dayNames = ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'];
+
+            const allBlocks: string[] = [];
+
+            datesToProcess.forEach(dStr => {
+                if (!dStr) return;
+                const dObj = new Date(dStr + 'T00:00:00');
+                if (isNaN(dObj.getTime())) return;
+
+                const dayText = dayNames[dObj.getDay()];
+                sectionsToCalculate.forEach(sec => {
+                    const sectionEntries = scheduleEntries.filter(e =>
+                        e.day.toUpperCase() === dayText &&
+                        e.grade.toLowerCase() === selGrade.toLowerCase() &&
+                        String(e.section).toUpperCase() === sec &&
+                        (e.areaName.toLowerCase() === selArea.toLowerCase() || e.areaId === selArea)
+                    ).sort((a, b) => a.hourIndex - b.hourIndex);
+
+                    if (sectionEntries.length > 0) {
+                        const sessionBlocks: number[] = [];
+                        let currentSize = 0;
+                        for (let i = 0; i < sectionEntries.length; i++) {
+                            currentSize++;
+                            const current = sectionEntries[i];
+                            const next = sectionEntries[i + 1];
+                            const hasBreakAfter = breaks.some(b => b.afterHour === current.hourIndex);
+                            const isNextConsecutive = next && next.hourIndex === current.hourIndex + 1;
+                            if (!isNextConsecutive || hasBreakAfter) {
+                                sessionBlocks.push(currentSize);
+                                currentSize = 0;
+                            }
+                        }
+                        sessionBlocks.forEach(h => {
+                            allBlocks.push(`${h}h (${h * 45} min)`);
+                        });
+                    }
+                });
+            });
+
+            const uniqueBlocks = Array.from(new Set(allBlocks)).sort();
+            if (uniqueBlocks.length === 0) return "-----";
+            return uniqueBlocks.join(' - ');
+        } catch (e) { return "-----"; }
+    }, [selArea, selGrade, selSection, sessionDate, dateOptions]);
+
+    const aiTiempoValues = useMemo(() => {
+        const minuteMatches = Array.from(String(aiDynamicHoursLabel || '').matchAll(/\((\d+)\s*min\)/gi));
+        const mins = minuteMatches
+            .map(m => parseInt(m[1], 10))
+            .filter(n => Number.isFinite(n) && !!MINUTE_DISTRIBUTIONS[n]);
+
+        const unique = Array.from(new Set(mins));
+        const low = unique.length ? Math.min(...unique) : 90;
+        const high = unique.length ? Math.max(...unique) : 90;
+        const lowDist = MINUTE_DISTRIBUTIONS[low] || MINUTE_DISTRIBUTIONS[90];
+        const highDist = MINUTE_DISTRIBUTIONS[high] || MINUTE_DISTRIBUTIONS[90];
+
+        if (low === high) return lowDist.map(v => `${v}'`);
+        return lowDist.map((v, idx) => {
+            const h = highDist[idx] ?? v;
+            const min = Math.min(v, h);
+            const max = Math.max(v, h);
+            return `${min}'-${max}'`;
+        });
+    }, [aiDynamicHoursLabel]);
+
+    const buildCurrentAiRequest = useCallback(() => {
+        const areaId = assignments.find(a => a.areaName === selArea)?.areaId || selArea;
+        const currentSessionAssessmentModel = buildSessionAssessmentModel(sessionData, {
+            areaId,
+            grade: selGrade,
+            section: selSection,
+            unitNumber,
+            sessionNumber,
+            bimester: bimesterLabel
+        });
+        const currentTemplateType = String(sessionData?.instrumentoTemplate?.type || detectInstrumentTypeFromText(String(sessionData?.competenciaPrio?.inst || '')) || 'rubrica');
+        const currentInstrumentName = String(sessionData?.instrumentoTemplate?.name || sessionData?.competenciaPrio?.inst || 'Rúbrica');
+        const targetInstrumentRows = (() => {
+            const canonicalRows = (Array.isArray(currentSessionAssessmentModel?.rows) ? currentSessionAssessmentModel.rows : [])
+                .filter((row: any) => normalizeLoose(String(row?.criterionText || row?.capacityName || row?.competencyName || '')));
+            if (canonicalRows.length > 0) {
+                return canonicalRows.map((row: any, idx: number) => ({
+                    id: String(row?.id || idx + 1),
+                    competencia: String(row?.competencyName || '').trim(),
+                    capacidad: String(row?.capacityName || '').trim(),
+                    criterio: String(row?.criterionText || '').trim(),
+                    c: String(row?.levelDescriptors?.c || '').trim(),
+                    b: String(row?.levelDescriptors?.b || '').trim(),
+                    a: String(row?.levelDescriptors?.a || '').trim(),
+                    ad: String(row?.levelDescriptors?.ad || '').trim(),
+                    source: String(row?.source || 'primary').trim(),
+                    rowColor: String(row?.rowColor || '').trim()
+                }));
             }
-            const parsed = JSON.parse(raw);
-            const message = [
-                `Fecha: ${parsed?.timestamp || '-'}`,
-                `Etapa: ${parsed?.stage || '-'}`,
-                `Error: ${parsed?.errorMessage || '-'}`,
-                `Largo bruto: ${parsed?.rawLength || 0}`,
-                `Largo limpio: ${parsed?.cleanedLength || 0}`,
-                '',
-                'Vista previa:',
-                String(parsed?.cleanedPreview || parsed?.rawPreview || '-')
-            ].join('\n');
-            window.alert(message);
-        } catch (error) {
-            console.error('No se pudo abrir el diagnóstico IA guardado.', error);
-            setToast({ msg: 'No se pudo leer el diagnóstico IA.', type: 'error' });
-        }
-    }, [setToast]);
+            return (Array.isArray(sessionData?.instrumento) ? sessionData.instrumento : []).map((row: any, idx: number) => ({
+                id: String(row?.id || idx + 1),
+                competencia: String(row?.competencia || row?.comp || '').trim(),
+                capacidad: String(row?.capacidad || row?.cap || '').trim(),
+                criterio: String(row?.criterio || '').trim(),
+                c: String(row?.c || '').trim(),
+                b: String(row?.b || '').trim(),
+                a: String(row?.a || '').trim(),
+                ad: String(row?.ad || '').trim(),
+                source: String(row?.source || 'primary').trim(),
+                rowColor: String(row?.rowColor || '').trim()
+            }));
+        })();
+        const compactHtml = (value: any) => {
+            const raw = String(value || '').trim();
+            if (!raw) return '';
+
+            const cleaned = raw
+                .replace(/&nbsp;|&#160;|&amp;nbsp;/gi, ' ')
+                .replace(/<span[^>]*>/gi, '')
+                .replace(/<\/span>/gi, '')
+                .replace(/\sstyle=(['"])[^'"]*\1/gi, '')
+                .replace(/\sclass=(['"])[^'"]*\1/gi, '')
+                .replace(/\sdata-[a-z0-9_-]+=(['"])[^'"]*\1/gi, '')
+                .replace(/<p>\s*<\/p>/gi, '')
+                .replace(/<p><br\s*\/?><\/p>/gi, '')
+                .replace(/<br\s*\/?>/gi, '<br>')
+                .replace(/>\s+</g, '><')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            return cleaned;
+        };
+        const compactHtmlMap = (input: Record<string, any>) =>
+            Object.fromEntries(
+                Object.entries(input || {}).map(([key, value]) => [
+                    key,
+                    typeof value === 'string' ? compactHtml(value) : String(value || '').trim()
+                ])
+            );
+        const compactSequenceForAi = {
+            inicio: {
+                saberes: compactHtml(sessionData?.secuencia?.inicio?.saberes),
+                conflicto: compactHtml(sessionData?.secuencia?.inicio?.conflicto)
+            },
+            proceso: {
+                construccion: compactHtml(sessionData?.secuencia?.proceso?.construccion),
+                aplicacion: compactHtml(sessionData?.secuencia?.proceso?.aplicacion),
+                metacognicion: compactHtml(sessionData?.secuencia?.proceso?.metacognicion)
+            },
+            salida: {
+                evaluacion: compactHtml(sessionData?.secuencia?.salida?.evaluacion)
+            }
+        };
+        const hasAnyDescriptorText = (row: any) =>
+            !!normalizeLoose([
+                row?.c,
+                row?.b,
+                row?.a,
+                row?.ad
+            ].join(' '));
+        const instrumentRowsTarget = targetInstrumentRows.map((row: any, idx: number) => ({
+            index: idx,
+            source: String(row?.source || 'primary').trim(),
+            competencia: String(row?.competencia || '').trim(),
+            capacidad: String(row?.capacidad || '').trim(),
+            criterio: String(row?.criterio || '').trim()
+        }));
+
+        const placeholderSet = new Set<string>();
+        const placeholderCandidatePaths = [
+            'title',
+            'purpose',
+            'situation',
+            'extension',
+            'competenciaPrio.field',
+            'competenciaPrio.des',
+            'competenciaPrio.evidence',
+            ...AI_RICH_TEXT_PATHS
+        ];
+        placeholderCandidatePaths.forEach(path => {
+            const rawValue = String(getPathByString(sessionData, path) || '');
+            const detectionValue = path.includes('des') || path.includes('evidence') || AI_RICH_TEXT_PATHS.includes(path)
+                ? stripHtml(rawValue)
+                : rawValue;
+            extractBracketTokens(detectionValue).forEach(t => placeholderSet.add(t));
+        });
+        const activeCompetenciasTrans = (Array.isArray(sessionData?.competenciasTrans) ? sessionData.competenciasTrans : [])
+            .filter((ct: any) => {
+                const hasCap = normalizeLoose(String(ct?.cap || '')).length > 0;
+                const hasDes = isMeaningfulRichText(String(ct?.des || ''));
+                const hasEvidence = isMeaningfulRichText(String(ct?.evidence || ''));
+                const hasInst = normalizeLoose(String(ct?.inst || '')).length > 0;
+                return hasCap || hasDes || hasEvidence || hasInst;
+            })
+            .map((ct: any) => ({
+                cap: String(ct?.cap || '').trim(),
+                inst: String(ct?.inst || '').trim(),
+                des: compactHtml(ct?.des),
+                evidence: compactHtml(ct?.evidence),
+                rowColor: String(ct?.rowColor || '').trim()
+            }));
+        activeCompetenciasTrans.forEach((ct: any) => {
+            extractBracketTokens(stripHtml(String(ct?.des || ''))).forEach(t => placeholderSet.add(t));
+            extractBracketTokens(stripHtml(String(ct?.evidence || ''))).forEach(t => placeholderSet.add(t));
+        });
+
+        const aiPedagogicalRoute = String((generalData as any)?.ai_pedagogical_route || '').trim();
+        const institutionalProblems = String((generalData as any)?.ai_institutional_problems || '').trim();
+        const rawUnitPedagogicalFocus = String((generalData as any)?.ai_unit_pedagogical_focus || '').trim();
+        const didacticUnits = Array.isArray(currentProgram?.didacticUnits)
+            ? currentProgram.didacticUnits
+            : (currentProgram?.didacticUnits && typeof currentProgram.didacticUnits === 'object'
+                ? Object.values(currentProgram.didacticUnits)
+                : []);
+        const currentUnitIndex = Math.max(0, Number(unitNumber || '1') - 1);
+        const summarizeUnitFocus = (unit: any) => {
+            const title = String(unit?.title || '').trim();
+            const situation = String(unit?.situation || '').trim();
+            if (title && situation) return `${title}. ${situation}`;
+            return title || situation;
+        };
+        const currentUnitGuide = (() => {
+            const raw = currentProgram?.didacticUnits;
+            if (Array.isArray(raw)) return raw[Number(unitNumber) - 1] || {};
+            if (raw && typeof raw === 'object') return raw[String(Number(unitNumber) - 1)] || raw[String(unitNumber)] || {};
+            return {};
+        })();
+        const previousUnitGuide = didacticUnits[currentUnitIndex - 1] || null;
+        const nextUnitGuide = didacticUnits[currentUnitIndex + 1] || null;
+        const scopedUnitProgression = {
+            previousUnitFocus: summarizeUnitFocus(previousUnitGuide),
+            currentUnitFocus: summarizeUnitFocus(currentUnitGuide) || rawUnitPedagogicalFocus,
+            nextUnitFocus: summarizeUnitFocus(nextUnitGuide)
+        };
+        const suggestedTiming = aiTiempoValues
+            .map(value => String(value || '').trim())
+            .filter(Boolean);
+        const normalizedAreaRows = targetInstrumentRows.map((row: any, idx: number) => ({
+            index: idx,
+            competencia: row.competencia,
+            capacidad: row.capacidad,
+            criterio: row.criterio,
+            ...(hasAnyDescriptorText(row)
+                ? {
+                    descriptoresActuales: {
+                        c: row.c,
+                        b: row.b,
+                        a: row.a,
+                        ad: row.ad
+                    }
+                }
+                : {})
+        }));
+
+        const contextForAI = {
+            header: {
+                year,
+                areaId,
+                areaName: selArea,
+                grade: selGrade,
+                section: selSection,
+                unitNumber,
+                sessionNumber,
+                date: sessionDate || ''
+            },
+            annualGuide: {
+                areaPurpose: String(currentProgram?.areaPurpose || '').trim(),
+                areaEnfoque: String(currentProgram?.areaEnfoque || '').trim(),
+                currentUnitGuide: {
+                    title: String(currentUnitGuide?.title || '').trim(),
+                    situation: String(currentUnitGuide?.situation || '').trim()
+                },
+                pedagogicalConfig: {
+                    aiPedagogicalRoute,
+                    institutionalProblems,
+                    unitProgression: scopedUnitProgression
+                }
+            },
+            currentSession: {
+                title: sessionData?.title || '',
+                purpose: sessionData?.purpose || '',
+                situation: sessionData?.situation || '',
+                extension: sessionData?.extension || '',
+                suggestedTiming,
+                competenciaPrio: {
+                    comp: String(sessionData?.competenciaPrio?.comp || '').trim(),
+                    cap: String(sessionData?.competenciaPrio?.cap || '').trim(),
+                    field: String(sessionData?.competenciaPrio?.field || '').trim(),
+                    inst: String(sessionData?.competenciaPrio?.inst || '').trim(),
+                    des: compactHtml(sessionData?.competenciaPrio?.des),
+                    evidence: compactHtml(sessionData?.competenciaPrio?.evidence)
+                },
+                competenciasTrans: activeCompetenciasTrans,
+                enfoqueTrans: compactHtmlMap(sessionData?.enfoqueTrans || {}),
+                secuencia: compactSequenceForAi
+            },
+            instrument: {
+                templateType: currentTemplateType,
+                templateName: currentInstrumentName,
+                targetRows: normalizedAreaRows
+            }
+        };
+
+        const prompt = `
+Eres un experto pedagógico del MINEDU Perú.
+Completa la sesión de aprendizaje con lenguaje profesional, concreto y aplicable.
+Debes respetar y completar la plantilla aunque el usuario haya editado partes.
+Debes tener en cuenta la configuración pedagógica global del docente, la programación anual y la unidad didáctica cargada. Si la unidad corresponde a un proyecto, portafolio, concurso, metodología o ruta específica indicada por el docente, la sesión debe alinearse a ese proceso sin omitir los productos, evidencias y actividades esperadas.
+
+REGLAS:
+1) Devuelve SOLO JSON válido (sin markdown).
+2) Si ves placeholders tipo [ ... ], genera reemplazos concretos en "placeholderMap".
+3) Para campos HTML devuelve contenido en formato HTML simple (<p>, <ul>, <li>, <strong>, <em>, <span style='color: green;'>).
+3.1) Si usas atributos HTML dentro de strings JSON, usa comillas simples en el HTML para no romper el JSON.
+4) Respeta el instrumento actual del contexto: "${currentInstrumentName}" (tipo: "${currentTemplateType}").
+5) Devuelve "instrumentRows" con exactamente la misma cantidad de elementos que "FILAS DEL INSTRUMENTO A COMPLETAR", conservando todos sus índices.
+6) Cada fila de "instrumentRows" debe incluir: index, criterio, c, b, a, ad.
+7) En TODOS los instrumentos, aunque visualmente no se muestren, c/b/a/ad deben ser descriptores pedagógicos reales de nivel de logro para ese criterio.
+8) No devuelvas etiquetas sueltas como "Deficiente", "Regular", "Bueno", "Muy bueno" dentro de c/b/a/ad; devuelve descripciones de desempeño observables.
+9) Si el instrumento es rúbrica, los descriptores pueden ser más extensos. Si es lista, escala o guía, los descriptores pueden ser breves pero específicos.
+10) Redacta pensando en estudiantes de ${selGrade}, área ${selArea}.
+11) Debes completar TODOS los índices listados en "FILAS DEL INSTRUMENTO A COMPLETAR", incluyendo criterios del área y competencias transversales.
+12) No omitas ninguna fila aunque sea la 5, 6 o posterior.
+13) Usa el mismo criterio base de cada índice y devuelve descriptores para todos los niveles de logro.
+14) Los cuatro niveles deben ser coherentes entre sí y describir la misma habilidad con distinta calidad de logro.
+15) Toma el nivel A como referencia central del criterio esperado; luego adapta C, B y AD manteniendo la misma acción observable, variando principalmente precisión, coherencia, autonomía, profundidad o sustento.
+16) Evita que cada nivel parezca un criterio distinto; deben sentirse como una progresión del mismo desempeño.
+17) En "secuencia.proceso.construccion" devuelve exactamente tres bloques con los encabezados "PRIMERO:", "SEGUNDO:" y "TERCERO:" en ese orden.
+18) En cada bloque de "secuencia.proceso.construccion" redacta exactamente 3 viñetas concretas, orientadas a acciones del docente y estudiantes.
+19) Para "secuencia.proceso.construccion" usa HTML simple con esta estructura: <p>introducción breve</p><p><strong>PRIMERO:</strong></p><ul><li>...</li><li>...</li><li>...</li></ul><p><strong>SEGUNDO:</strong></p><ul>...</ul><p><strong>TERCERO:</strong></p><ul>...</ul>.
+20) La redacción de "secuencia.proceso.construccion" NO debe parecer una lista de ideas sueltas. Debe leerse como una secuencia didáctica conectada del momento de desarrollo de la sesión.
+21) En "PRIMERO" redacta acciones iniciales de orientación, explicación, modelado o análisis guiado que realiza el docente con participación de los estudiantes.
+22) En "SEGUNDO" redacta acciones de trabajo, organización, resolución, aplicación parcial o construcción colaborativa que realizan principalmente los estudiantes con acompañamiento del docente.
+23) En "TERCERO" redacta acciones de consolidación, sustento, revisión, ajuste, socialización parcial o preparación del producto/evidencia antes de pasar al siguiente momento de la sesión.
+24) Cada viñeta de "secuencia.proceso.construccion" debe mantener relación explícita con la viñeta anterior y con el propósito, producto, evidencia e instrumento de la sesión actual.
+25) Evita frases genéricas, decorativas o repetidas como "se promueve el diálogo", "se reflexiona", "se socializa" si no indicas sobre qué contenido concreto de la sesión.
+26) Usa verbos de acción pedagógica observables y contextualizados: explica, analiza, organiza, completa, sustenta, revisa, contrasta, formula, registra, valida, ajusta, prepara.
+27) Si la unidad está enmarcada en proyecto, concurso, portafolio o Crea y Emprende, las acciones de "secuencia.proceso.construccion" deben mencionar explícitamente avances reales del producto, portafolio, matriz, ficha, propuesta o evidencia correspondiente.
+28) Toma como referencia este estilo de redacción para "secuencia.proceso.construccion": pasos conectados, concretos, específicos del tema y centrados en lo que hace el docente y lo que hacen los equipos o estudiantes durante el desarrollo.
+
+PLACEHOLDERS DETECTADOS:
+${JSON.stringify(Array.from(placeholderSet), null, 2)}
+
+FILAS DEL INSTRUMENTO A COMPLETAR:
+${JSON.stringify(instrumentRowsTarget, null, 2)}
+
+CONTEXTO ACTUAL:
+${JSON.stringify(contextForAI, null, 2)}
+
+FORMATO DE RESPUESTA:
+{
+  "title": "string",
+  "purpose": "string",
+  "situation": "string",
+  "extension": "string",
+  "placeholderMap": { "placeholder original": "reemplazo" },
+  "competenciaPrio": {
+    "field": "string",
+    "inst": "string",
+    "des": "html",
+    "evidence": "html"
+  },
+  "competenciasTrans": [
+    { "cap": "string", "inst": "string", "des": "html", "evidence": "html" }
+  ],
+  "secuencia": {
+    "inicio": { "saberes": "html", "conflicto": "html" },
+    "proceso": { "construccion": "html", "aplicacion": "html", "metacognicion": "html" },
+    "salida": { "evaluacion": "html" }
+  },
+  "instrumentRows": [
+    { "index": 0, "criterio": "string", "capacidad": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
+  ],
+  "rubrica": [
+    { "index": 0, "criterio": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
+  ]
+}
+`.trim();
+        return { areaId, currentSessionAssessmentModel, currentTemplateType, currentInstrumentName, targetInstrumentRows, prompt };
+    }, [aiTiempoValues, assignments, bimesterLabel, currentProgram, generalData, selArea, selGrade, selSection, sessionData, sessionDate, sessionNumber, unitNumber, year]);
 
     const loadTemplateRowsByInstrument = useCallback(async (instrumentLabel: string) => {
         if (!selArea || !selGrade || !selSection) {
@@ -707,11 +1221,11 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         setIsDatePickerOpen(false);
     };
 
-    const handleSaveIAKey = async (key: string) => {
+    const handleSaveIAKey = async (key: string, model: string) => {
         if (!generalData || !key) return;
         setSavingKey(true);
         try {
-            const updated = { ...generalData, gemini_api_key: key };
+            const updated = { ...generalData, gemini_api_key: key, gemini_model: model };
             const res = await saveDatosGenerales(updated);
             if (res.success) {
                 setGeneralData(updated);
@@ -734,6 +1248,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         }
 
         const apiKey = (generalData?.gemini_api_key || process.env.API_KEY || '').trim();
+        const preferredGeminiModel = String(generalData?.gemini_model || '').trim();
         if (!apiKey || apiKey === 'undefined' || apiKey === 'null' || apiKey.length < 10) {
             setShowAuthScreen(true);
             return;
@@ -741,176 +1256,14 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
         setIsGeneratingIA(true);
         try {
-            const areaId = assignments.find(a => a.areaName === selArea)?.areaId || selArea;
-            const ai = new GoogleGenAI({ apiKey });
-            const currentSessionAssessmentModel = buildSessionAssessmentModel(sessionData, {
-                areaId,
-                grade: selGrade,
-                section: selSection,
-                unitNumber,
-                sessionNumber,
-                bimester: bimesterLabel
-            });
-            const currentTemplateType = String(sessionData?.instrumentoTemplate?.type || detectInstrumentTypeFromText(String(sessionData?.competenciaPrio?.inst || '')) || 'rubrica');
-            const currentInstrumentName = String(sessionData?.instrumentoTemplate?.name || sessionData?.competenciaPrio?.inst || 'Rúbrica');
-            const targetInstrumentRows = (() => {
-                const canonicalRows = (Array.isArray(currentSessionAssessmentModel?.rows) ? currentSessionAssessmentModel.rows : [])
-                    .filter((row: any) => normalizeLoose(String(row?.criterionText || row?.capacityName || row?.competencyName || '')));
-                if (canonicalRows.length > 0) {
-                    return canonicalRows.map((row: any, idx: number) => ({
-                        id: String(row?.id || idx + 1),
-                        competencia: String(row?.competencyName || '').trim(),
-                        capacidad: String(row?.capacityName || '').trim(),
-                        criterio: String(row?.criterionText || '').trim(),
-                        c: String(row?.levelDescriptors?.c || '').trim(),
-                        b: String(row?.levelDescriptors?.b || '').trim(),
-                        a: String(row?.levelDescriptors?.a || '').trim(),
-                        ad: String(row?.levelDescriptors?.ad || '').trim(),
-                        source: String(row?.source || 'primary').trim(),
-                        rowColor: String(row?.rowColor || '').trim()
-                    }));
-                }
-                return (Array.isArray(sessionData?.instrumento) ? sessionData.instrumento : []).map((row: any, idx: number) => ({
-                    id: String(row?.id || idx + 1),
-                    competencia: String(row?.competencia || row?.comp || '').trim(),
-                    capacidad: String(row?.capacidad || row?.cap || '').trim(),
-                    criterio: String(row?.criterio || '').trim(),
-                    c: String(row?.c || '').trim(),
-                    b: String(row?.b || '').trim(),
-                    a: String(row?.a || '').trim(),
-                    ad: String(row?.ad || '').trim(),
-                    source: String(row?.source || 'primary').trim(),
-                    rowColor: String(row?.rowColor || '').trim()
-                }));
-            })();
-            const instrumentRowsTarget = targetInstrumentRows.map((row: any, idx: number) => ({
-                index: idx,
-                source: String(row?.source || 'primary').trim(),
-                competencia: String(row?.competencia || '').trim(),
-                capacidad: String(row?.capacidad || '').trim(),
-                criterio: String(row?.criterio || '').trim(),
-                requiredLevels: ['c', 'b', 'a', 'ad']
-            }));
+            const { areaId, currentSessionAssessmentModel, currentTemplateType, currentInstrumentName, targetInstrumentRows, prompt } = buildCurrentAiRequest();
+            const ai = createGeminiClient(apiKey);
+            lastAiPromptRef.current = prompt;
 
-            const placeholderSet = new Set<string>();
-            AI_RICH_TEXT_PATHS.forEach(path => {
-                extractBracketTokens(String(getPathByString(sessionData, path) || '')).forEach(t => placeholderSet.add(t));
-            });
-            (sessionData?.competenciasTrans || []).forEach((ct: any) => {
-                extractBracketTokens(String(ct?.des || '')).forEach(t => placeholderSet.add(t));
-                extractBracketTokens(String(ct?.evidence || '')).forEach(t => placeholderSet.add(t));
-            });
-
-            const aiPedagogicalRoute = String((generalData as any)?.ai_pedagogical_route || '').trim();
-            const institutionalProblems = String((generalData as any)?.ai_institutional_problems || '').trim();
-            const unitPedagogicalFocus = String((generalData as any)?.ai_unit_pedagogical_focus || '').trim();
-
-            const aiExtraContext = {
-                aiPedagogicalRoute,
-                institutionalProblems,
-                unitPedagogicalFocus
-            };
-
-            const contextForAI = {
-                year,
-                areaId,
-                areaName: selArea,
-                grade: selGrade,
-                section: selSection,
-                unitNumber,
-                sessionNumber,
-                date: sessionDate || '',
-                title: sessionData?.title || '',
-                purpose: sessionData?.purpose || '',
-                situation: sessionData?.situation || '',
-                competenciaPrio: sessionData?.competenciaPrio || {},
-                competenciasTrans: sessionData?.competenciasTrans || [],
-                enfoqueTrans: sessionData?.enfoqueTrans || {},
-                secuencia: sessionData?.secuencia || {},
-                extension: sessionData?.extension || '',
-                recursos: sessionData?.recursos || {},
-                bibliografia: sessionData?.bibliografia || {},
-                assessmentModel: sessionData?.assessmentModel || {},
-                sessionAssessmentModel: currentSessionAssessmentModel,
-                instrumentTemplateType: currentTemplateType,
-                instrumentTemplateName: currentInstrumentName,
-                targetInstrumentRows,
-                currentInstrumentoRows: sessionData?.instrumento || [],
-                aiExtraContext,
-                currentProgram: {
-                    areaPurpose: currentProgram?.areaPurpose || '',
-                    areaEnfoque: currentProgram?.areaEnfoque || '',
-                    didacticUnits: currentProgram?.didacticUnits || {},
-                    resourceFields: currentProgram?.resourceFields || {},
-                    bibliographyFields: currentProgram?.bibliographyFields || {}
-                }
-            };
-
-            const prompt = `
-Eres un experto pedagógico del MINEDU Perú.
-Completa la sesión de aprendizaje con lenguaje profesional, concreto y aplicable.
-Debes respetar y completar la plantilla aunque el usuario haya editado partes.
-Debes tener en cuenta la configuración pedagógica global del docente, la programación anual y la unidad didáctica cargada. Si la unidad corresponde a un proyecto, portafolio, concurso, metodología o ruta específica indicada por el docente, la sesión debe alinearse a ese proceso sin omitir los productos, evidencias y actividades esperadas.
-
-REGLAS:
-1) Devuelve SOLO JSON válido (sin markdown).
-2) Si ves placeholders tipo [ ... ], genera reemplazos concretos en "placeholderMap".
-3) Para campos HTML devuelve contenido en formato HTML simple (<p>, <ul>, <li>, <strong>, <em>, <span style="color: green;">).
-4) Respeta el instrumento actual del contexto: "${currentInstrumentName}" (tipo: "${currentTemplateType}").
-5) Debes devolver "instrumentRows" con exactamente ${Math.max(targetInstrumentRows.length, currentTemplateType === 'rubrica' ? 4 : 1)} filas.
-6) Cada fila de "instrumentRows" debe incluir: index, criterio, c, b, a, ad.
-7) En TODOS los instrumentos, aunque visualmente no se muestren, c/b/a/ad deben ser descriptores pedagógicos reales de nivel de logro para ese criterio.
-8) No devuelvas etiquetas sueltas como "Deficiente", "Regular", "Bueno", "Muy bueno" dentro de c/b/a/ad; devuelve descripciones de desempeño observables.
-9) Si el instrumento es rúbrica, los descriptores pueden ser más extensos. Si es lista, escala o guía, los descriptores pueden ser breves pero específicos.
-10) Redacta pensando en estudiantes de ${selGrade}, área ${selArea}.
-11) Debes completar TODOS los índices listados en "FILAS DEL INSTRUMENTO A COMPLETAR", incluyendo criterios del área y competencias transversales.
-12) No omitas ninguna fila aunque sea la 5, 6 o posterior.
-13) Usa el mismo criterio base de cada índice y devuelve descriptores para todos los niveles de logro.
-
-PLACEHOLDERS DETECTADOS:
-${JSON.stringify(Array.from(placeholderSet), null, 2)}
-
-FILAS DEL INSTRUMENTO A COMPLETAR:
-${JSON.stringify(instrumentRowsTarget, null, 2)}
-
-CONTEXTO ACTUAL:
-${JSON.stringify(contextForAI, null, 2)}
-
-FORMATO DE RESPUESTA:
-{
-  "title": "string",
-  "purpose": "string",
-  "situation": "string",
-  "extension": "string",
-  "placeholderMap": { "placeholder original": "reemplazo" },
-  "competenciaPrio": {
-    "field": "string",
-    "inst": "string",
-    "des": "html",
-    "evidence": "html"
-  },
-  "competenciasTrans": [
-    { "cap": "string", "inst": "string", "des": "html", "evidence": "html" }
-  ],
-  "secuencia": {
-    "inicio": { "saberes": "html", "conflicto": "html" },
-    "proceso": { "construccion": "html", "aplicacion": "html", "metacognicion": "html" },
-    "salida": { "evaluacion": "html" }
-  },
-  "instrumentRows": [
-    { "index": 0, "criterio": "string", "capacidad": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
-  ],
-  "rubrica": [
-    { "index": 0, "criterio": "string", "c": "string", "b": "string", "a": "string", "ad": "string" }
-  ]
-}
-`;
-
-            const response = await ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
+            const response = await generateGeminiContent(ai, {
                 contents: [{ parts: [{ text: prompt }] }],
                 config: { responseMimeType: "application/json", temperature: 0.4 }
-            });
+            }, preferredGeminiModel);
 
             const raw = String(response.text || '').trim();
             if (!raw) throw new Error("EMPTY_RESPONSE");
@@ -966,7 +1319,9 @@ FORMATO DE RESPUESTA:
             const aiSec = aiData?.secuencia || {};
             nextData.secuencia.inicio.saberes = fillHtmlField(nextData.secuencia.inicio.saberes, aiSec?.inicio?.saberes);
             nextData.secuencia.inicio.conflicto = fillHtmlField(nextData.secuencia.inicio.conflicto, aiSec?.inicio?.conflicto);
-            nextData.secuencia.proceso.construccion = fillHtmlField(nextData.secuencia.proceso.construccion, aiSec?.proceso?.construccion);
+            nextData.secuencia.proceso.construccion = normalizeConstructionStepHtml(
+                fillHtmlField(nextData.secuencia.proceso.construccion, aiSec?.proceso?.construccion)
+            );
             nextData.secuencia.proceso.aplicacion = fillHtmlField(nextData.secuencia.proceso.aplicacion, aiSec?.proceso?.aplicacion);
             nextData.secuencia.proceso.metacognicion = fillHtmlField(nextData.secuencia.proceso.metacognicion, aiSec?.proceso?.metacognicion);
             nextData.secuencia.salida.evaluacion = fillHtmlField(nextData.secuencia.salida.evaluacion, aiSec?.salida?.evaluacion);
@@ -992,8 +1347,7 @@ FORMATO DE RESPUESTA:
             });
             const targetRowCount = Math.max(
                 targetInstrumentRows.length,
-                aiInstrumentRows.length,
-                currentTemplateType === 'rubrica' ? 4 : 1
+                aiInstrumentRows.length
             );
             nextData.instrumento = Array.from({ length: targetRowCount }, (_, i) => {
                 const base = targetInstrumentRows[i] || nextData.instrumento?.[i] || { id: i + 1, criterio: '', c: '', b: '', a: '', ad: '' };
@@ -1066,15 +1420,15 @@ FORMATO DE RESPUESTA:
                 sessionNumber,
                 bimester: bimesterLabel
             })));
-            setToast({ msg: "✅ IA Armi completó la sesión y llenó los descriptores internos del instrumento.", type: 'success' });
+            registerAiUsage('gemini', 'learning_session', Number(response?.usageMetadata?.totalTokenCount || 0));
+            const nextUsage = getAiUsageProgress();
+            setAiUsageProgress(nextUsage);
+            setToast({ msg: "✅ IA Armi completó la sesión y llenó los descriptores internos del instrumento.", type: 'success', usage: nextUsage });
         } catch (e: any) {
-            const msg = String(e?.message || e || '');
-            if (msg.toLowerCase().includes('api') || msg.toLowerCase().includes('401') || msg.toLowerCase().includes('403')) {
-                setShowAuthScreen(true);
-                setToast({ msg: "⚠️ Revisa tu API Key de IA.", type: 'warning' });
-            } else {
-                setToast({ msg: "❌ Error IA: " + msg, type: 'error' });
-            }
+            const issue = classifyAiIssue(e);
+            if (issue.kind === 'auth') setShowAuthScreen(true);
+            const toastType = issue.kind === 'quota_minute' || issue.kind === 'quota_daily' || issue.kind === 'quota_general' || issue.kind === 'saturation' ? 'warning' : 'error';
+            setToast({ msg: `${toastType === 'warning' ? '⚠️' : '❌'} ${issue.userMessage}`, type: toastType });
         } finally {
             setIsGeneratingIA(false);
         }
@@ -3606,6 +3960,7 @@ FORMATO DE RESPUESTA:
                             key={t.id}
                             message={t.msg}
                             type={t.type}
+                            usage={t.usage}
                             onClose={() => closeToastById(t.id)}
                         />
                     ))}
@@ -3617,6 +3972,8 @@ FORMATO DE RESPUESTA:
                     onSave={handleSaveIAKey}
                     onClose={() => setShowAuthScreen(false)}
                     isSaving={savingKey}
+                    initialKey={generalData?.gemini_api_key || ''}
+                    initialModel={generalData?.gemini_model || ''}
                 />
             )}
             
@@ -3678,20 +4035,23 @@ FORMATO DE RESPUESTA:
                         <div className="bg-white/20 p-3 rounded-2xl border border-white/30 shadow-inner">
                         <span className="text-3xl">📘</span></div>
                         <div className="flex flex-col">
-                            <h1 className="text-4xl font-black italic font-serif tracking-tight uppercase leading-none">Sesiones de Aprendizaje {year}</h1><span className="text-xs font-bold text-white/70 uppercase tracking-widest mt-1">Planificación de sesiones - {bimesterLabel} Bimestre</span></div>
+                            <h1 className="text-3xl font-black italic font-serif tracking-tight uppercase leading-none">Sesiones de Aprendizaje {year}</h1><span className="text-xs font-bold text-white/70 uppercase tracking-widest mt-1">Planificación de sesiones - {bimesterLabel} Bimestre</span></div>
                     </div>
                     
                     <div className="bg-white/20 p-3 rounded-[3rem] border border-white/30 shadow-inner backdrop-blur-md flex gap-3 ml-auto lg:mr-16">
-                        <button onClick={handleGenerateAI} disabled={!headerFilled || isGeneratingIA} className={`btn-3d-purple scale-90 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`} title="Completar con IA Armi">
-                            {isGeneratingIA ? <span className="text-xl">✨</span> : <span>🤖</span>}
-                        </button>
-                        <button
-                            onClick={handleOpenLastAiDiagnostic}
-                            className="h-9 w-9 rounded-full border border-white/35 bg-black/15 text-[11px] font-black text-white/90 transition hover:bg-black/25"
-                            title="Ver último diagnóstico IA"
-                        >
-                            IA
-                        </button>
+                        <div className="relative shrink-0">
+                            <button onClick={handleGenerateAI} disabled={!headerFilled || isGeneratingIA} className={`btn-3d-purple scale-90 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`} title={`Completar con IA Armi\n${aiUsageProgress.tokenLabel}`}>
+                                {isGeneratingIA ? <span className="text-xl">✨</span> : <span>🤖</span>}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowAuthScreen(true)}
+                                className="absolute -top-1 -right-1 flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-[10px] font-black text-slate-700 shadow-lg transition hover:bg-slate-50"
+                                title="Configuración de IA"
+                            >
+                                ⚙
+                            </button>
+                        </div>
                         <button onClick={() => { void handleSave(); }} className="btn-3d-plus scale-90" title="Guardar Sesión">
                             <span>+</span>
                         </button>

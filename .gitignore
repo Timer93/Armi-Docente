@@ -29,6 +29,10 @@ release/
 # Runtime / backups / temporales
 sync-runtime/
 temp/
+tmp/
+recovery-candidates/
+desktop.ini
+uploads/user-assets/profiles/
 
 # .NET / C# helper
 .dotnet/

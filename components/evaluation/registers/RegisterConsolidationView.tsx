@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { GoogleGenAI, Type } from '@google/genai';
+import { Type } from '@google/genai';
 import { getAllSesiones, getCompetencias, getDatosGenerales, getEstudiantes, getEvaluacionConclusiones, getEvaluacionRegistros, getEstandares, getSesion, saveEvaluacionConclusiones } from '../../../services/apiService';
 import { Select } from '../../Select';
 import type { GeneralData, Student, TeachingAssignment } from '../../../types';
 import { buildBimesterRegisterAggregation, buildUnitRegisterAggregation, inferBimesterLabelFromUnitNumber } from './register-core';
 import type { AggregatedRegisterResult, AggregatedStudentRegister, EvaluationRecordRow, RegisterLevelCode, SessionDetailEntry, SessionSummaryEntry } from './register-types';
 import { autoResizeTextarea, buildSessionAssessmentModel, extractCapacidades, normalizeLoose, TRANSVERSAL_CAPACITY_MAP } from '../../sessions-view/shared';
+import { createGeminiClient, generateGeminiContent } from '../../../utils/gemini';
 import logoBar from '../../../src/Logo_bar.ico';
 
 interface Props {
@@ -811,7 +812,8 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
         })
       );
 
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = createGeminiClient(apiKey);
+      const preferredGeminiModel = String(generalData?.gemini_model || '').trim();
       const promptRows = requestRows.map((row) => ({
         key: row.key,
         estudiante: row.studentName,
@@ -837,8 +839,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
         `Datos: ${JSON.stringify(promptRows)}`
       ].join(' ');
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
+      const response = await generateGeminiContent(ai, {
         contents: [{ parts: [{ text: prompt }] }],
         config: {
           responseMimeType: 'application/json',
@@ -863,7 +864,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
             required: ['conclusiones']
           }
         }
-      });
+      }, preferredGeminiModel);
 
       const parsed = JSON.parse(response.text || '{}');
       const generatedList = Array.isArray(parsed?.conclusiones) ? parsed.conclusiones as GeneratedConclusionItem[] : [];

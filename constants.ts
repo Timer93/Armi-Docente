@@ -31,6 +31,8 @@ export const INITIAL_GENERAL_DATA: GeneralData = {
   gemini_api_key: '',
   openai_api_key: '',
   ai_provider: 'gemini',
+  gemini_model: '',
+  openai_model: '',
   ai_pedagogical_route: '',
   ai_institutional_problems: '',
   ai_unit_pedagogical_focus: '',

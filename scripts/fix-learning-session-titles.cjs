@@ -6,7 +6,8 @@ const dbPath = path.join(process.env.APPDATA, 'ARMI Docente', 'database', 'armi.
 const reportPath = path.join(process.cwd(), 'temp', 'crea-emprende-title-fix-report.json');
 const AREA_ID = '1774917929135';
 
-const db = new Database(dbPath);
+const db = new Database(dbPath, { timeout: 20000 });
+db.pragma('busy_timeout = 20000');
 
 const configs = [
   { grade: '2do', section: 'A y B', u4Count: 8, profile: 'segundo grado' },
