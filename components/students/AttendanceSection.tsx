@@ -133,8 +133,8 @@ const resolveStudentRowTone = (student: Student) => {
 
 const getStatusGlyph = (status?: string) => {
   switch (String(status || '').toUpperCase()) {
-    case 'P': return 'âœ“';
-    case 'F': return 'âœ•';
+    case 'P': return '✓';
+    case 'F': return '✕';
     case 'T': return 'â°';
     case 'J': return 'â—Œ';
     default: return '';

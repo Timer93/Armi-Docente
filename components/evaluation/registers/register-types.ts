@@ -9,6 +9,8 @@ export interface EvaluationRecordRow {
   instrument_id?: string | number | null;
   criteria_id: string;
   level?: string;
+  grading_mode?: 'literal_traditional' | 'criterial_predominance' | 'hybrid_vigesimal';
+  numeric_score?: number | null;
   observation?: string;
 }
 
@@ -33,6 +35,8 @@ export interface RegisterCompetencyResult {
   source: 'primary' | 'transversal';
   competencyName: string;
   code: RegisterLevelCode;
+  numericScore?: number | null;
+  pending?: boolean;
 }
 
 export interface RegisterCapacityResult {
@@ -41,6 +45,8 @@ export interface RegisterCapacityResult {
   competencyName: string;
   capacityName: string;
   code: RegisterLevelCode;
+  numericScore?: number | null;
+  pending?: boolean;
 }
 
 export interface SessionStudentSnapshot {
@@ -69,6 +75,8 @@ export interface AggregatedStudentRegister {
   studentName: string;
   estado?: string;
   overallCode: RegisterLevelCode;
+  overallNumericScore?: number | null;
+  pending?: boolean;
   competencies: RegisterCompetencyResult[];
   capacities: RegisterCapacityResult[];
 }

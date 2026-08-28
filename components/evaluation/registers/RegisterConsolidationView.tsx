@@ -23,7 +23,6 @@ type CapacityGroup = {
   source: 'primary' | 'transversal';
   capacities: Array<{ key: string; capacityName: string }>;
 };
-
 type GeneratedConclusionItem = {
   key: string;
   logros?: string;
@@ -550,15 +549,23 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
   }, [editableConclusions, conclusionsHydrated, year, areaId, grade, section, conclusionScopeType, conclusionScopeValue, allCompetencyGroups]);
 
   const getAggregatedCompetencyCode = (student: AggregatedStudentRegister, competencyKey: string) => student.competencies.find((i) => i.key === competencyKey)?.code || 'ne';
+  const getAggregatedCompetencyResult = (student: AggregatedStudentRegister, competencyKey: string) => student.competencies.find((i) => i.key === competencyKey);
   const getAggregatedCapacityCode = (student: AggregatedStudentRegister, capacityKey: string) => student.capacities.find((i) => i.key === capacityKey)?.code || '';
-  const getAggregatedCapacityCodeByMeta = (student: AggregatedStudentRegister, competencyName: string, capacityName: string) => {
+  const getAggregatedCapacityResult = (student: AggregatedStudentRegister, capacityKey: string) => student.capacities.find((i) => i.key === capacityKey);
+  const getAggregatedCapacityResultByMeta = (student: AggregatedStudentRegister, competencyName: string, capacityName: string) => {
     const normalizedCompetency = normalizeLoose(competencyName);
     const normalizedCapacity = normalizeLoose(capacityName);
     return student.capacities.find((item) =>
       normalizeLoose(item.competencyName) === normalizedCompetency &&
       normalizeLoose(item.capacityName) === normalizedCapacity
-    )?.code || '';
+    );
   };
+  const getAggregatedCapacityCodeByMeta = (student: AggregatedStudentRegister, competencyName: string, capacityName: string) => {
+    return getAggregatedCapacityResultByMeta(student, competencyName, capacityName)?.code || '';
+  };
+  const getCapacityDisplayResult = (student: AggregatedStudentRegister, capacityKey: string, competencyName: string, capacityName: string) => (
+    getAggregatedCapacityResult(student, capacityKey) || getAggregatedCapacityResultByMeta(student, competencyName, capacityName)
+  );
   const getUnitCompetencyDisplayCode = (student: AggregatedStudentRegister, competencyKey: string, capacityItems: Array<{ key: string; capacityName: string }>, competencyName?: string) => {
     const filledCapacityCodes = capacityItems
       .map((capacity) => getAggregatedCapacityCode(student, capacity.key) || getAggregatedCapacityCodeByMeta(student, competencyName || '', capacity.capacityName))
@@ -588,7 +595,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       .filter((item) => item.code && item.code !== 'ne');
 
     if (!evaluatedCaps.length) {
-      return 'Sin evidencias suficientes para redactar una conclusión descriptiva.';
+      return 'Sin evidencias suficientes para redactar una conclusiÃ³n descriptiva.';
     }
 
     const strengths = evaluatedCaps.filter((item) => item.code === 'a' || item.code === 'ad').map((item) => item.name);
@@ -596,7 +603,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
     const needsSupport = evaluatedCaps.filter((item) => item.code === 'c').map((item) => item.name);
 
     if (competencyCode === 'ad') {
-      return `Destaca en ${competencyName.toLowerCase()}, con desempeño sólido en ${formatCapacityLabelList(strengths || evaluatedCaps.map((item) => item.name))}.`;
+      return `Destaca en ${competencyName.toLowerCase()}, con desempeÃ±o sÃ³lido en ${formatCapacityLabelList(strengths || evaluatedCaps.map((item) => item.name))}.`;
     }
     if (competencyCode === 'a') {
       const supportText = inProgress.length || needsSupport.length
@@ -605,15 +612,15 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       return `Logra satisfactoriamente ${competencyName.toLowerCase()}, evidenciando avance en ${formatCapacityLabelList(strengths.length ? strengths : evaluatedCaps.map((item) => item.name))}.${supportText}`;
     }
     if (competencyCode === 'b') {
-      const progressText = strengths.length ? ` Muestra mejor desempeño en ${formatCapacityLabelList(strengths)}.` : '';
+      const progressText = strengths.length ? ` Muestra mejor desempeÃ±o en ${formatCapacityLabelList(strengths)}.` : '';
       const supportBase = [...inProgress, ...needsSupport];
-      const supportText = supportBase.length ? ` Requiere acompañamiento en ${formatCapacityLabelList(supportBase)}.` : '';
+      const supportText = supportBase.length ? ` Requiere acompaÃ±amiento en ${formatCapacityLabelList(supportBase)}.` : '';
       return `Se encuentra en proceso en ${competencyName.toLowerCase()}.${progressText}${supportText}`;
     }
     if (competencyCode === 'c') {
       return `Se encuentra en inicio en ${competencyName.toLowerCase()} y requiere reforzar ${formatCapacityLabelList(needsSupport.length ? needsSupport : evaluatedCaps.map((item) => item.name))}.`;
     }
-    return 'Sin evidencias suficientes para redactar una conclusión descriptiva.';
+    return 'Sin evidencias suficientes para redactar una conclusiÃ³n descriptiva.';
   };
   const getConclusionKey = (studentId: string, competencyKey: string) => `${studentId}::${competencyKey}`;
   const normalizeConclusionText = (value: string) => String(value || '').replace(/\s+/g, ' ').trim().replace(/^[:;,\-.\s]+/, '');
@@ -769,8 +776,8 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
     if (!apiKey || apiKey === 'undefined' || apiKey === 'null' || apiKey.length < 10) {
       setToastData({
         type: 'error',
-        msg: 'No hay una API key de Gemini válida.',
-        sub: 'Revisa Datos Generales y guarda una llave activa de Google AI Studio antes de usar el botón IA.'
+        msg: 'No hay una API key de Gemini vÃ¡lida.',
+        sub: 'Revisa Datos Generales y guarda una llave activa de Google AI Studio antes de usar el botÃ³n IA.'
       });
       return;
     }
@@ -784,7 +791,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       const primaryGroups = allCompetencyGroups.filter((group) => group.source === 'primary');
       const missingStandards = primaryGroups.filter((group) => !standardsMap.get(normalizeLoose(group.competencyName)));
       if (primaryGroups.length > 0 && missingStandards.length === primaryGroups.length) {
-        throw new Error(`NO_STANDARDS::No se encontraron estándares del grado ${grade} para el área ${areaName}.`);
+        throw new Error(`NO_STANDARDS::No se encontraron estÃ¡ndares del grado ${grade} para el Ã¡rea ${areaName}.`);
       }
 
       const requestRows = aggregation.students.flatMap((student) =>
@@ -886,30 +893,30 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
         type: 'success',
         msg: 'Conclusiones generadas correctamente.',
         sub: missingStandards.length > 0
-          ? `Se generaron con los estándares disponibles. Faltan estándares para: ${missingStandards.map((item) => item.competencyName).join(', ')}.`
-          : 'Se usaron los estándares del grado disponibles en la base de datos.'
+          ? `Se generaron con los estÃ¡ndares disponibles. Faltan estÃ¡ndares para: ${missingStandards.map((item) => item.competencyName).join(', ')}.`
+          : 'Se usaron los estÃ¡ndares del grado disponibles en la base de datos.'
       });
     } catch (error: any) {
       console.error('AI bimester conclusion generation failed:', error);
       const errorStr = String(error?.message || error || '').trim();
       let msg = 'No se pudieron generar las conclusiones con IA.';
-      let sub = 'Ocurrió un problema no identificado durante la generación.';
+      let sub = 'OcurriÃ³ un problema no identificado durante la generaciÃ³n.';
 
       if (errorStr.startsWith('NO_STANDARDS::')) {
-        msg = 'Faltan estándares del grado para esta área.';
+        msg = 'Faltan estÃ¡ndares del grado para esta Ã¡rea.';
         sub = errorStr.replace('NO_STANDARDS::', '');
       } else if (error?.status === 401 || error?.status === 403 || /api[_ ]?key|unauthorized|invalid|permission/i.test(errorStr)) {
-        msg = 'La API key de Gemini no es válida o no tiene permisos.';
+        msg = 'La API key de Gemini no es vÃ¡lida o no tiene permisos.';
         sub = 'Actualiza la llave IA en Datos Generales y vuelve a intentarlo.';
       } else if (error?.status === 429 || /quota|rate limit|exceeded/i.test(errorStr)) {
-        msg = 'La cuota de Gemini está saturada o agotada.';
+        msg = 'La cuota de Gemini estÃ¡ saturada o agotada.';
         sub = 'Espera unos minutos o revisa el estado de tu proyecto en Google AI Studio.';
       } else if (/network|fetch|failed|connection|timeout/i.test(errorStr)) {
-        msg = 'Falló la conexión al servicio de IA.';
+        msg = 'FallÃ³ la conexiÃ³n al servicio de IA.';
         sub = 'Verifica internet, el backend local y vuelve a probar.';
       } else if (/empty_response|empty/i.test(errorStr)) {
-        msg = 'La IA respondió vacío.';
-        sub = 'El servicio no devolvió contenido útil. Intenta nuevamente.';
+        msg = 'La IA respondiÃ³ vacÃ­o.';
+        sub = 'El servicio no devolviÃ³ contenido Ãºtil. Intenta nuevamente.';
       } else if (errorStr) {
         sub = errorStr.slice(0, 240);
       }
@@ -936,7 +943,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       )).join('\n');
 
       await navigator.clipboard.writeText(plainText);
-      setCopySiagieMessage({ type: 'success', text: 'Se copiaron las notas y conclusiones de las competencias del área, sin encabezados, listas para pegar en SIAGIE.' });
+      setCopySiagieMessage({ type: 'success', text: 'Se copiaron las notas y conclusiones de las competencias del Ã¡rea, sin encabezados, listas para pegar en SIAGIE.' });
     } catch (error) {
       console.error('SIAGIE copy failed:', error);
       setCopySiagieMessage({ type: 'error', text: 'No se pudo copiar al portapapeles. Intenta nuevamente.' });
@@ -965,7 +972,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
       return '-';
     }
   }, [generalData]);
-  const printInstitutionName = String(generalData?.institution || 'Institución Educativa').trim();
+  const printInstitutionName = String(generalData?.institution || 'InstituciÃ³n Educativa').trim();
   const printInstitutionPlace = String(generalData?.lugar || '').trim();
   const printDistrict = String(generalData?.district || '').trim();
   const printProvince = String(generalData?.province || '').trim();
@@ -1101,7 +1108,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
   }, [aggregation, mode]);
 
   const formatSessionSources = (sources: string[]) => {
-    if (!sources.length) return 'Sin sesiones con evaluación registrada';
+    if (!sources.length) return 'Sin sesiones con evaluaciÃ³n registrada';
     if (sources.length === 1) return sources[0];
     if (sources.length === 2) return `${sources[0]} y ${sources[1]}`;
     return `${sources.slice(0, -1).join(', ')} y ${sources[sources.length - 1]}`;
@@ -1125,7 +1132,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
         </div>
         <div className="text-center">
           <div className="session-register-print-school">
-            {`Institución Educativa ${printInstitutionName || 'Institución Educativa'}${printInstitutionPlace ? ` - ${printInstitutionPlace}` : ''}`}
+            {`InstituciÃ³n Educativa ${printInstitutionName || 'InstituciÃ³n Educativa'}${printInstitutionPlace ? ` - ${printInstitutionPlace}` : ''}`}
           </div>
           <div className="session-register-print-location">{printLocationLine || '-'}</div>
           <div className="session-register-print-motto">{printInstitutionMotto || areaName}</div>
@@ -1144,14 +1151,14 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
               <td className={`${printHeaderDarkCellClass} w-[72px]`}>Grado:</td>
               <td className={`${printHeaderValueCellClass} w-[52px]`}>{grade || '-'}</td>
               <td className={`${printHeaderDarkCellClass} w-[72px]`}>Unidad:</td>
-              <td className={`${printHeaderValueCellClass} w-[64px]`}>N° {unitNumber || '-'}</td>
+              <td className={`${printHeaderValueCellClass} w-[64px]`}>NÂ° {unitNumber || '-'}</td>
               <td className={`${printHeaderDarkCellClass} w-[72px]`}>Registro:</td>
               <td className={printHeaderValueCellClass}>{title}</td>
             </tr>
             <tr>
-              <td className={printHeaderDarkCellClass}>Área Curricular:</td>
+              <td className={printHeaderDarkCellClass}>Ãrea Curricular:</td>
               <td className={`${printHeaderValueCellClass} whitespace-nowrap`}>{areaName || '-'}</td>
-              <td className={printHeaderDarkCellClass}>Sección:</td>
+              <td className={printHeaderDarkCellClass}>SecciÃ³n:</td>
               <td className={printHeaderValueCellClass}>{section || '-'}</td>
               <td className={printHeaderDarkCellClass}>Bimestre:</td>
               <td className={printHeaderValueCellClass}>{bimesterLabel || inferBimesterLabelFromUnitNumber(unitNumber || '') || '-'}</td>
@@ -1161,7 +1168,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
             <tr>
               <td className={printHeaderDarkCellClass}>Docente:</td>
               <td className={`${printHeaderValueCellClass} whitespace-nowrap`}>{teacherName || '-'}</td>
-              <td className={printHeaderDarkCellClass}>Año:</td>
+              <td className={printHeaderDarkCellClass}>AÃ±o:</td>
               <td className={printHeaderValueCellClass}>{year || '-'}</td>
               <td className={printHeaderDarkCellClass}>Estudiantes:</td>
               <td className={printHeaderValueCellClass}>{totals.enrolled}</td>
@@ -1176,7 +1183,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
 
   const renderPrintFooter = () => (
     <div className="session-register-print-footer hidden print:grid">
-      <span className="justify-self-start">{areaName || 'Área curricular'}</span>
+      <span className="justify-self-start">{areaName || 'Ãrea curricular'}</span>
       <span className="justify-self-center">{mode === 'unit' ? `Unidad ${unitNumber || '-'}` : `Bimestre ${bimesterLabel || '-'}`}</span>
       <span className="justify-self-end">{teacherName || 'Docente'}</span>
     </div>
@@ -1187,7 +1194,9 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
     extra = '',
     useSpecialTone = false,
     variant: 'detail' | 'logro' = 'detail',
-    tooltipText = ''
+    tooltipText = '',
+    numericScore: number | null = null,
+    pending = false
   ) => {
     const baseTone = variant === 'detail'
       ? (LEVEL_CELL_TONE_MAP[code] || 'bg-slate-50 text-slate-700')
@@ -1195,7 +1204,14 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
 
     return (
       <td className={`group relative border px-1 py-0.5 text-center text-[10px] font-black ${useSpecialTone ? 'border-white/10 bg-inherit text-inherit shadow-none' : `${baseTone} border-slate-300`} ${extra}`}>
-        {LEVEL_LABEL_MAP[code] || 'NE'}
+        {pending ? (
+          <span title="Falta registrar una o mÃ¡s notas requeridas">PEND.</span>
+        ) : (
+          <span className="inline-flex flex-col items-center leading-none" title={numericScore !== null ? `Nota vigesimal exacta: ${numericScore.toFixed(2)}` : undefined}>
+            <span>{LEVEL_LABEL_MAP[code] || 'NE'}</span>
+            {numericScore !== null ? <span className="mt-0.5 text-[8px] font-bold opacity-80">{numericScore.toFixed(1)}</span> : null}
+          </span>
+        )}
         {showSessionSources && tooltipText && !useSpecialTone && (
           <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-48 -translate-x-1/2 rounded-xl bg-slate-950 px-3 py-2 text-[10px] font-medium normal-case text-white shadow-2xl group-hover:block print:hidden">
             <div className="mb-1 text-[9px] font-black uppercase tracking-wide text-emerald-300">Sesiones origen</div>
@@ -1211,9 +1227,11 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
     extra = '',
     useSpecialTone = false,
     variant: 'detail' | 'logro' = 'detail',
-    tooltipText = ''
+    tooltipText = '',
+    numericScore: number | null = null,
+    pending = false
   ) => (
-    renderLevelCell(code, extra, useSpecialTone, variant, tooltipText)
+    renderLevelCell(code, extra, useSpecialTone, variant, tooltipText, numericScore, pending)
   );
 
   return (
@@ -1259,8 +1277,8 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                   onClick={copyAreaCompetenciesForSiagie}
                   disabled={loading || detailLoading || !aggregation || !primaryCapacityGroups.length}
                   className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-sky-200 bg-sky-50 text-sky-700 shadow-sm transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
-                  title="Copiar notas y conclusiones del área para SIAGIE"
-                  aria-label="Copiar notas y conclusiones del área para SIAGIE"
+                  title="Copiar notas y conclusiones del Ã¡rea para SIAGIE"
+                  aria-label="Copiar notas y conclusiones del Ã¡rea para SIAGIE"
                 >
                   <CopyMiniIcon />
                 </button>
@@ -1351,7 +1369,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                 <table className={`${hasExpandedConclusions ? 'min-w-[2200px] table-auto' : 'w-full table-fixed'} border-collapse text-[8px]`}>
                   <thead>
                     <tr>
-                      <th rowSpan={2} className={`w-[24px] border border-slate-300 px-0.5 py-1 text-center font-black uppercase ${theme.headerMid}`}>N°</th>
+                      <th rowSpan={2} className={`w-[24px] border border-slate-300 px-0.5 py-1 text-center font-black uppercase ${theme.headerMid}`}>NÂ°</th>
                       <th rowSpan={2} className={`w-[230px] border border-slate-300 px-1 py-1 text-center font-black uppercase ${theme.headerMid}`}>Apellidos y nombres</th>
                       {primaryCapacityGroups.map((group: any) => <th key={group.competencyKey} colSpan={isConclusionExpanded(group.competencyKey) ? 2 : group.capacities.length + 1} className={`border border-slate-300 px-2 py-1 text-center font-black uppercase ${theme.headerDark}`}>{group.competencyName}</th>)}
                       {transversalCapacityGroups.map((group: any) => <th key={group.competencyKey} colSpan={isConclusionExpanded(group.competencyKey) ? 2 : group.capacities.length + 1} className={`border border-slate-300 px-2 py-1 text-center font-black uppercase ${theme.transHeader}`}>{group.competencyName}</th>)}
@@ -1367,14 +1385,14 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                                 type="button"
                                 onClick={() => setExpandedConclusions((prev) => ({ ...prev, [group.competencyKey]: !prev[group.competencyKey] }))}
                                 className="inline-flex items-center justify-center rounded bg-white/15 px-1.5 py-0.5 text-[10px] font-black leading-none hover:bg-white/25 print:hidden"
-                                title={isConclusionExpanded(group.competencyKey) ? 'Ocultar conclusión' : 'Mostrar conclusión'}
+                                title={isConclusionExpanded(group.competencyKey) ? 'Ocultar conclusiÃ³n' : 'Mostrar conclusiÃ³n'}
                               >
                                 <ToggleConclusionIcon expanded={isConclusionExpanded(group.competencyKey)} />
                               </button>
                             </div>
                           </th>
                           {isConclusionExpanded(group.competencyKey) ? (
-                            <th className={`w-[520px] min-w-[520px] border border-slate-300 px-1 py-0.5 text-left text-[7px] font-semibold uppercase ${theme.headerMid}`}>Conclusión</th>
+                            <th className={`w-[520px] min-w-[520px] border border-slate-300 px-1 py-0.5 text-left text-[7px] font-semibold uppercase ${theme.headerMid}`}>ConclusiÃ³n</th>
                           ) : null}
                         </React.Fragment>
                       ))}
@@ -1388,14 +1406,14 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                                 type="button"
                                 onClick={() => setExpandedConclusions((prev) => ({ ...prev, [group.competencyKey]: !prev[group.competencyKey] }))}
                                 className="inline-flex items-center justify-center rounded bg-white/15 px-1.5 py-0.5 text-[10px] font-black leading-none hover:bg-white/25 print:hidden"
-                                title={isConclusionExpanded(group.competencyKey) ? 'Ocultar conclusión' : 'Mostrar conclusión'}
+                                title={isConclusionExpanded(group.competencyKey) ? 'Ocultar conclusiÃ³n' : 'Mostrar conclusiÃ³n'}
                               >
                                 <ToggleConclusionIcon expanded={isConclusionExpanded(group.competencyKey)} />
                               </button>
                             </div>
                           </th>
                           {isConclusionExpanded(group.competencyKey) ? (
-                            <th className={`w-[520px] min-w-[520px] border border-slate-300 px-1 py-0.5 text-left text-[7px] font-semibold uppercase ${theme.transHeader}`}>Conclusión</th>
+                            <th className={`w-[520px] min-w-[520px] border border-slate-300 px-1 py-0.5 text-left text-[7px] font-semibold uppercase ${theme.transHeader}`}>ConclusiÃ³n</th>
                           ) : null}
                         </React.Fragment>
                       ))}
@@ -1416,14 +1434,18 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                               '',
                               hasSpecialRow,
                               'detail',
-                              formatSessionSources(getCapacitySessionSources(student.studentId, capacity.key))
+                              formatSessionSources(getCapacitySessionSources(student.studentId, capacity.key)),
+                              getCapacityDisplayResult(student, capacity.key, group.competencyName, capacity.capacityName)?.numericScore ?? null,
+                              !!getCapacityDisplayResult(student, capacity.key, group.competencyName, capacity.capacityName)?.pending
                             )) : null}
                             {renderLevelCellWithSources(
                               getUnitCompetencyDisplayCode(student, group.competencyKey, group.capacities, group.competencyName),
                               'border-l-2 border-l-slate-500',
                               hasSpecialRow,
                               'logro',
-                              formatSessionSources(getCompetencySessionSources(student.studentId, group.competencyKey))
+                              formatSessionSources(getCompetencySessionSources(student.studentId, group.competencyKey)),
+                              getAggregatedCompetencyResult(student, group.competencyKey)?.numericScore ?? null,
+                              !!getAggregatedCompetencyResult(student, group.competencyKey)?.pending
                             )}
                             {isConclusionExpanded(group.competencyKey) ? (
                               <td className={`w-[520px] min-w-[520px] border px-2 py-1 align-top ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-300 bg-white/80'}`}>
@@ -1447,14 +1469,18 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
                               '',
                               hasSpecialRow,
                               'detail',
-                              formatSessionSources(getCapacitySessionSources(student.studentId, capacity.key))
+                              formatSessionSources(getCapacitySessionSources(student.studentId, capacity.key)),
+                              getCapacityDisplayResult(student, capacity.key, group.competencyName, capacity.capacityName)?.numericScore ?? null,
+                              !!getCapacityDisplayResult(student, capacity.key, group.competencyName, capacity.capacityName)?.pending
                             )) : null}
                             {renderLevelCellWithSources(
                               getUnitCompetencyDisplayCode(student, group.competencyKey, group.capacities, group.competencyName),
                               'border-l-2 border-l-emerald-700',
                               hasSpecialRow,
                               'logro',
-                              formatSessionSources(getCompetencySessionSources(student.studentId, group.competencyKey))
+                              formatSessionSources(getCompetencySessionSources(student.studentId, group.competencyKey)),
+                              getAggregatedCompetencyResult(student, group.competencyKey)?.numericScore ?? null,
+                              !!getAggregatedCompetencyResult(student, group.competencyKey)?.pending
                             )}
                             {isConclusionExpanded(group.competencyKey) ? (
                               <td className={`w-[520px] min-w-[520px] border px-2 py-1 align-top ${hasSpecialRow ? 'border-white/10 bg-inherit text-inherit' : 'border-slate-300 bg-white/80'}`}>
@@ -1583,7 +1609,7 @@ export const RegisterConsolidationView: React.FC<Props> = ({ mode, title, badge,
               </div>
 
               <div className="mt-4 rounded-2xl bg-slate-50 px-4 py-3 text-[11px] font-medium text-slate-600">
-                Fórmula usada: primero se promedia cada capacidad con todas sus sesiones del bimestre; luego la competencia se calcula con el promedio de esas capacidades consolidadas.
+                FÃ³rmula usada: primero se promedia cada capacidad con todas sus sesiones del bimestre; luego la competencia se calcula con el promedio de esas capacidades consolidadas.
               </div>
             </div>
           )}

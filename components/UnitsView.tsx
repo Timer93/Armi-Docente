@@ -138,6 +138,7 @@ const SESSION_TOKEN_STOPWORDS = new Set([
 
 type SessionEvidenceOption = {
     id: string;
+    criterionGroupId: string;
     text: string;
     color: string;
     capacidad: string;
@@ -222,8 +223,13 @@ const buildEmptySessionFromDetail = (detail?: { id: number; date: string; combin
     transversales: [],
     capacidades: [],
     selectedCriteriaTexts: [],
+    selectedCriteriaIds: null,
+    availableCriteriaOptions: [],
+    capacityCriteriaOptions: [],
+    criteriaSelectionTouched: false,
     selectedEvidenceIds: [],
     availableEvidenceOptions: [],
+    evidenceDistributionMode: 'auto',
     fechasPorSeccion: detail?.combinations || []
 });
 
@@ -362,6 +368,34 @@ const AuthOverlay: React.FC<{
     const [unitPedagogicalFocus, setUnitPedagogicalFocus] = useState(initialUnitPedagogicalFocus);
     const canSave = provider === 'gemini' ? !!inputKey.trim() : !!openaiKey.trim();
 
+    const saveConfiguration = () => onSave({
+        provider,
+        geminiKey: inputKey.trim(),
+        openaiKey: openaiKey.trim(),
+        geminiModel,
+        openaiModel,
+        aiPedagogicalRoute: aiPedagogicalRoute.trim(),
+        institutionalProblems: institutionalProblems.trim(),
+        unitPedagogicalFocus: unitPedagogicalFocus.trim()
+    });
+
+    useEffect(() => {
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key !== 'Enter' || event.defaultPrevented || isSaving || !canSave) return;
+            const target = event.target as HTMLElement | null;
+            if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+            event.preventDefault();
+            saveConfiguration();
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            window.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [provider, inputKey, openaiKey, geminiModel, openaiModel, aiPedagogicalRoute, institutionalProblems, unitPedagogicalFocus, isSaving, canSave]);
+
     useEffect(() => {
         let cancelled = false;
         const loadModels = async () => {
@@ -419,8 +453,8 @@ const AuthOverlay: React.FC<{
     }, [provider, inputKey, openaiKey]);
 
     return (
-        <div className="fixed inset-0 z-[5000] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
-            <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col md:flex-row">
+        <div className="fixed inset-0 z-[5000] flex items-start justify-center overflow-y-auto overscroll-contain p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
+            <div className="my-2 bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col md:flex-row">
                 <div className="bg-blue-600 w-full md:w-72 p-8 text-white flex flex-col justify-between">
                     <div>
                         <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center text-3xl mb-6 shadow-inner">🤖</div>
@@ -561,16 +595,7 @@ const AuthOverlay: React.FC<{
                     </div>
 
                     <button 
-                        onClick={() => onSave({
-                            provider,
-                            geminiKey: inputKey.trim(),
-                            openaiKey: openaiKey.trim(),
-                            geminiModel,
-                            openaiModel,
-                            aiPedagogicalRoute: aiPedagogicalRoute.trim(),
-                            institutionalProblems: institutionalProblems.trim(),
-                            unitPedagogicalFocus: unitPedagogicalFocus.trim()
-                        })}
+                        onClick={saveConfiguration}
                         disabled={!canSave || isSaving}
                         className="btn-water water-blue w-full py-5 rounded-[2rem] text-white font-black text-[11px] uppercase tracking-[0.2em] shadow-xl disabled:opacity-50 mt-8 h-[64px]"
                     >
@@ -627,8 +652,8 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         criteriosTrans: {}, evidenciasTrans: {}, instrumentosTrans: {},
         enfoques: {}, 
         sesiones: [
-            { id: 1, title: '', cap: '', des: '', con: '', evi: '', eval: '', competencia: '', transversales: [], capacidades: [], selectedEvidenceIds: [], availableEvidenceOptions: [] },
-            { id: 2, title: '', cap: '', des: '', con: '', evi: '', eval: '', competencia: '', transversales: [], capacidades: [], selectedEvidenceIds: [], availableEvidenceOptions: [] }
+            buildEmptySessionFromDetail({ id: 1, date: '', combinations: [] }),
+            buildEmptySessionFromDetail({ id: 2, date: '', combinations: [] })
         ],
         recursos: { actividades: '', medios: '', materiales: '', software: '', espacios: '' },
         bibliografia: { libros: '', links: '' },
@@ -947,6 +972,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             (group.rows || []).flatMap((row: any) =>
                 splitBulletLikeText(unitData.evidencias?.[row.originalIdx] || '').map((text, evidenceIdx) => ({
                     id: `area-${row.originalIdx}-${evidenceIdx}`,
+                    criterionGroupId: `area-${group.id}-${row.originalIdx}`,
                     text,
                     color: AREA_TEXT_COLOR,
                     capacidad: String(row.capacidades || ''),
@@ -963,6 +989,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             (group.rows || []).flatMap((row: any) =>
                 splitBulletLikeText(unitData.evidenciasTrans?.[row.originalIdx] || '').map((text, evidenceIdx) => ({
                     id: `trans-${row.originalIdx}-${evidenceIdx}`,
+                    criterionGroupId: `trans-${group.id}-${row.originalIdx}`,
                     text,
                     color: TRANS_TEXT_COLORS_STRONG[transIdx % TRANS_TEXT_COLORS_STRONG.length],
                     capacidad: String(row.capacidades || ''),
@@ -986,6 +1013,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             competencia: session?.competencia || '',
             transversales: session?.transversales || [],
             capacidades: session?.capacidades || [],
+            selectedCriteriaIds: session?.selectedCriteriaIds || [],
             selectedEvidenceIds: session?.selectedEvidenceIds || []
         }))
     ), [unitData.sesiones]);
@@ -1002,6 +1030,16 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             });
         });
         return usage;
+    }, [unitData.sesiones]);
+
+    const criteriaOwners = useMemo(() => {
+        const owners = new Map<string, number>();
+        (unitData.sesiones || []).forEach((session: any) => {
+            (Array.isArray(session?.selectedCriteriaIds) ? session.selectedCriteriaIds : []).forEach((criteriaId: string) => {
+                if (!owners.has(criteriaId)) owners.set(criteriaId, Number(session.id));
+            });
+        });
+        return owners;
     }, [unitData.sesiones]);
 
     // Lógica para autoseleccionar competencia si solo hay una
@@ -1123,228 +1161,247 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const deriveSessionEvaluationData = (session: any, sourceData: any) => {
-        const selectedCapacities = session.capacidades || [];
-        let criteriaText = "";
-        let evidenceText = "";
-        let evalInstrument = session.eval || "";
-        const criteriaItems: { text: string; color: string }[] = [];
-        const evidenceItems: { text: string; color: string }[] = [];
+        const selectedCapacities = Array.isArray(session.capacidades) ? session.capacidades : [];
+        const relevantAreaComp = prioritizedCompetencies.find((group) => group.id === session.competencia);
+        const relevantTransComps = groupedTransversales.filter((group) =>
+            (session.transversales || []).some((id: string) => normalizeLoose(id) === normalizeLoose(group.id))
+        );
+        const transIdxById = new Map(groupedTransversales.map((group, index) => [group.id, index]));
 
-        const relevantAreaComp = prioritizedCompetencies.find(pc => pc.id === session.competencia);
-        const relevantTransComps = groupedTransversales.filter(gt => (session.transversales || []).includes(gt.id));
-        const transIdxById = new Map(groupedTransversales.map((gt, i) => [gt.id, i]));
-        const allRelevantRows = [
-            ...(relevantAreaComp?.rows || []),
-            ...relevantTransComps.flatMap(gt => gt.rows)
-        ];
+        const relevantRows = [
+            ...(relevantAreaComp?.rows || []).map((row: any) => ({ row, source: 'area' as const, owner: relevantAreaComp })),
+            ...relevantTransComps.flatMap((group) =>
+                group.rows.map((row: any) => ({ row, source: 'transversal' as const, owner: group }))
+            )
+        ].filter((entry, index, all) =>
+            all.findIndex((candidate) =>
+                candidate.source === entry.source
+                && candidate.owner.id === entry.owner.id
+                && candidate.row.originalIdx === entry.row.originalIdx
+            ) === index
+        );
 
-        const filteredRows = allRelevantRows.filter((row, rowIdx, arr) => (
-            selectedCapacities.includes(row.capacidades) &&
-            arr.findIndex(candidate => (
-                candidate.capacidades === row.capacidades &&
-                candidate.originalIdx === row.originalIdx &&
-                candidate.desempenos_dcbn === row.desempenos_dcbn
-            )) === rowIdx
-        ));
+        const capacityCriteriaOptions = relevantRows.map((entry) => {
+            const matrixIdx = entry.row.originalIdx;
+            const isTrans = entry.source === 'transversal';
+            const rawCriteria = isTrans
+                ? sourceData.criteriosTrans[matrixIdx] || ''
+                : sourceData.criterios[matrixIdx] || '';
+            const criterionText = normalizeBulletArtifacts(rawCriteria).replace(/^\s*•\s*•\s*/gm, '• ').trim();
+            const transIdx = isTrans ? Number(transIdxById.get(entry.owner.id) ?? 0) : -1;
+            const id = isTrans
+                ? `trans-${entry.owner.id}-${matrixIdx}`
+                : `area-${entry.owner.id}-${matrixIdx}`;
+            return criterionText ? {
+                id,
+                text: criterionText,
+                color: isTrans ? TRANS_TEXT_COLORS_STRONG[transIdx % TRANS_TEXT_COLORS_STRONG.length] : AREA_TEXT_COLOR,
+                capacidad: String(entry.row.capacidades || ''),
+                competencia: String(entry.owner.id || ''),
+                isTrans,
+                matrixIdx: Number(matrixIdx)
+            } : null;
+        }).filter(Boolean) as any[];
 
-        filteredRows.forEach((row) => {
-            const bullet = filteredRows.length > 1 ? "• " : "";
-            const matrixIdx = row.originalIdx;
-            const transGroup = relevantTransComps.find(gt => gt.rows.includes(row));
-            const transIdx = transGroup ? Number(transIdxById.get(transGroup.id) ?? 0) : -1;
-            const isTrans = transIdx !== -1;
-            const rawCriteria = isTrans ? (sourceData.criteriosTrans[matrixIdx] || "") : (sourceData.criterios[matrixIdx] || "");
-            const normalizedRaw = normalizeBulletArtifacts(rawCriteria).replace(/^\s*•\s*•\s*/gm, "• ");
-            const hasBullets = /^\s*[•-]\s+/m.test(normalizedRaw);
-            const cleaned = normalizedRaw.replace(/^\s*[•-]\s*/gm, "").trim();
-            const colorClass = isTrans ? TRANS_TEXT_COLORS_STRONG[transIdx % TRANS_TEXT_COLORS_STRONG.length] : AREA_TEXT_COLOR;
+        const availableCriteriaOptions = capacityCriteriaOptions.filter((criterion) =>
+            selectedCapacities.some((capacity: string) => normalizeLoose(capacity) === normalizeLoose(criterion.capacidad))
+        );
+        const availableCriteriaIds = new Set(availableCriteriaOptions.map((criterion) => criterion.id));
+        const selectedCriteriaIds = session.criteriaSelectionTouched && Array.isArray(session.selectedCriteriaIds)
+            ? session.selectedCriteriaIds.filter((criteriaId: string) => availableCriteriaIds.has(criteriaId))
+            : availableCriteriaOptions.map((criterion) => criterion.id);
+        const selectedCriteriaOptions = availableCriteriaOptions.filter((criterion) => selectedCriteriaIds.includes(criterion.id));
+        const criteriaItems = selectedCriteriaOptions.map((criterion) => ({
+            text: criterion.text,
+            color: criterion.color,
+            sourceCriteriaId: criterion.id,
+            capacidad: criterion.capacidad
+        }));
+        const criteriaText = criteriaItems.map((item) => item.text).join('\n').trim();
 
-            if (cleaned) {
-                const line = hasBullets ? normalizedRaw.trim() : `${bullet}${cleaned}`;
-                criteriaItems.push({ text: line, color: colorClass });
-                criteriaText += `${line}\n`;
-            }
-
-            const evidence = isTrans ? (sourceData.evidenciasTrans[matrixIdx] || "") : (sourceData.evidencias[matrixIdx] || "");
-            if (evidence) {
-                const line = `${bullet}${evidence}`;
-                evidenceItems.push({ text: line, color: colorClass });
-                evidenceText += `${line}\n`;
-            }
-
-            const instrument = isTrans ? (sourceData.instrumentosTrans[matrixIdx] || "") : (sourceData.instrumentos[matrixIdx] || "");
-            if (instrument && !isTrans) {
-                evalInstrument = instrument;
-            } else if (instrument && !evalInstrument) {
-                evalInstrument = instrument;
-            }
-        });
-
-        const persistedCriteriaTexts = Array.isArray(session.selectedCriteriaTexts)
-            ? session.selectedCriteriaTexts.map((text: string) => cleanListLine(String(text || ''))).filter(Boolean)
-            : [];
-
-        if (persistedCriteriaTexts.length > 0) {
-            criteriaItems.length = 0;
-            criteriaText = '';
-            persistedCriteriaTexts.forEach((text: string, idx: number) => {
-                const line = `${persistedCriteriaTexts.length > 1 ? '• ' : '• '}${text}`.trim();
-                criteriaItems.push({ text: line, color: AREA_TEXT_COLOR });
-                criteriaText += `${line}${idx < persistedCriteriaTexts.length - 1 ? '\n' : ''}`;
-            });
-        } else if (normalizeLoose(session.des || '')) {
-            criteriaItems.length = 0;
-            criteriaText = String(session.des || '').trim();
-            const existingCriteriaItems = Array.isArray(session.criteriaItems) ? session.criteriaItems : [];
-            if (existingCriteriaItems.length > 0) {
-                existingCriteriaItems.forEach((item: any) => {
-                    criteriaItems.push({
-                        ...item,
-                        text: normalizeBulletArtifacts(String(item?.text || '')).trim() || '•'
-                    });
-                });
-            } else {
-                splitBulletLikeText(session.des || '').forEach((line) => {
-                    criteriaItems.push({
-                        text: `• ${cleanListLine(line)}`.trim(),
-                        color: AREA_TEXT_COLOR
-                    });
-                });
-            }
-        }
-
-        const availableEvidenceOptions = sessionEvidenceCatalog.filter((candidate) => {
-            if (!selectedCapacities.includes(candidate.capacidad)) return false;
-            if (candidate.isTrans) {
-                return (session.transversales || []).includes(candidate.competencia);
-            }
-            return !session.competencia || candidate.competencia === session.competencia;
-        });
-
-        const sessionContextTokens = new Set(extractMeaningfulTokens([
-            session.title || '',
-            session.con || '',
-            selectedCapacities.join(' '),
-            session.competencia || ''
-        ].join(' ')));
-
-        const scoreCandidate = (candidate: SessionEvidenceOption) => {
-            let score = 0;
-            candidate.tokens.forEach((token) => {
-                if (sessionContextTokens.has(token)) score += 1;
-            });
-            if (normalizeLoose(candidate.capacidad) && selectedCapacities.some((cap: string) => normalizeLoose(cap) === normalizeLoose(candidate.capacidad))) {
-                score += 2;
-            }
-            if (!candidate.isTrans && candidate.competencia === session.competencia) {
-                score += 1;
-            }
-            return score;
-        };
-
-        const validExistingIds = Array.isArray(session.selectedEvidenceIds)
+        const selectedCriteriaSet = new Set(selectedCriteriaIds);
+        const availableEvidenceOptions = sessionEvidenceCatalog.filter((candidate) =>
+            selectedCriteriaSet.has(candidate.criterionGroupId)
+            && selectedCapacities.some((capacity: string) => normalizeLoose(capacity) === normalizeLoose(candidate.capacidad))
+            && (candidate.isTrans
+                ? (session.transversales || []).some((id: string) => normalizeLoose(id) === normalizeLoose(candidate.competencia))
+                : !session.competencia || candidate.competencia === session.competencia)
+        );
+        const validSelectedEvidenceIds = Array.isArray(session.selectedEvidenceIds)
             ? session.selectedEvidenceIds.filter((id: string) => availableEvidenceOptions.some((candidate) => candidate.id === id))
             : [];
-        const hasPersistedEvidenceText = normalizeLoose(session.evi || '').length > 0;
+        const selectedEvidenceOptions = session.evidenceDistributionMode === 'manual'
+            ? availableEvidenceOptions.filter((candidate) => validSelectedEvidenceIds.includes(candidate.id))
+            : availableEvidenceOptions;
 
-        const inferredExistingIds = validExistingIds.length > 0
-            ? []
-            : Array.from(
-                new Set(
-                    [
-                        ...(Array.isArray(session.evidenceItems) ? session.evidenceItems.map((item: any) => item?.text || '') : []),
-                        ...splitBulletLikeText(session.evi || '')
-                    ]
-                        .map((text) => cleanListLine(normalizeBulletArtifacts(text)))
-                        .filter(Boolean)
-                        .flatMap((text) =>
-                            availableEvidenceOptions
-                                .filter((candidate) => normalizeLoose(candidate.text) === normalizeLoose(text))
-                                .map((candidate) => candidate.id)
-                        )
-                )
-            );
-
-        const autoSelectedIds = (() => {
-            if (validExistingIds.length > 0) return validExistingIds;
-            if (inferredExistingIds.length > 0) return inferredExistingIds;
-            if (hasPersistedEvidenceText) return [];
-
-            const ranked = [...availableEvidenceOptions]
-                .map((candidate) => ({
-                    id: candidate.id,
-                    score: scoreCandidate(candidate),
-                    isTrans: candidate.isTrans
-                }))
-                .sort((left, right) => {
-                    if (right.score !== left.score) return right.score - left.score;
-                    if (left.isTrans !== right.isTrans) return Number(left.isTrans) - Number(right.isTrans);
-                    return left.id.localeCompare(right.id);
-                });
-
-            const best = ranked.find((candidate) => candidate.score > 0) || ranked[0];
-            return best ? [best.id] : [];
-        })();
-
-        const selectedEvidenceIds = autoSelectedIds;
-        const selectedEvidenceOptions = availableEvidenceOptions.filter((candidate) => selectedEvidenceIds.includes(candidate.id));
-
-        if (selectedEvidenceOptions.length > 0) {
-            evidenceItems.length = 0;
-            evidenceText = '';
-            selectedEvidenceOptions.forEach((candidate, idx) => {
-                const prefix = selectedEvidenceOptions.length > 1 ? '• ' : '';
-                const line = `${prefix}${normalizeBulletArtifacts(candidate.text)}`.trim();
-                evidenceItems.push({
-                    text: line,
-                    color: candidate.color,
-                    sourceEvidenceId: candidate.id,
-                    capacidad: candidate.capacidad
-                } as any);
-                evidenceText += `${line}${idx < selectedEvidenceOptions.length - 1 ? '\n' : ''}`;
+        let evalInstrument = session.eval || '';
+        relevantRows
+            .filter((entry) => selectedCapacities.some((capacity: string) => normalizeLoose(capacity) === normalizeLoose(entry.row.capacidades)))
+            .forEach((entry) => {
+                const matrixIdx = entry.row.originalIdx;
+                const instrument = entry.source === 'transversal'
+                    ? sourceData.instrumentosTrans[matrixIdx] || ''
+                    : sourceData.instrumentos[matrixIdx] || '';
+                if ((instrument && entry.source === 'area') || (instrument && !evalInstrument)) evalInstrument = instrument;
             });
-        } else if (normalizeLoose(session.evi || '')) {
-            evidenceText = String(session.evi || '').trim();
-            evidenceItems.length = 0;
-            const existingEvidenceItems = Array.isArray(session.evidenceItems) ? session.evidenceItems : [];
-            if (existingEvidenceItems.length > 0) {
-                existingEvidenceItems.forEach((item: any) => {
-                    evidenceItems.push({
-                        ...item,
-                        text: normalizeBulletArtifacts(String(item?.text || '')).trim() || '•'
-                    });
-                });
-            } else {
-                splitBulletLikeText(session.evi || '').forEach((line) => {
-                    evidenceItems.push({
-                        text: `• ${cleanListLine(line)}`.trim(),
-                        color: AREA_TEXT_COLOR
-                    } as any);
-                });
-            }
-        }
+
+        const evidenceItems = session.evidenceDistributionMode === 'manual' && selectedEvidenceOptions.length === 0
+            ? (Array.isArray(session.evidenceItems) ? session.evidenceItems : [])
+            : selectedEvidenceOptions.map((candidate) => ({
+                text: `${selectedEvidenceOptions.length > 1 ? '• ' : ''}${normalizeBulletArtifacts(candidate.text)}`.trim(),
+                color: candidate.color,
+                sourceEvidenceId: candidate.id,
+                sourceCriteriaId: candidate.criterionGroupId,
+                capacidad: candidate.capacidad
+            }));
+        const derivedEvidenceText = evidenceItems.map((item: any) => item.text).join('\n').trim();
 
         return {
-            des: criteriaText.trim(),
-            evi: evidenceText.trim(),
+            des: criteriaText,
+            evi: session.evidenceDistributionMode === 'manual' && evidenceItems.length === 0
+                ? String(session.evi || '').trim()
+                : derivedEvidenceText,
             eval: evalInstrument,
             criteriaItems,
+            availableCriteriaOptions,
+            capacityCriteriaOptions,
+            selectedCriteriaIds,
+            criteriaSelectionTouched: Boolean(session.criteriaSelectionTouched),
             evidenceItems,
-            selectedEvidenceIds,
-            availableEvidenceOptions
+            selectedEvidenceIds: session.evidenceDistributionMode === 'manual'
+                ? validSelectedEvidenceIds
+                : availableEvidenceOptions.map((candidate) => candidate.id),
+            availableEvidenceOptions,
+            evidenceDistributionMode: session.evidenceDistributionMode || 'auto'
         };
     };
 
+    const normalizeSessionCriterionOwnership = (sessions: any[]) => {
+        const owners = new Map<string, number>();
+        const normalized = sessions.map((session: any) => {
+            const availableIds = new Set(
+                (session.availableCriteriaOptions || []).map((criterion: any) => criterion.id)
+            );
+            const selectedCriteriaIds = (Array.isArray(session.selectedCriteriaIds)
+                ? session.selectedCriteriaIds
+                : []
+            ).filter((criterionId: string) => {
+                if (!availableIds.has(criterionId) || owners.has(criterionId)) return false;
+                owners.set(criterionId, Number(session.id));
+                return true;
+            });
+            const selectedCriteria = (session.availableCriteriaOptions || []).filter((criterion: any) =>
+                selectedCriteriaIds.includes(criterion.id)
+            );
+            const criteriaItems = selectedCriteria.map((criterion: any) => ({
+                text: criterion.text,
+                color: criterion.color,
+                sourceCriteriaId: criterion.id,
+                capacidad: criterion.capacidad
+            }));
+            const selectedSet = new Set(selectedCriteriaIds);
+            const availableEvidenceOptions = (session.availableEvidenceOptions || []).filter((evidence: any) =>
+                selectedSet.has(evidence.criterionGroupId)
+            );
+
+            if (session.evidenceDistributionMode === 'manual') {
+                return {
+                    ...session,
+                    selectedCriteriaIds,
+                    criteriaItems,
+                    des: criteriaItems.map((item: any) => item.text).join('\n').trim(),
+                    availableEvidenceOptions
+                };
+            }
+
+            const evidenceItems = availableEvidenceOptions.map((evidence: any) => ({
+                text: `${availableEvidenceOptions.length > 1 ? '• ' : ''}${normalizeBulletArtifacts(evidence.text)}`.trim(),
+                color: evidence.color,
+                sourceEvidenceId: evidence.id,
+                sourceCriteriaId: evidence.criterionGroupId,
+                capacidad: evidence.capacidad
+            }));
+            return {
+                ...session,
+                selectedCriteriaIds,
+                criteriaItems,
+                des: criteriaItems.map((item: any) => item.text).join('\n').trim(),
+                availableEvidenceOptions,
+                selectedEvidenceIds: availableEvidenceOptions.map((evidence: any) => evidence.id),
+                evidenceItems,
+                evi: evidenceItems.map((item: any) => item.text).join('\n').trim()
+            };
+        });
+
+        return normalized.map((session: any) => {
+            const capacities = (session.capacidades || []).filter((capacity: string) => {
+                const capacityCriteria = (session.capacityCriteriaOptions || []).filter((criterion: any) =>
+                    normalizeLoose(criterion.capacidad) === normalizeLoose(capacity)
+                );
+                return !(
+                    capacityCriteria.length > 0
+                    && capacityCriteria.every((criterion: any) => {
+                        const owner = owners.get(criterion.id);
+                        return owner && owner !== Number(session.id);
+                    })
+                );
+            });
+            return capacities.length === (session.capacidades || []).length
+                ? session
+                : { ...session, capacidades: capacities };
+        });
+    };
+
+
     const updateSessionAtIndex = (prev: any, index: number, field: string, value: any) => {
         const newSesiones = [...prev.sesiones];
-        newSesiones[index] = { ...newSesiones[index], [field]: value };
+        const previousSession = newSesiones[index] || {};
+        newSesiones[index] = { ...previousSession, [field]: value };
 
-        if (field === 'capacidades' || field === 'competencia' || field === 'transversales') {
-            const derived = deriveSessionEvaluationData(newSesiones[index], prev);
-            newSesiones[index] = { ...newSesiones[index], ...derived };
+        if (field === 'capacidades' || field === 'competencia' || field === 'transversales' || field === 'selectedCriteriaIds') {
+            if (field !== 'selectedCriteriaIds') {
+                const previousAvailableIds = new Set(
+                    (previousSession.availableCriteriaOptions || []).map((criterion: any) => criterion.id)
+                );
+                const ownedByOtherSessions = new Set<string>();
+                (prev.sesiones || []).forEach((session: any, sessionIndex: number) => {
+                    if (sessionIndex === index) return;
+                    (Array.isArray(session.selectedCriteriaIds) ? session.selectedCriteriaIds : [])
+                        .forEach((criterionId: string) => ownedByOtherSessions.add(criterionId));
+                });
+
+                newSesiones[index].selectedCriteriaIds = Array.isArray(previousSession.selectedCriteriaIds)
+                    ? [...previousSession.selectedCriteriaIds]
+                    : [];
+                newSesiones[index].criteriaSelectionTouched = true;
+                newSesiones[index].evidenceDistributionMode = 'auto';
+
+                const firstDerived = deriveSessionEvaluationData(newSesiones[index], prev);
+                const newlyAvailableIds = (firstDerived.availableCriteriaOptions || [])
+                    .map((criterion: any) => criterion.id)
+                    .filter((criterionId: string) => !previousAvailableIds.has(criterionId) && !ownedByOtherSessions.has(criterionId));
+                newSesiones[index] = {
+                    ...newSesiones[index],
+                    ...firstDerived,
+                    selectedCriteriaIds: Array.from(new Set([
+                        ...(firstDerived.selectedCriteriaIds || []),
+                        ...newlyAvailableIds
+                    ])),
+                    criteriaSelectionTouched: true
+                };
+                newSesiones[index] = {
+                    ...newSesiones[index],
+                    ...deriveSessionEvaluationData(newSesiones[index], prev)
+                };
+            } else {
+                newSesiones[index] = {
+                    ...newSesiones[index],
+                    ...deriveSessionEvaluationData(newSesiones[index], prev)
+                };
+            }
         }
 
-        return { ...prev, sesiones: newSesiones };
+        return { ...prev, sesiones: normalizeSessionCriterionOwnership(newSesiones) };
     };
 
     useEffect(() => {
@@ -1361,6 +1418,10 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     session.evi === derived.evi &&
                     session.eval === derived.eval &&
                     JSON.stringify(session.criteriaItems || []) === JSON.stringify(derived.criteriaItems || []) &&
+                    JSON.stringify(session.availableCriteriaOptions || []) === JSON.stringify(derived.availableCriteriaOptions || []) &&
+                    JSON.stringify(session.capacityCriteriaOptions || []) === JSON.stringify(derived.capacityCriteriaOptions || []) &&
+                    JSON.stringify(session.selectedCriteriaIds || []) === JSON.stringify(derived.selectedCriteriaIds || []) &&
+                    Boolean(session.criteriaSelectionTouched) === Boolean(derived.criteriaSelectionTouched) &&
                     JSON.stringify(session.evidenceItems || []) === JSON.stringify(derived.evidenceItems || []) &&
                     JSON.stringify(session.selectedEvidenceIds || []) === JSON.stringify(derived.selectedEvidenceIds || []) &&
                     JSON.stringify(session.availableEvidenceOptions || []) === JSON.stringify(derived.availableEvidenceOptions || []);
@@ -1370,7 +1431,10 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 return { ...session, ...derived };
             });
 
-            return changed ? { ...prev, sesiones } : prev;
+            const normalizedSessions = normalizeSessionCriterionOwnership(sesiones);
+            return changed || JSON.stringify(normalizedSessions) !== JSON.stringify(sesiones)
+                ? { ...prev, sesiones: normalizedSessions }
+                : prev;
         });
     }, [
         unitData.criterios,
@@ -1404,6 +1468,17 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         setUnitData((prev: any) => {
             const index = prev.sesiones.findIndex((s: any) => s.id === sessionId);
             if (index === -1) return prev;
+            if (field === 'evi') {
+                const sessions = [...prev.sesiones];
+                sessions[index] = {
+                    ...sessions[index],
+                    evi: value,
+                    evidenceItems: [],
+                    selectedEvidenceIds: [],
+                    evidenceDistributionMode: 'manual'
+                };
+                return { ...prev, sesiones: sessions };
+            }
             return updateSessionAtIndex(prev, index, field, value);
         });
     };
@@ -1421,6 +1496,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             if (!items[itemIdx]) return prev;
             items[itemIdx] = { ...items[itemIdx], text: value };
             session[itemsKey] = items;
+            if (kind === 'evidence') session.evidenceDistributionMode = 'manual';
             session[textKey] = items.map((it: any) => it.text).join('\n').trim();
             newSesiones[index] = session;
             return { ...prev, sesiones: newSesiones };
@@ -1445,8 +1521,28 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 session.selectedEvidenceIds = (Array.isArray(session.selectedEvidenceIds) ? session.selectedEvidenceIds : [])
                     .filter((id: string) => id !== removedItem.sourceEvidenceId);
             }
+            if (kind === 'evidence') session.evidenceDistributionMode = 'manual';
             newSesiones[index] = session;
             return { ...prev, sesiones: newSesiones };
+        });
+    };
+
+    const toggleSessionCriterion = (sessionId: number, criterionId: string) => {
+        setIsDirty(true);
+        setUnitData((prev: any) => {
+            const index = prev.sesiones.findIndex((session: any) => session.id === sessionId);
+            if (index === -1) return prev;
+            const sessions = [...prev.sesiones];
+            const session = { ...sessions[index] };
+            const current = Array.isArray(session.selectedCriteriaIds) ? [...session.selectedCriteriaIds] : [];
+            session.selectedCriteriaIds = current.includes(criterionId)
+                ? current.filter((id: string) => id !== criterionId)
+                : Array.from(new Set([...current, criterionId]));
+            session.criteriaSelectionTouched = true;
+            session.evidenceDistributionMode = 'auto';
+            Object.assign(session, deriveSessionEvaluationData(session, prev));
+            sessions[index] = session;
+            return { ...prev, sesiones: normalizeSessionCriterionOwnership(sessions) };
         });
     };
 
@@ -1728,6 +1824,7 @@ Usa este contexto solo cuando sea pertinente para la unidad actual, el área, el
 ${aiExtraContext}
 
 Devuelve SOLO JSON: {"purpose": "...", "product": "...", "situation": "..."}`;
+            let generatedEvaluations: any[] = [];
             if (aiProvider === 'openai') {
                 const step1Result = await requestOpenAIJson(apiKey, step1Prompt, preferredOpenAIModel);
                 totalTokensUsed += step1Result.totalTokens;
@@ -1769,6 +1866,7 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
                 totalTokensUsed += step2Result.totalTokens;
                 const step2Data = step2Result.data;
                 const evaluaciones = Array.isArray(step2Data?.evaluaciones) ? step2Data.evaluaciones : [];
+                generatedEvaluations = evaluaciones;
                 areaRows.forEach((row, i) => {
                     const item = evaluaciones[i] || {};
                     if (item.criterio) startTypingField(`criterios.${row.originalIdx}`, item.criterio);
@@ -1806,7 +1904,13 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
                         if (inst) handleInputChange('instrumentosTrans', row.originalIdx.toString(), normalizeInstrumentInternal(inst));
                     });
                 }
+                const parsedStep2 = JSON.parse(extractJsonBlock(fullStep2));
+                generatedEvaluations = Array.isArray(parsedStep2?.evaluaciones) ? parsedStep2.evaluaciones : [];
                 totalTokensUsed += step2Tokens;
+            }
+
+            if (generatedEvaluations.length < areaRows.length + transRows.length) {
+                throw new Error('La IA devolvió evaluaciones incompletas. Vuelve a intentarlo.');
             }
 
             if (sessionsTableRef.current) sessionsTableRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1815,6 +1919,24 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
             const sessionCount = unitData.sesiones.length;
             const areaCompCapPairs: { compId: string, cap: string }[] = [];
             const transCompCapPairs: { compId: string, cap: string }[] = [];
+            const areaCriteriaCatalog = areaRows.map((row: any) => {
+                const owner = activeComps.find((comp: any) => comp.rows.includes(row));
+                return {
+                    id: `area-${owner?.id}-${row.originalIdx}`,
+                    compId: owner?.id || '',
+                    cap: row.capacidades,
+                    performance: row.desempenos_dcbn || ''
+                };
+            }).filter((item: any) => item.compId);
+            const transversalCriteriaCatalog = transRows.map((row: any) => {
+                const owner = groupedTransversales.find((comp: any) => comp.rows.includes(row));
+                return {
+                    id: `trans-${owner?.id}-${row.originalIdx}`,
+                    compId: owner?.id || '',
+                    cap: row.capacidades,
+                    performance: row.desempenos_dcbn || ''
+                };
+            }).filter((item: any) => item.compId);
             
             activeComps.forEach(comp => {
                 const uniqueCaps = Array.from(new Set(comp.rows.map((r: any) => r.capacidades)));
@@ -1830,14 +1952,33 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
                 });
             });
 
-            if (areaCompCapPairs.length === 0) throw new Error("No hay competencias/capacidades disponibles.");
+            if (areaCriteriaCatalog.length === 0) throw new Error("No hay competencias/capacidades/criterios disponibles.");
+
+            const generatedAreaCriteria: Record<number, string> = {};
+            const generatedAreaEvidence: Record<number, string> = {};
+            const generatedTransCriteria: Record<number, string> = {};
+            const generatedTransEvidence: Record<number, string> = {};
+            areaRows.forEach((row: any, index: number) => {
+                const item = generatedEvaluations[index] || {};
+                if (item.criterio) generatedAreaCriteria[row.originalIdx] = item.criterio;
+                if (item.evidencia) generatedAreaEvidence[row.originalIdx] = item.evidencia;
+            });
+            transRows.forEach((row: any, index: number) => {
+                const item = generatedEvaluations[areaRows.length + index] || {};
+                if (item.criterio) generatedTransCriteria[row.originalIdx] = item.criterio;
+                if (item.evidencia) generatedTransEvidence[row.originalIdx] = item.evidencia;
+            });
 
             let updatedState = {
                 ...latestUnitDataRef.current,
+                criterios: { ...(latestUnitDataRef.current.criterios || {}), ...generatedAreaCriteria },
+                evidencias: { ...(latestUnitDataRef.current.evidencias || {}), ...generatedAreaEvidence },
+                criteriosTrans: { ...(latestUnitDataRef.current.criteriosTrans || {}), ...generatedTransCriteria },
+                evidenciasTrans: { ...(latestUnitDataRef.current.evidenciasTrans || {}), ...generatedTransEvidence },
                 sesiones: [...(latestUnitDataRef.current?.sesiones || [])]
             };
 
-            const assignmentPrompt = `Asigna capacidades por sesión para una unidad del área ${areaName}, grado ${selectedGrade}, con ${sessionCount} sesiones.
+            const assignmentPrompt = `Asigna criterios por sesión para una unidad del área ${areaName}, grado ${selectedGrade}, con ${sessionCount} sesiones.
 
 Unidad: ${unitData.title}
 Propósito: ${latestUnitDataRef.current.purpose || unitData.purpose || 'No definido'}
@@ -1846,22 +1987,25 @@ Situación: ${latestUnitDataRef.current.situation || unitData.situation || 'No d
 
 ${aiExtraContext}
 
-Opciones de área:
-${areaCompCapPairs.map((pair, idx) => `${idx + 1}. ${pair.compId} => ${pair.cap}`).join('\n')}
+Catálogo de criterios del área:
+${areaCriteriaCatalog.map((item, idx) => `${idx + 1}. Competencia: ${item.compId} | Capacidad: ${item.cap} | Desempeño base: ${item.performance}`).join('\n')}
 
-Opciones transversales:
-${transCompCapPairs.length > 0 ? transCompCapPairs.map((pair, idx) => `${idx + 1}. ${pair.compId} => ${pair.cap}`).join('\n') : 'Sin opciones transversales.'}
+Catálogo de criterios transversales:
+${transversalCriteriaCatalog.length > 0 ? transversalCriteriaCatalog.map((item, idx) => `${idx + 1}. Competencia: ${item.compId} | Capacidad: ${item.cap} | Desempeño base: ${item.performance}`).join('\n') : 'Sin opciones transversales.'}
 
 Devuelve SOLO JSON:
-{"sesiones":[{"areaIndex":1,"transversalIndexes":[1]}]}
+{"sesiones":[{"areaCriterionIndexes":[1,2],"transversalCriterionIndexes":[1]}]}
 
 Reglas:
 - Usa exactamente ${sessionCount} sesiones.
-- areaIndex debe elegir la capacidad de área más pertinente para cada sesión.
-- transversalIndexes puede quedar vacío si no corresponde.
-- Distribuye progresivamente las capacidades y evita repetir siempre la misma.`;
+- Distribuye los criterios de manera progresiva y coherente con el propósito y producto de la unidad.
+- Cada índice de criterio del área debe aparecer exactamente una vez en toda la unidad: no lo omitas ni lo repitas.
+- Cada índice de criterio transversal debe aparecer exactamente una vez en toda la unidad: no lo omitas ni lo repitas.
+- Los criterios determinan automáticamente sus competencias y capacidades; no devuelvas nombres libres.
+- En una misma sesión, los criterios del área deben pertenecer a una sola competencia del área.
+- Los arreglos pueden quedar vacíos solamente cuando no haya suficientes criterios para todas las sesiones.`;
 
-            let aiAssignments: Array<{ areaIndex?: number; transversalIndexes?: number[] }> = [];
+            let aiAssignments: Array<{ areaCriterionIndexes?: number[]; transversalCriterionIndexes?: number[] }> = [];
             if (aiProvider === 'openai') {
                 const assignmentResult = await requestOpenAIJson(apiKey, assignmentPrompt, preferredOpenAIModel);
                 totalTokensUsed += assignmentResult.totalTokens;
@@ -1877,28 +2021,65 @@ Reglas:
                 aiAssignments = Array.isArray(assignmentData?.sesiones) ? assignmentData.sesiones : [];
             }
 
-            updatedState.sesiones.forEach((s: any, i: number) => {
-                const aiAssignment = aiAssignments[i] || {};
-                const pair = areaCompCapPairs[(Number(aiAssignment.areaIndex) > 0 ? Number(aiAssignment.areaIndex) - 1 : i) % areaCompCapPairs.length];
+            const distributeUniqueCriteria = (
+                field: 'areaCriterionIndexes' | 'transversalCriterionIndexes',
+                catalog: any[],
+                singleAreaCompetency: boolean
+            ) => {
+                const distributed: any[][] = Array.from({ length: sessionCount }, () => []);
+                const used = new Set<number>();
+                aiAssignments.slice(0, sessionCount).forEach((assignment, sessionIndex) => {
+                    const indexes = Array.isArray(assignment?.[field]) ? assignment[field]! : [];
+                    indexes.forEach((rawIndex) => {
+                        const criterionIndex = Number(rawIndex) - 1;
+                        if (
+                            criterionIndex < 0
+                            || criterionIndex >= catalog.length
+                            || used.has(criterionIndex)
+                            || (singleAreaCompetency
+                                && distributed[sessionIndex].length > 0
+                                && distributed[sessionIndex][0].compId !== catalog[criterionIndex].compId)
+                        ) return;
+                        distributed[sessionIndex].push(catalog[criterionIndex]);
+                        used.add(criterionIndex);
+                    });
+                });
+                catalog.forEach((criterion, criterionIndex) => {
+                    if (used.has(criterionIndex)) return;
+                    let target = distributed
+                        .map((items, index) => ({ items, index }))
+                        .filter(({ items }) => !singleAreaCompetency || items.length === 0 || items[0].compId === criterion.compId)
+                        .sort((left, right) => left.items.length - right.items.length)[0];
+                    if (!target) target = { items: distributed[0], index: 0 };
+                    target.items.push(criterion);
+                    used.add(criterionIndex);
+                });
+                return distributed;
+            };
 
-                updatedState = updateSessionAtIndex(updatedState, i, 'competencia', pair.compId);
-                updatedState = updateSessionAtIndex(updatedState, i, 'capacidades', [pair.cap]);
-
-                const selectedTransPairs = (Array.isArray(aiAssignment.transversalIndexes) ? aiAssignment.transversalIndexes : [])
-                    .map((idx) => transCompCapPairs[Number(idx) - 1])
-                    .filter(Boolean);
-
-                if (selectedTransPairs.length > 0) {
-                    const nextTrans = Array.from(new Set(selectedTransPairs.map(pair => pair.compId)));
-                    updatedState = updateSessionAtIndex(updatedState, i, 'transversales', nextTrans);
-
-                    const nextCaps = [pair.cap, ...selectedTransPairs.map(pair => pair.cap)];
-                    updatedState = updateSessionAtIndex(updatedState, i, 'capacidades', Array.from(new Set(nextCaps)));
-                } else {
-                    updatedState = updateSessionAtIndex(updatedState, i, 'transversales', []);
-                    updatedState = updateSessionAtIndex(updatedState, i, 'capacidades', [pair.cap]);
-                }
+            const assignedAreaCriteria = distributeUniqueCriteria('areaCriterionIndexes', areaCriteriaCatalog, true);
+            const assignedTransversalCriteria = distributeUniqueCriteria('transversalCriterionIndexes', transversalCriteriaCatalog, false);
+            const generatedSessions = updatedState.sesiones.map((session: any, index: number) => {
+                const areaCriteria = assignedAreaCriteria[index] || [];
+                const transversalCriteria = assignedTransversalCriteria[index] || [];
+                const preparedSession = {
+                    ...session,
+                    competencia: areaCriteria[0]?.compId || '',
+                    transversales: Array.from(new Set(transversalCriteria.map((item: any) => item.compId))),
+                    capacidades: Array.from(new Set([
+                        ...areaCriteria.map((item: any) => item.cap),
+                        ...transversalCriteria.map((item: any) => item.cap)
+                    ])),
+                    selectedCriteriaIds: [
+                        ...areaCriteria.map((item: any) => item.id),
+                        ...transversalCriteria.map((item: any) => item.id)
+                    ],
+                    criteriaSelectionTouched: true,
+                    evidenceDistributionMode: 'auto'
+                };
+                return { ...preparedSession, ...deriveSessionEvaluationData(preparedSession, updatedState) };
             });
+            updatedState = { ...updatedState, sesiones: normalizeSessionCriterionOwnership(generatedSessions) };
 
             setUnitData((prev: any) => ({
                 ...prev,
@@ -1912,8 +2093,7 @@ Reglas:
             
             Contexto de asignación:
             ${updatedState.sesiones.map((s: any, i: number) => {
-                const pair = areaCompCapPairs[i % areaCompCapPairs.length];
-                return `Sesión ${i+1}: Competencia "${pair.compId}", Capacidad "${pair.cap}"`;
+                return `Sesión ${i+1}: Competencia "${s.competencia || 'Sin competencia de área'}", Capacidades "${(s.capacidades || []).join(', ') || 'Sin capacidad asignada'}", Criterios "${(s.criteriaItems || []).map((item: any) => item.text).join(' | ') || 'Sin criterio asignado'}"`;
             }).join('\n')}
             
             Instrucciones:
@@ -2480,9 +2660,27 @@ const handleFillDefaultBiblio = () => {
                                                             const isTrans = cap.source === 'transversal';
                                                             const idx = (cap.transIdx ?? 0) % TRANS_TEXT_COLORS.length;
                                                             const transClasses = isSelected ? TRANS_BG_SELECTED[idx] : TRANS_BG_IDLE[idx];
+                                                            const capacityCriteria = (ses.capacityCriteriaOptions || []).filter((criterion: any) =>
+                                                                normalizeLoose(criterion.capacidad) === normalizeLoose(cap.value)
+                                                            );
+                                                            const lockedOwners = capacityCriteria
+                                                                .map((criterion: any) => criteriaOwners.get(criterion.id))
+                                                                .filter((owner: number | undefined) => owner && owner !== Number(ses.id));
+                                                            const capacityLocked = !isSelected && capacityCriteria.length > 0 && capacityCriteria.every((criterion: any) => {
+                                                                const owner = criteriaOwners.get(criterion.id);
+                                                                return owner && owner !== Number(ses.id);
+                                                            });
+                                                            const ownerText = Array.from(new Set(lockedOwners)).join(', ');
+                                                            const ownerCount = new Set(lockedOwners).size;
                                                             return (
-                                                                <label key={cap.value} className={`flex items-start gap-2 p-1 rounded cursor-pointer border ${isSelected ? (isTrans ? transClasses : 'bg-blue-50 border-blue-200') : (isTrans ? transClasses : 'bg-slate-50 border-slate-100')}`}>
-                                                                    <input type="checkbox" checked={isSelected} onChange={e => {
+                                                                <label
+                                                                    key={cap.value}
+                                                                    title={capacityLocked
+                                                                        ? `No disponible: todos sus criterios ya se evalúan ${ownerCount > 1 ? `en las sesiones ${ownerText}` : `en la sesión ${ownerText}`}.`
+                                                                        : cap.label}
+                                                                    className={`flex items-start gap-2 p-1 rounded border ${capacityLocked ? 'cursor-not-allowed opacity-45 bg-slate-100 border-slate-200' : 'cursor-pointer'} ${isSelected ? (isTrans ? transClasses : 'bg-blue-50 border-blue-200') : (isTrans ? transClasses : 'bg-slate-50 border-slate-100')}`}
+                                                                >
+                                                                    <input type="checkbox" checked={isSelected} disabled={capacityLocked} onChange={e => {
                                                                         const current = ses.capacidades || [];
                                                                         const next = e.target.checked ? [...current, cap.value] : current.filter((v: string) => v !== cap.value);
                                                                         handleSessionInputChangeById(ses.id, 'capacidades', next);
@@ -2496,35 +2694,29 @@ const handleFillDefaultBiblio = () => {
                                                 </td>
                                                 <td className={`p-0 bg-white text-center relative border-b border-r border-black/40 transition-all duration-500 align-top ${fieldsGenerating[`sesiones.${idx}.des`] ? 'generating-glow' : ''}`}>
                                                     <div className={`p-2 ${collapsedSessions[ses.id] ? 'bg-emerald-50/40 max-h-[140px] overflow-hidden' : 'bg-white/98'}`}>
-                                                        {(ses.criteriaItems || []).length > 0 ? (
-                                                            (ses.criteriaItems || []).map((item: any, itemIdx: number) => (
-                                                                <div key={`crit-${ses.id}-${itemIdx}`} className="relative">
-                                                                    <textarea
-                                                                        className={`session-auto-textarea w-full border-0 outline-none bg-transparent resize-none text-[9px] leading-tight font-medium italic overflow-hidden pr-6 ${item.color || AREA_TEXT_COLOR}`}
-                                                                        value={item.text}
-                                                                        onChange={e => handleSessionItemChange(ses.id, 'criteria', itemIdx, e.target.value)}
-                                                                        onInput={e => autoResizeTextarea(e.currentTarget)}
-                                                                    />
+                                                        {(ses.availableCriteriaOptions || []).length > 0 ? (
+                                                            (ses.availableCriteriaOptions || []).map((criterion: any) => {
+                                                                const selected = (ses.selectedCriteriaIds || []).includes(criterion.id);
+                                                                const owner = criteriaOwners.get(criterion.id);
+                                                                const locked = Boolean(owner) && owner !== Number(ses.id);
+                                                                return (
                                                                     <button
+                                                                        key={`crit-${ses.id}-${criterion.id}`}
                                                                         type="button"
-                                                                        className="absolute right-0 top-0 w-4 h-4 rounded-full bg-slate-200 text-slate-700 text-[10px] leading-[14px] font-black hover:bg-slate-300"
-                                                                        onClick={() => handleSessionItemRemove(ses.id, 'criteria', itemIdx)}
-                                                                        title="Eliminar"
+                                                                        aria-disabled={locked}
+                                                                        onClick={() => !locked && toggleSessionCriterion(ses.id, criterion.id)}
+                                                                        className={`w-full mb-1.5 rounded-lg border px-2 py-1.5 text-left text-[9px] leading-tight font-medium italic transition-all ${criterion.color || AREA_TEXT_COLOR} ${locked ? 'border-slate-200 bg-slate-100 opacity-35 cursor-not-allowed' : selected ? 'border-emerald-400 bg-emerald-50 shadow-sm' : 'border-slate-200 bg-slate-50 opacity-55 hover:opacity-80'}`}
+                                                                        title={locked
+                                                                            ? `Bloqueado: este criterio ya se evalúa en la sesión ${owner}.`
+                                                                            : selected
+                                                                                ? 'Criterio incluido. Clic para excluir todo este bloque vinculado.'
+                                                                                : 'Criterio disponible. Clic para incluir todo este bloque vinculado.'}
                                                                     >
-                                                                        -
+                                                                        {criterion.text}
                                                                     </button>
-                                                                </div>
-                                                            ))
-                                                        ) : (
-                                                            <textarea
-                                                                ref={el => { sessionFieldRefs.current[`des-${ses.id}`] = el; }}
-                                                                className={`session-auto-textarea w-full border-0 outline-none bg-transparent resize-none text-[9px] font-black leading-tight font-medium italic overflow-hidden ${AREA_TEXT_COLOR}`}
-                                                                value={ses.des}
-                                                                onChange={e => handleSessionInputChangeById(ses.id, 'des', e.target.value)}
-                                                                onInput={e => autoResizeTextarea(e.currentTarget)}
-                                                                placeholder="Criterios..."
-                                                            />
-                                                        )}
+                                                                );
+                                                            })
+                                                        ) : <span className="text-[9px] text-slate-400 italic">Seleccione capacidades para mostrar sus criterios.</span>}
                                                     </div>
                                                 </td>
                                                 <td className={`p-0 bg-white text-center relative border-b border-r border-black/40 transition-all duration-500 align-top ${fieldsGenerating[`sesiones.${idx}.con`] ? 'generating-glow' : ''}`}>
@@ -2568,7 +2760,7 @@ const handleFillDefaultBiblio = () => {
                                                             placeholder="Evidencia..."
                                                         />
                                                         )}
-                                                        {sessionEvidenceOptions.length > 0 && (
+                                                        {false && sessionEvidenceOptions.length > 0 && (
                                                             <div className="mt-3 border-t border-slate-200 pt-2 text-left">
                                                                 <button
                                                                     type="button"

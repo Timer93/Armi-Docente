@@ -1,7 +1,8 @@
 ﻿import React from 'react';
 import { ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar, CartesianGrid, XAxis, YAxis, Tooltip, LabelList } from 'recharts';
 import logoBar from '../../src/Logo_bar.ico';
-import { deleteEvaluacionEvidencia, getEvaluacionEvidencias, saveEvaluacionEvidencia } from '../../services/apiService';
+import { deleteEvaluacionEvidencia, getEvaluacionEvidencias, getPendingEvidenceReviews, saveEvaluacionEvidencia } from '../../services/apiService';
+import { EvidenceDeliveryWindowControl } from '../evaluation/EvidenceDeliveryWindowControl';
 import { autoResizeTextarea, normalizeLoose } from './shared';
 
 type GradingRecord = { level: string; observation: string };
@@ -60,6 +61,7 @@ const canOpenInline = (previewKind: SessionEvidenceItem['previewKind']) => (
 );
 
 interface SessionRegisterPanelProps {
+    currentSessionId: string | null;
     bimesterLabel: string;
     filteredStudents: any[];
     generalData: any;
@@ -130,6 +132,7 @@ const ToggleConclusionIcon = ({ expanded }: { expanded: boolean }) => (
 );
 
 export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
+    currentSessionId,
     bimesterLabel,
     filteredStudents,
     generalData,
@@ -164,10 +167,34 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
     const [sessionEvidences, setSessionEvidences] = React.useState<SessionEvidenceItem[]>([]);
     const [evidenceBusy, setEvidenceBusy] = React.useState(false);
     const [evidenceMessage, setEvidenceMessage] = React.useState('');
+    const [pendingReviewStudentIds, setPendingReviewStudentIds] = React.useState<Set<string>>(new Set());
     const evidenceInputRef = React.useRef<HTMLInputElement | null>(null);
 
     const currentYear = String(generalData?.year || new Date().getFullYear());
     const currentAreaId = String(sessionData?.sessionAssessmentModel?.scope?.areaId || sessionData?.areaId || selArea || '').trim();
+
+    React.useEffect(() => {
+        let active = true;
+        if (!currentSessionId) {
+            setPendingReviewStudentIds(new Set());
+            return;
+        }
+        const timeout = window.setTimeout(async () => {
+            const result = await getPendingEvidenceReviews(currentSessionId);
+            if (!active) return;
+            if (!result.success) {
+                setPendingReviewStudentIds(new Set());
+                return;
+            }
+            setPendingReviewStudentIds(new Set(
+                (result.data || []).filter((item) => item.pending).map((item) => String(item.studentId))
+            ));
+        }, 1300);
+        return () => {
+            active = false;
+            window.clearTimeout(timeout);
+        };
+    }, [currentSessionId, gradingRecords]);
 
     const loadSessionEvidences = React.useCallback(async (target?: typeof evidenceModal | null) => {
         const active = target || evidenceModal;
@@ -871,6 +898,22 @@ const getRegisterDynamicWidth = (units: number) =>
 
             <div className="print:hidden">{gradingSectionTabs}</div>
 
+            {currentSessionId ? (
+                <details className="group rounded-3xl border border-violet-100 bg-white print:hidden">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 text-[10px] font-black uppercase tracking-[0.15em] text-violet-700">
+                        <span>Plazo de entrega de evidencias</span>
+                        <span className="rounded-full bg-violet-50 px-3 py-1 text-[9px] text-violet-600 group-open:hidden">Configurar</span>
+                        <span className="hidden rounded-full bg-violet-50 px-3 py-1 text-[9px] text-violet-600 group-open:inline">Ocultar</span>
+                    </summary>
+                    <div className="border-t border-violet-100 p-3">
+                        <EvidenceDeliveryWindowControl
+                            sessionId={currentSessionId}
+                            sessionLabel={`Sesión ${sessionNumber}${sessionData?.title ? ` · ${sessionData.title}` : ''}`}
+                        />
+                    </div>
+                </details>
+            ) : null}
+
             {gradingLoading ? (
                 <div className="p-10 text-center text-slate-400 text-sm font-bold">Cargando registros de calificación...</div>
             ) : filteredStudents.length === 0 ? (
@@ -1004,11 +1047,17 @@ const getRegisterDynamicWidth = (units: number) =>
                                     const rowBaseClass = rowState.row === 'bg-white'
                                         ? (studentIdx % 2 === 0 ? 'bg-white' : 'bg-slate-50')
                                         : rowState.row;
+                                    const hasPendingReview = pendingReviewStudentIds.has(String(student.id));
                                     return (
                                         <tr key={`session-register-row-${student.id}`} className={rowBaseClass}>
                                             <td className={`border border-slate-200 px-2 py-1.5 print:px-0.5 print:py-0.5 print:w-[44px] print:min-w-[44px] text-center font-medium ${rowState.numberCell}`}><span className="print:inline-block print:w-full print:whitespace-nowrap">{studentIdx + 1}</span></td>
                                             <td className={`border border-slate-200 px-2 py-1.5 print:px-0.5 print:py-0.5 print:w-[280px] print:min-w-[280px] align-middle ${rowState.studentCell}`}>
-                                                <div className="block w-full overflow-hidden text-ellipsis font-black print:font-normal text-[10px] print:text-[14px] leading-tight whitespace-nowrap">{student.name}</div>
+                                                <div
+                                                    className={`block w-full overflow-hidden text-ellipsis font-black print:font-normal text-[10px] print:text-[14px] leading-tight whitespace-nowrap ${hasPendingReview ? 'armi-evidence-review-pending' : ''}`}
+                                                    title={hasPendingReview ? 'Tiene una evidencia nueva pendiente de revisión' : undefined}
+                                                >
+                                                    {student.name}
+                                                </div>
                                             </td>
                                             {groupedCompetencies.flatMap((competency: any, compIdx: number) => {
                                                 const competencyBlocks = criterionBlocks.filter((block: any) =>

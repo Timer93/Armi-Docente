@@ -6,6 +6,7 @@ import {
   getCloudSyncStatus,
   mergeAttendanceFromCloudArtifact,
   mergeStudentsFromCloudArtifact,
+  pickCloudSyncFolder,
   pullCloudSync,
   pullCloudArtifact,
   pushCloudSync,
@@ -24,7 +25,7 @@ const RECENT_MANUAL_PUSH_MARK_KEY = 'armi-sync-recent-manual-push';
 const markRecentManualPush = () => {
   window.localStorage.setItem(RECENT_MANUAL_PUSH_MARK_KEY, String(Date.now()));
 };
-type ToastState = { type: 'success' | 'error'; text: string } | null;
+type ToastState = { type: 'success' | 'warning' | 'error'; text: string } | null;
 type ArtifactKind = 'version' | 'conflict' | 'current';
 type ArtifactAction = 'inspect' | 'apply' | 'merge-attendance' | 'merge-students';
 
@@ -241,10 +242,11 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     if (typeof window === 'undefined') return true;
     return window.localStorage.getItem(VERSION_HISTORY_VISIBILITY_KEY) !== 'false';
   });
-  const [configMode, setConfigMode] = useState<'local' | 'drive_mirror' | 'apps_script_drive'>('local');
+  const [configMode, setConfigMode] = useState<'local' | 'drive_mirror'>('local');
   const [autoSyncOnClose, setAutoSyncOnClose] = useState(true);
   const [syncUserKey, setSyncUserKey] = useState('default-user');
   const [syncUserLabel, setSyncUserLabel] = useState('Usuario local');
+  const [mirrorPath, setMirrorPath] = useState('');
   const autoBoundIdentityRef = useRef('');
   const rootRef = useRef<HTMLDivElement | null>(null);
   const detailsBodyRef = useRef<HTMLDivElement | null>(null);
@@ -259,10 +261,11 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     const response = await getCloudSyncStatus();
     if (response.success && response.data) {
       setStatus(response.data);
-      setConfigMode(response.data.config.mode);
+      setConfigMode(response.data.config.mode === 'drive_mirror' ? 'drive_mirror' : 'local');
       setAutoSyncOnClose(response.data.config.autoSyncOnClose);
       setSyncUserKey(response.data.config.syncUserKey || 'default-user');
       setSyncUserLabel(response.data.config.syncUserLabel || 'Usuario local');
+      setMirrorPath(response.data.config.resolvedMirrorPath || response.data.config.mirrorPath || '');
     } else {
       setErrorMessage(response.message || 'No pude consultar el estado de sincronizacion.');
     }
@@ -414,7 +417,9 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     void (async () => {
       await saveCloudSyncConfig({
         mode: status.config.mode,
-        mirrorPath: '',
+        mirrorPath: status.config.mode === 'drive_mirror'
+          ? status.config.resolvedMirrorPath || status.config.mirrorPath
+          : '',
         autoSyncOnClose: status.config.autoSyncOnClose,
         syncUserKey: sessionSyncProfile.syncUserKey,
         syncUserLabel: sessionSyncProfile.syncUserLabel,
@@ -431,15 +436,15 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   }, [status]);
 
   const saveConfig = async (
-    nextMode: 'local' | 'apps_script_drive',
+    nextMode: 'local' | 'drive_mirror',
     nextAutoSyncOnClose = autoSyncOnClose,
-    options?: { successMessage?: string; silent?: boolean }
+    options?: { successMessage?: string; silent?: boolean; mirrorPath?: string }
   ) => {
     setSavingConfig(true);
     setErrorMessage(null);
     const response = await saveCloudSyncConfig({
       mode: nextMode,
-      mirrorPath: '',
+      mirrorPath: nextMode === 'drive_mirror' ? options?.mirrorPath ?? mirrorPath : '',
       autoSyncOnClose: nextAutoSyncOnClose,
       syncUserKey,
       syncUserLabel,
@@ -461,11 +466,11 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     return response.success;
   };
 
-  const executeSyncAction = async (action: SyncAction) => {
+  const executeSyncAction = async (action: SyncAction, actionStatus: CloudSyncStatusData | null = status) => {
     if (!action) return;
-    if (action === 'pull' && !status?.mirrorManifest) {
+    if (action === 'pull' && !actionStatus?.mirrorManifest) {
       const nextMessage = buildDriveDiagnosticMessage(
-        status,
+        actionStatus,
         'Todavia no existe una copia actual en Drive para este usuario. Primero debes subir una copia desde alguna PC.'
       );
       setActiveAction(null);
@@ -489,7 +494,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
 
     if (!response.success) {
       const nextMessage = action === 'pull'
-        ? buildDriveDiagnosticMessage(status, response.message || 'La sincronizacion no termino correctamente.')
+        ? buildDriveDiagnosticMessage(actionStatus, response.message || 'La sincronizacion no termino correctamente.')
         : response.message || 'La sincronizacion no termino correctamente.';
       setErrorMessage(nextMessage);
       setToast({ type: 'error', text: nextMessage });
@@ -522,8 +527,16 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     }
 
     markRecentManualPush();
-    setToast({ type: 'success', text: 'Copia subida correctamente a Drive.' });
-    setModalMessage('La copia de Drive quedo actualizada correctamente.');
+    const deliveryPending = response.data?.cloudDeliveryPending === true;
+    setToast({
+      type: deliveryPending ? 'warning' : 'success',
+      text: deliveryPending
+        ? response.data?.driveDesktop?.message || 'La copia quedo preparada, pero Google Drive sigue pendiente.'
+        : 'Carpeta espejo actualizada correctamente.',
+    });
+    setModalMessage(deliveryPending
+      ? 'ARMI guardo la copia en la carpeta espejo, pero Google Drive debe reanudar la sincronizacion para enviarla a la nube.'
+      : 'La carpeta espejo quedo actualizada. Google Drive para escritorio continuara la entrega en segundo plano.');
     setActiveAction(null);
     await refreshStatus();
     emitCloudSyncUpdated();
@@ -569,6 +582,52 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     emitCloudSyncUpdated();
   };
 
+  const chooseMirrorFolder = async () => {
+    const picked = await pickCloudSyncFolder();
+    if (!picked.success || !picked.path) {
+      if (!picked.cancelled) setToast({ type: 'error', text: picked.message || 'No se pudo seleccionar la carpeta.' });
+      return;
+    }
+    const selectedRoot = picked.path;
+    const cleanRoot = selectedRoot.replace(/[\\/]+$/, '');
+    const selectedMirrorPath = /ARMI Sync[\\/]users[\\/][^\\/]+$/i.test(cleanRoot)
+      ? cleanRoot
+      : /ARMI Sync[\\/]users$/i.test(cleanRoot)
+        ? `${cleanRoot}\\${syncUserKey}`
+        : /ARMI Sync$/i.test(cleanRoot)
+          ? `${cleanRoot}\\users\\${syncUserKey}`
+          : `${cleanRoot}\\ARMI Sync\\users\\${syncUserKey}`;
+    setMirrorPath(selectedMirrorPath);
+    const saved = await saveConfig('drive_mirror', autoSyncOnClose, {
+      mirrorPath: selectedMirrorPath,
+      successMessage: 'Carpeta de Google Drive vinculada correctamente.',
+    });
+    if (!saved) return;
+
+    setDetailsOpen(true);
+    const freshResponse = await getCloudSyncStatus();
+    const freshStatus = freshResponse.success ? freshResponse.data || null : null;
+    if (!freshStatus) {
+      setToast({ type: 'error', text: freshResponse.message || 'La carpeta se vinculo, pero no pude comprobar su contenido.' });
+      return;
+    }
+    setStatus(freshStatus);
+
+    if (!freshStatus.mirrorManifest) {
+      setToast({ type: 'success', text: 'Carpeta lista. Iniciando la primera subida automaticamente...' });
+      await executeSyncAction('push', freshStatus);
+      return;
+    }
+
+    if (freshStatus.comparison === 'in-sync') {
+      setToast({ type: 'success', text: 'Esta PC ya tiene la misma copia que la carpeta espejo.' });
+      return;
+    }
+
+    setToast({ type: 'success', text: 'Se encontro una copia existente. Recuperandola automaticamente en esta PC...' });
+    await executeSyncAction('pull', freshStatus);
+  };
+
   const toggleVersionHistoryVisibility = () => {
     setShowVersionHistory((current) => {
       const next = !current;
@@ -577,8 +636,9 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     });
   };
 
-  const badge = comparisonMeta[status?.comparison || 'local-mode'];
-  const isDriveMode = configMode === 'apps_script_drive';
+  const badge = comparisonMeta[status?.comparison || 'local-mode'] || comparisonMeta['no-data'];
+  const isDriveMode = configMode === 'drive_mirror';
+  const isMirrorMode = configMode === 'drive_mirror';
   const remoteFolderName = status?.config.remoteUser?.folderName || sessionSyncProfile.driveFolderName;
   const remoteFolderUrl = status?.config.remoteUser?.folderUrl || sessionSyncProfile.driveFolderUrl;
   const conflictsSummary = status?.config.remoteActivity?.conflicts;
@@ -594,7 +654,18 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   const localMatchesAnyVersion = Boolean(
     status?.localManifest && versionsSummary?.items?.some((item) => manifestsLookEquivalent(status.localManifest, item as any))
   );
-  const canPullFromDrive = !!status?.mirrorManifest;
+  const canPullFromDrive = !!status?.mirrorManifest
+    && (status.comparison === 'mirror-newer' || status.comparison === 'diverged');
+  const manualRecoveryNeeded = isDriveMode && !!status && (
+    status.comparison !== 'in-sync'
+    || !!status.pendingLocal
+    || status.driveDesktop?.state !== 'ready'
+  );
+  const canRetryManualPush = !!status && (
+    status.comparison === 'mirror-missing'
+    || status.comparison === 'local-newer'
+    || !!status.pendingLocal
+  );
   const remoteLookupMessage = String(status?.config.remoteLookupMessage || '').trim();
   const localDate = status?.localManifest?.generatedAt
     ? new Date(status.localManifest.generatedAt).toLocaleString()
@@ -633,14 +704,14 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
           aria-label={isDriveMode ? 'Cambiar a modo local' : 'Cambiar a modo Drive'}
           onClick={async () => {
             const previousMode = configMode;
-            const nextMode = isDriveMode ? 'local' : 'apps_script_drive';
+            const nextMode = isDriveMode ? 'local' : 'drive_mirror';
             setConfigMode(nextMode);
             const success = await saveConfig(
               nextMode,
               autoSyncOnClose,
               {
-                successMessage: nextMode === 'apps_script_drive'
-                  ? 'Sincronizacion en Drive activada.'
+                successMessage: nextMode === 'drive_mirror'
+                  ? 'Espejo gratuito de Google Drive activado.'
                   : 'Modo local activado.',
               }
             );
@@ -740,7 +811,9 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
               className={`rounded-2xl border px-4 py-3 text-sm font-semibold shadow-[0_18px_34px_rgba(15,23,42,0.16)] backdrop-blur ${
                 toast.type === 'success'
                   ? 'border-emerald-200 bg-emerald-50/95 text-emerald-800'
-                  : 'border-rose-200 bg-rose-50/95 text-rose-800'
+                  : toast.type === 'warning'
+                    ? 'border-amber-200 bg-amber-50/95 text-amber-800'
+                    : 'border-rose-200 bg-rose-50/95 text-rose-800'
               }`}
             >
               {toast.text}
@@ -772,12 +845,121 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                 <p className="truncate">{syncUserKey}</p>
               </div>
 
+              {!isDriveMode ? (
+                <div className="rounded-2xl border border-sky-100 bg-sky-50 px-3 py-3 text-xs text-sky-800">
+                  <p className="font-black uppercase tracking-[0.14em] text-sky-500">Google Drive gratuito</p>
+                  <p className="mt-1 leading-relaxed">
+                    {status?.driveDesktop?.detected
+                      ? 'Google Drive para escritorio fue detectado. Puedes vincular la carpeta que corresponda a esta cuenta.'
+                      : 'Google Drive para escritorio no fue detectado en esta PC.'}
+                  </p>
+                  {status?.driveDesktop?.detected ? (
+                    <button
+                      type="button"
+                      onClick={chooseMirrorFolder}
+                      className="mt-2 rounded-xl border border-sky-200 bg-white px-3 py-2 font-bold text-sky-700"
+                    >
+                      Elegir carpeta y activar
+                    </button>
+                  ) : (
+                    <a
+                      href="https://support.google.com/drive/answer/10838124"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-block rounded-xl border border-sky-200 bg-white px-3 py-2 font-bold text-sky-700"
+                    >
+                      Descargar Google Drive
+                    </a>
+                  )}
+                </div>
+              ) : null}
+
               {isDriveMode ? (
                 <div className="rounded-2xl bg-slate-50 px-3 py-3 text-xs text-slate-500">
                   <p className="font-black uppercase tracking-[0.14em] text-slate-400">Carpeta</p>
-                  <p className="mt-1 truncate text-sm font-semibold text-slate-800">{remoteFolderName || 'Preparando carpeta...'}</p>
+                  <p className="mt-1 break-all text-sm font-semibold text-slate-800">
+                    {isMirrorMode ? mirrorPath || 'Selecciona una carpeta de Google Drive' : remoteFolderName || 'Preparando carpeta...'}
+                  </p>
+                  {isMirrorMode ? (
+                    <>
+                      <div className={`mt-2 rounded-xl border px-3 py-2 font-semibold ${
+                        status?.driveDesktop?.state === 'ready'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                          : 'border-amber-200 bg-amber-50 text-amber-800'
+                      }`}>
+                        {status?.driveDesktop?.message || 'Comprobando Google Drive para escritorio...'}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={chooseMirrorFolder}
+                        disabled={savingConfig || activeAction !== null}
+                        className="mt-2 rounded-xl border border-sky-200 bg-white px-3 py-2 font-bold text-sky-700 transition hover:bg-sky-50 disabled:opacity-50"
+                      >
+                        Cambiar carpeta
+                      </button>
+                      {!status?.driveDesktop?.detected ? (
+                        <a
+                          href="https://support.google.com/drive/answer/10838124"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="ml-2 inline-block font-semibold text-sky-700 hover:text-sky-800"
+                        >
+                          Instalar Google Drive
+                        </a>
+                      ) : null}
+                      <p className="mt-2 leading-relaxed text-slate-500">
+                        ARMI comprueba la instalacion, abre Google Drive automaticamente cuando es posible y revisa la conexion a internet. Si Drive se pausa, los cambios permanecen seguros y se reintentan al reanudarlo.
+                      </p>
+                      {status?.continuousSync ? (
+                        <div className={`mt-2 rounded-xl border px-3 py-2 ${
+                          ['in-sync', 'watching'].includes(status.continuousSync.state)
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                            : 'border-sky-200 bg-sky-50 text-sky-800'
+                        }`}>
+                          <p className="font-black uppercase tracking-[0.12em]">Sincronizacion continua</p>
+                          <p className="mt-1 leading-relaxed">{status.continuousSync.message}</p>
+                          <p className="mt-1 font-semibold">
+                            Internet: {status.driveDesktop?.internetOnline === false ? 'sin conexion; trabajando localmente' : 'disponible'}
+                          </p>
+                        </div>
+                      ) : null}
+                      {status?.resourceDelivery ? (
+                        <div className={`mt-2 rounded-xl border px-3 py-2 ${
+                          status.resourceDelivery.pendingFilesCount > 0
+                            ? 'border-amber-200 bg-amber-50 text-amber-800'
+                            : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                        }`}>
+                          <p className="font-black uppercase tracking-[0.12em]">Recursos bajo demanda</p>
+                          <p className="mt-1 leading-relaxed">
+                            {status.resourceDelivery.pendingFilesCount > 0
+                              ? `${status.resourceDelivery.pendingFilesCount} archivo${status.resourceDelivery.pendingFilesCount === 1 ? '' : 's'} se descargara${status.resourceDelivery.pendingFilesCount === 1 ? '' : 'n'} cuando lo necesites. Los datos principales ya pueden utilizarse.`
+                              : `${status.resourceDelivery.availableFiles} archivo${status.resourceDelivery.availableFiles === 1 ? '' : 's'} disponible${status.resourceDelivery.availableFiles === 1 ? '' : 's'} en esta PC.`}
+                          </p>
+                        </div>
+                      ) : null}
+                      {status?.mirrorOperation?.state === 'origin-copy-pending' || status?.mirrorOperation?.state === 'catalog-ahead-of-manifest' ? (
+                        <div className="mt-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900">
+                          <p className="font-black uppercase tracking-[0.12em]">Copia de otra PC pendiente</p>
+                          <p className="mt-1 leading-relaxed">
+                            {status.mirrorOperation.state === 'origin-copy-pending'
+                              ? 'El catalogo llego, pero la otra PC no registro que terminara de copiar sus archivos.'
+                              : 'El catalogo nuevo ya llego; Google Drive todavia esta entregando el manifiesto o los recursos asociados.'}
+                          </p>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={chooseMirrorFolder}
+                      disabled={savingConfig || activeAction !== null}
+                      className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 font-bold text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50"
+                    >
+                      Cambiar al modo gratuito de escritorio
+                    </button>
+                  )}
                   <div className="mt-1 flex flex-wrap gap-3">
-                    {remoteFolderUrl ? (
+                    {!isMirrorMode && remoteFolderUrl ? (
                       <a
                         href={remoteFolderUrl}
                         target="_blank"
@@ -787,7 +969,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                         Carpeta principal
                       </a>
                     ) : null}
-                    {status?.config.remoteUser?.conflictsFolderUrl ? (
+                    {!isMirrorMode && status?.config.remoteUser?.conflictsFolderUrl ? (
                       <a
                         href={status.config.remoteUser.conflictsFolderUrl}
                         target="_blank"
@@ -797,7 +979,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                         Conflictos
                       </a>
                     ) : null}
-                    {status?.config.remoteUser?.versionsFolderUrl ? (
+                    {!isMirrorMode && status?.config.remoteUser?.versionsFolderUrl ? (
                       <a
                         href={status.config.remoteUser.versionsFolderUrl}
                         target="_blank"
@@ -1076,28 +1258,12 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                 </div>
               ) : null}
 
-              <label className="flex items-center gap-2 rounded-2xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                <input
-                  type="checkbox"
-                  checked={autoSyncOnClose}
-                  onChange={async (event) => {
-                    setAutoSyncOnClose(event.target.checked);
-                    const success = await saveConfig(
-                      isDriveMode ? 'apps_script_drive' : 'local',
-                      event.target.checked,
-                      {
-                        successMessage: event.target.checked
-                          ? 'Sincronizacion automatica al cerrar activada.'
-                          : 'Sincronizacion automatica al cerrar desactivada.',
-                      }
-                    );
-                    if (!success) {
-                      setAutoSyncOnClose(!event.target.checked);
-                    }
-                  }}
-                />
-                Sincronizar al cerrar
-              </label>
+              {isDriveMode ? (
+                <div className="flex items-center gap-2 rounded-2xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-xs font-black text-emerald-700">✓</span>
+                  Sincronizacion continua y verificacion al abrir y cerrar
+                </div>
+              ) : null}
 
               {errorMessage ? (
                 <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
@@ -1105,25 +1271,58 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                 </div>
               ) : null}
 
-              {isDriveMode ? (
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => executeSyncAction('push')}
-                    disabled={loadingStatus || activeAction !== null}
-                    className="rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
-                  >
-                    Subir
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => executeSyncAction('pull')}
-                    disabled={loadingStatus || activeAction !== null || !canPullFromDrive}
-                    title={!canPullFromDrive ? 'Aun no existe una copia actual en Drive' : undefined}
-                    className="rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:border-slate-400 disabled:opacity-50"
-                  >
-                    Traer
-                  </button>
+              {isDriveMode && !manualRecoveryNeeded ? (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-3 text-xs text-emerald-800">
+                  <p className="font-black uppercase tracking-[0.14em] text-emerald-700">Sincronizacion automatica activa</p>
+                  <p className="mt-1 leading-relaxed">ARMI detecta cambios durante el uso, espera unos segundos para agruparlos y actualiza la carpeta espejo continuamente. La apertura y el cierre solo verifican que no quede nada pendiente.</p>
+                </div>
+              ) : null}
+
+              {manualRecoveryNeeded ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-900">
+                  <p className="font-black uppercase tracking-[0.14em] text-amber-700">Recuperacion manual</p>
+                  <p className="mt-1 leading-relaxed">
+                    {status?.comparison === 'diverged'
+                      ? 'Esta PC y Drive contienen cambios distintos. Usa el asistente protegido para elegir cual conservar; ninguna copia se reemplazara sin confirmacion.'
+                      : status?.comparison === 'mirror-newer'
+                        ? 'Drive contiene cambios de otra PC que no llegaron automaticamente. Puedes recuperarlos ahora.'
+                        : status?.comparison === 'mirror-missing'
+                          ? 'La carpeta espejo todavia no contiene una copia completa. Puedes reintentar su creacion.'
+                          : status?.pendingLocal
+                            ? 'Hay cambios locales pendientes de entregar a Google Drive.'
+                            : status?.driveDesktop?.message || 'La sincronizacion necesita atencion.'}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {status?.comparison === 'diverged' ? (
+                      <button
+                        type="button"
+                        onClick={() => window.location.reload()}
+                        className="rounded-xl bg-slate-900 px-3 py-2 font-bold text-white"
+                      >
+                        Abrir asistente de solucion
+                      </button>
+                    ) : null}
+                    {canRetryManualPush && status?.comparison !== 'diverged' ? (
+                      <button
+                        type="button"
+                        onClick={() => executeSyncAction('push')}
+                        disabled={loadingStatus || activeAction !== null}
+                        className="rounded-xl border border-emerald-300 bg-white px-3 py-2 font-bold text-emerald-800 disabled:opacity-50"
+                      >
+                        {status?.comparison === 'mirror-missing' ? 'Crear copia ahora' : 'Reintentar cambios pendientes'}
+                      </button>
+                    ) : null}
+                    {canPullFromDrive && status?.comparison === 'mirror-newer' ? (
+                      <button
+                        type="button"
+                        onClick={() => executeSyncAction('pull')}
+                        disabled={loadingStatus || activeAction !== null}
+                        className="rounded-xl border border-sky-300 bg-white px-3 py-2 font-bold text-sky-800 disabled:opacity-50"
+                      >
+                        Recuperar cambios de otra PC
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -1141,7 +1340,13 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
             <p className="mt-4 text-sm leading-relaxed text-slate-600">{modalMessage}</p>
 
             <div className="mt-5 h-3 overflow-hidden rounded-full bg-slate-100">
-              <div className={`h-full rounded-full bg-gradient-to-r from-sky-500 via-cyan-400 to-emerald-400 ${activeAction ? 'w-3/4 animate-pulse' : 'w-full'}`} />
+              <div className={`h-full rounded-full transition-all ${
+                activeAction
+                  ? 'w-3/4 animate-pulse bg-gradient-to-r from-sky-500 via-cyan-400 to-emerald-400'
+                  : errorMessage
+                    ? 'w-full bg-rose-500'
+                    : 'w-full bg-emerald-500'
+              }`} />
             </div>
 
             {errorMessage ? (

@@ -11,7 +11,7 @@ import { INITIAL_HEADER_INFO } from '../constants';
 import { HeaderInfo, Student, EvaluationLevel, GeneralData, TeachingAssignment } from '../types';
 
 // =========================================================================================
-// ðŸ§  CONFIGURACIÃ“N DEL PROMPT (MODIFICA ESTO PARA MEJORAR LAS RESPUESTAS)
+// 🧠 CONFIGURACIÓN DEL PROMPT (MODIFICA ESTO PARA MEJORAR LAS RESPUESTAS)
 // =========================================================================================
 const PROMPT_SISTEMA = (area: string, competencias: string[]) => `
 ActÃºa como un Especialista PedagÃ³gico del Ministerio de EducaciÃ³n del PerÃº (MINEDU). 
@@ -474,7 +474,7 @@ export const DiagnosticEvaluationView: React.FC = () => {
         competenciesList.forEach(comp => {
           const currentLevel = newEvals[comp]?.level || EvaluationLevel.NE;
           
-          // --- ðŸ› ï¸ LÃ“GICA DE REEMPLAZO ---
+          // --- 🛠️ LÓGICA DE REEMPLAZO ---
           // Actualmente dice: si tiene nota Y (estÃ¡ vacÃ­o o es solo espacios).
           // SI DESEAS REEMPLAZAR TODO, cambia la condiciÃ³n por: if (currentLevel !== EvaluationLevel.NE)
           const isEmpty = !newEvals[comp]?.description || newEvals[comp]?.description.trim() === '';

@@ -6,8 +6,9 @@ import Docxtemplater from 'docxtemplater';
 import ImageModule from 'docxtemplater-image-module-free';
 import { exec, execFile } from 'child_process';
 import db from '../db.js';
-import { resolveTemplatePath, tempRoot } from '../paths.js';
+import { resolveTemplatePath, tempRoot, uploadsRoot } from '../paths.js';
 import { sanitizeDocxDrawingIds } from './wordDocxUtils.js';
+import { INSTRUMENT_BLOCK_TOKEN, getInstrumentTitleText, replaceInstrumentToken } from './sessionWordBlocks.js';
 
 const router = express.Router();
 
@@ -23,6 +24,210 @@ let generationProgress = {
 };
 
 const getSessionTemplatePath = () => resolveTemplatePath('sesion_aprendizaje.docx');
+
+const RESOURCE_IMAGE_TAGS = new Set([
+    'recurso_instructivo_imagen',
+    'anexo_1_imagen',
+    'anexo_2_imagen'
+]);
+
+const DXA_PER_PIXEL = 15;
+const RESOURCE_VERTICAL_RESERVE_PX = 180;
+
+const readDxaAttribute = (xml, elementName, attributeName, fallback = 0) => {
+    const element = String(xml || '').match(new RegExp(`<w:${elementName}\\b[^>]*>`, 'i'))?.[0] || '';
+    const value = Number(element.match(new RegExp(`w:${attributeName}="(\\d+)"`, 'i'))?.[1]);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+};
+
+const sectionXmlForTag = (documentXml, tagName) => {
+    const xml = String(documentXml || '');
+    const tagIndex = xml.indexOf(String(tagName || ''));
+    if (tagIndex < 0) return '';
+
+    const paragraphMatches = [...xml.slice(0, tagIndex).matchAll(/<w:p(?:\s|>)/g)];
+    const paragraphStart = paragraphMatches.at(-1)?.index ?? 0;
+    const localSectionStart = xml.lastIndexOf('<w:sectPr', tagIndex);
+    if (localSectionStart >= paragraphStart) {
+        const localSectionEnd = xml.indexOf('</w:sectPr>', localSectionStart);
+        if (localSectionEnd >= 0) return xml.slice(localSectionStart, localSectionEnd + 11);
+    }
+
+    const nextSectionStart = xml.indexOf('<w:sectPr', tagIndex);
+    if (nextSectionStart < 0) return '';
+    const nextSectionEnd = xml.indexOf('</w:sectPr>', nextSectionStart);
+    return nextSectionEnd >= 0 ? xml.slice(nextSectionStart, nextSectionEnd + 11) : '';
+};
+
+const pageBoxForTag = (documentXml, tagName) => {
+    const sectionXml = sectionXmlForTag(documentXml, tagName);
+    const xml = String(documentXml || '');
+    const tagIndex = xml.indexOf(String(tagName || ''));
+    const paragraphMatches = tagIndex >= 0 ? [...xml.slice(0, tagIndex).matchAll(/<w:p(?:\s|>)/g)] : [];
+    const paragraphStart = paragraphMatches.at(-1)?.index ?? -1;
+    const paragraphEnd = paragraphStart >= 0 ? xml.indexOf('</w:p>', tagIndex) : -1;
+    const paragraphXml = paragraphStart >= 0 && paragraphEnd >= 0
+        ? xml.slice(paragraphStart, paragraphEnd + 6)
+        : '';
+    const pageWidthDxa = readDxaAttribute(sectionXml, 'pgSz', 'w', 11906);
+    const pageHeightDxa = readDxaAttribute(sectionXml, 'pgSz', 'h', 16838);
+    const leftDxa = readDxaAttribute(sectionXml, 'pgMar', 'left', 1440);
+    const rightDxa = readDxaAttribute(sectionXml, 'pgMar', 'right', 1440);
+    const topDxa = readDxaAttribute(sectionXml, 'pgMar', 'top', 1440);
+    const bottomDxa = readDxaAttribute(sectionXml, 'pgMar', 'bottom', 1440);
+    const paragraphLeftDxa = readDxaAttribute(paragraphXml, 'ind', 'left', 0);
+    const paragraphRightDxa = readDxaAttribute(paragraphXml, 'ind', 'right', 0);
+    return {
+        width: Math.max(1, Math.floor((pageWidthDxa - leftDxa - rightDxa - paragraphLeftDxa - paragraphRightDxa) / DXA_PER_PIXEL)),
+        height: Math.max(1, Math.floor((pageHeightDxa - topDxa - bottomDxa) / DXA_PER_PIXEL) - RESOURCE_VERTICAL_RESERVE_PX)
+    };
+};
+
+const readRasterDimensions = (image) => {
+    if (!Buffer.isBuffer(image) || image.length < 10) return null;
+    if (image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && image.length >= 24) {
+        return { width: image.readUInt32BE(16), height: image.readUInt32BE(20) };
+    }
+    if (image.toString('ascii', 0, 3) === 'GIF') {
+        return { width: image.readUInt16LE(6), height: image.readUInt16LE(8) };
+    }
+    if (image[0] === 0xff && image[1] === 0xd8) {
+        let offset = 2;
+        while (offset + 9 < image.length) {
+            if (image[offset] !== 0xff) {
+                offset += 1;
+                continue;
+            }
+            const marker = image[offset + 1];
+            if (marker === 0xd8 || marker === 0xd9) {
+                offset += 2;
+                continue;
+            }
+            const segmentLength = image.readUInt16BE(offset + 2);
+            if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+                return { width: image.readUInt16BE(offset + 7), height: image.readUInt16BE(offset + 5) };
+            }
+            if (segmentLength < 2) break;
+            offset += segmentLength + 2;
+        }
+    }
+    if (image.toString('ascii', 0, 4) === 'RIFF' && image.toString('ascii', 8, 12) === 'WEBP') {
+        const format = image.toString('ascii', 12, 16);
+        if (format === 'VP8X' && image.length >= 30) {
+            return { width: image.readUIntLE(24, 3) + 1, height: image.readUIntLE(27, 3) + 1 };
+        }
+        if (format === 'VP8L' && image.length >= 25) {
+            const bits = image.readUInt32LE(21);
+            return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+        }
+        if (format === 'VP8 ' && image.length >= 30) {
+            return { width: image.readUInt16LE(26) & 0x3fff, height: image.readUInt16LE(28) & 0x3fff };
+        }
+    }
+    return null;
+};
+
+const fitImageToPage = (image, pageBox, fallbackAspect = '16:9') => {
+    const dimensions = readRasterDimensions(image);
+    const fallback = ({
+        '16:9': [520, 293],
+        '9:16': [300, 533],
+        '1:1': [430, 430],
+        '3:4': [390, 520]
+    })[fallbackAspect] || [520, 293];
+    const originalWidth = Number(dimensions?.width) || fallback[0];
+    const originalHeight = Number(dimensions?.height) || fallback[1];
+    const scale = Math.min(1, pageBox.width / originalWidth, pageBox.height / originalHeight);
+    return [
+        Math.max(1, Math.round(originalWidth * scale)),
+        Math.max(1, Math.round(originalHeight * scale))
+    ];
+};
+
+const RESOURCE_KIND_LABELS = {
+    informative: 'Instructivo informativo',
+    dynamic: 'Dinámica',
+    youtube: 'Video de YouTube',
+    collage: 'Lámina de imágenes',
+    questions: 'Preguntas desafiantes',
+    worksheet: 'Ficha de trabajo',
+    form: 'Formulario TIC',
+    gamification: 'Gamificación',
+    project: 'Reto o producto digital'
+};
+
+const resolveLocalUploadPath = (rawUrl) => {
+    const text = String(rawUrl || '').trim();
+    const uploadMatch = text.match(/\/uploads\/([^?#]+)/i);
+    if (!uploadMatch?.[1]) return '';
+    const relative = decodeURIComponent(uploadMatch[1]).replace(/[\\/]+/g, path.sep);
+    const resolved = path.resolve(uploadsRoot, relative);
+    const relativeCheck = path.relative(uploadsRoot, resolved);
+    if (relativeCheck.startsWith('..') || path.isAbsolute(relativeCheck)) return '';
+    return resolved;
+};
+
+const loadWordImage = async (value) => {
+    if (!value) return null;
+    if (Buffer.isBuffer(value)) return value;
+    const text = String(value || '').trim();
+    const dataMatch = text.match(/^data:image\/[^;]+;base64,(.+)$/i);
+    if (dataMatch?.[1]) return Buffer.from(dataMatch[1], 'base64');
+
+    const localUpload = resolveLocalUploadPath(text);
+    if (localUpload && fs.existsSync(localUpload)) return fs.readFileSync(localUpload);
+    if (path.isAbsolute(text) && fs.existsSync(text)) return fs.readFileSync(text);
+
+    if (/^https?:\/\//i.test(text)) {
+        const response = await fetch(text, { signal: AbortSignal.timeout(12000) });
+        if (!response.ok) throw new Error(`No se pudo descargar la imagen del recurso (${response.status}).`);
+        return Buffer.from(await response.arrayBuffer());
+    }
+    return null;
+};
+
+const safeLoadWordImage = async (value) => {
+    try {
+        const image = await loadWordImage(value);
+        return image ? image.toString('base64') : '';
+    } catch {
+        return '';
+    }
+};
+
+const resourceDisplayTitle = (resource = {}) => String(
+    resource?.metadata?.externalTitle
+    || resource?.aiContent?.heading
+    || resource?.title
+    || ''
+).trim();
+
+const resourceKindLabel = (resource = {}) => RESOURCE_KIND_LABELS[String(resource?.kind || '').trim()] || String(resource?.kind || '').trim();
+
+const buildResourceDataBlock = (resource = {}, options = {}) => {
+    const lines = [
+        options.includeTitle ? resourceDisplayTitle(resource) : '',
+        resourceKindLabel(resource),
+        String(resource?.metadata?.deliverable || '').trim(),
+        String(resource?.metadata?.url || '').trim()
+    ].filter(Boolean);
+    return options.includeReason
+        ? [...lines, String(resource?.metadata?.pedagogicalReason || '').trim()].filter(Boolean).join('\n')
+        : lines.join('\n');
+};
+
+const getActiveStudentsForSession = (row) => {
+    try {
+        return db.prepare(`
+            SELECT id, estudiantes AS name
+            FROM db_estudiantes
+            WHERE grado = ? AND secc = ? AND UPPER(COALESCE(estado, 'A')) NOT IN ('I', 'INACTIVO', 'RETIRADO')
+            ORDER BY estudiantes ASC
+        `).all(row.grade || '', row.section || '');
+    } catch {
+        return [];
+    }
+};
 
 const TRANSVERSAL_NAMES = [
     'Se desenvuelve en los entornos virtuales generados por las TIC',
@@ -85,6 +290,123 @@ const normalizeText = (value) => String(value || '')
     .trim();
 
 const normalizeLooseText = (value) => normalizeText(value).replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+const escapeXml = (value) => String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+
+const decodeXmlText = (value) => String(value || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+
+const extractParagraphText = (paragraphXml) => decodeXmlText(
+    Array.from(String(paragraphXml || '').matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g))
+        .map((match) => match[1] || '')
+        .join('')
+);
+
+const LIST_MARKER_PATTERN = /[•●◦▪■□◆❖➢➤✓✔]/g;
+
+const cleanListItemText = (value) => String(value || '')
+    .trim()
+    .replace(/^[•●◦▪■□◆❖➢➤✓✔]\s*/u, '')
+    .replace(/^[-–—]\s+/u, '')
+    .trim();
+
+const splitListItems = (value) => {
+    const normalized = String(value || '')
+        .replace(/\r\n/g, '\n')
+        .replace(LIST_MARKER_PATTERN, '\n')
+        .replace(/(^|\n)\s*[-–—]\s+/g, '$1');
+    return normalized
+        .split('\n')
+        .map(cleanListItemText)
+        .filter(Boolean);
+};
+
+const prepareNumberedTemplateLists = (zip, sourceData) => {
+    const data = { ...(sourceData || {}) };
+    const replacements = [];
+    const fieldTokens = new Map();
+    const xmlNames = Object.keys(zip?.files || {}).filter((name) =>
+        name.startsWith('word/') && name.endsWith('.xml')
+    );
+
+    xmlNames.forEach((name) => {
+        const xml = zip.file(name)?.asText() || '';
+        const paragraphs = xml.match(/<w:p\b[\s\S]*?<\/w:p>/g) || [];
+        paragraphs.forEach((paragraph) => {
+            if (!/<w:numPr\b/.test(paragraph)) return;
+            const paragraphText = extractParagraphText(paragraph);
+            const markerPattern = /<<\s*([^<>]+?)\s*>>/g;
+            let markerMatch;
+            while ((markerMatch = markerPattern.exec(paragraphText)) !== null) {
+                const field = String(markerMatch[1] || '').trim();
+                if (!field || !Object.prototype.hasOwnProperty.call(data, field)) continue;
+                if (typeof data[field] !== 'string') continue;
+
+                let token = fieldTokens.get(field);
+                if (!token) {
+                    token = `__ARMI_NUMBERED_LIST_${fieldTokens.size + 1}__`;
+                    fieldTokens.set(field, token);
+                    replacements.push({
+                        field,
+                        token,
+                        items: splitListItems(data[field])
+                    });
+                    data[field] = token;
+                }
+            }
+        });
+    });
+
+    return { data, replacements };
+};
+
+const expandNumberedListParagraphs = (xml, replacements) => {
+    let next = String(xml || '');
+    (Array.isArray(replacements) ? replacements : []).forEach((replacement) => {
+        const token = String(replacement?.token || '');
+        if (!token || !next.includes(token)) return;
+        const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const paragraphPattern = new RegExp(
+            `<w:p\\b[^>]*>(?:(?!<\\/w:p>)[\\s\\S])*?${escapedToken}(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`,
+            'g'
+        );
+        next = next.replace(paragraphPattern, (paragraph) => {
+            const items = Array.isArray(replacement.items) ? replacement.items : [];
+            if (items.length === 0) return paragraph.replace(token, '');
+            return items.map((item, index) => {
+                let cloned = paragraph.replace(token, escapeXml(item));
+                if (index > 0) {
+                    cloned = cloned
+                        .replace(/\s+w14:paraId="[^"]*"/g, '')
+                        .replace(/\s+w14:textId="[^"]*"/g, '');
+                }
+                return cloned;
+            }).join('');
+        });
+    });
+    return next;
+};
+
+const applyNumberedTemplateLists = (zip, replacements) => {
+    if (!Array.isArray(replacements) || replacements.length === 0) return;
+    Object.keys(zip?.files || {})
+        .filter((name) => name.startsWith('word/') && name.endsWith('.xml'))
+        .forEach((name) => {
+            const xml = zip.file(name)?.asText() || '';
+            if (!xml) return;
+            const rendered = expandNumberedListParagraphs(xml, replacements);
+            if (rendered !== xml) zip.file(name, rendered);
+        });
+};
 
 const toProperName = (value) => {
     const stopWords = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'e']);
@@ -466,7 +788,22 @@ const getSessionTemplateFields = () => ([
     'linkografia',
     'bloque_bibliografia_linkografia',
     'seccion_bibliografia_linkografia',
-    'fecha_creacion_sesion'
+    'fecha_creacion_sesion',
+    '%recurso_instructivo_imagen',
+    'recurso_instructivo_titulo',
+    '%anexo_1_imagen',
+    'anexo_1_tipo',
+    'anexo_1_titulo',
+    'anexo_1_enlace',
+    'anexo_1_datos',
+    '%anexo_2_imagen',
+    'anexo_2_tipo',
+    'anexo_2_titulo',
+    'anexo_2_enlace',
+    'anexo_2_evidencia',
+    'anexo_2_datos',
+    'instrumento_evaluacion_titulo',
+    'instrumento_evaluacion'
 ]);
 
 const formatTemplateError = (error) => {
@@ -611,6 +948,16 @@ router.post('/sesion-word/generate', async (req, res) => {
             const seq = sessionData?.secuencia || {};
             const recursosSesion = sessionData?.recursos || {};
             const bibliografiaSesion = sessionData?.bibliografia || {};
+            const learningResources = sessionData?.learningResources || {};
+            const instructiveResource = learningResources?.instructive || {};
+            const annex1Resource = learningResources?.annex1 || {};
+            const annex2Resource = learningResources?.annex2 || {};
+            const [instructiveImage, annex1Image, annex2Image] = await Promise.all([
+                safeLoadWordImage(instructiveResource?.imageUrl),
+                safeLoadWordImage(annex1Resource?.imageUrl),
+                safeLoadWordImage(annex2Resource?.imageUrl)
+            ]);
+            const sessionStudents = getActiveStudentsForSession(row);
             const annualResourceDefaults = {
                 recursos: row.program_rec_recursos || '',
                 medios: row.program_rec_medios || '',
@@ -645,24 +992,42 @@ router.post('/sesion-word/generate', async (req, res) => {
                 { label: 'LINKOGRAFIA', value: linkografiaText }
             ]);
 
-            const doc = new Docxtemplater(new PizZip(fs.readFileSync(templatePath)), {
+            const templateZip = new PizZip(fs.readFileSync(templatePath));
+            const templateDocumentXml = templateZip.file('word/document.xml')?.asText() || '';
+            const imagePageBoxes = Object.fromEntries(
+                [...RESOURCE_IMAGE_TAGS].map((tagName) => [tagName, pageBoxForTag(templateDocumentXml, tagName)])
+            );
+            const doc = new Docxtemplater(templateZip, {
                 paragraphLoop: true,
                 linebreaks: true,
                 delimiters: { start: '<<', end: '>>' },
                 modules: [new ImageModule({
-                    centered: true,
+                    centered: false,
                     getImage(tagValue) {
                         if (!tagValue) return null;
+                        if (Buffer.isBuffer(tagValue)) return tagValue;
                         const base64 = String(tagValue).startsWith('data:')
                             ? String(tagValue).replace(/^data:image\/\w+;base64,/, '')
                             : String(tagValue);
                         return Buffer.from(base64, 'base64');
                     },
-                    getSize() { return [85, 85]; }
+                    getSize(image, _tagValue, tagName) {
+                        if (!RESOURCE_IMAGE_TAGS.has(String(tagName || ''))) return [85, 85];
+                        const resource = tagName === 'recurso_instructivo_imagen'
+                            ? instructiveResource
+                            : tagName === 'anexo_1_imagen'
+                                ? annex1Resource
+                                : annex2Resource;
+                        return fitImageToPage(
+                            image,
+                            imagePageBoxes[tagName] || { width: 520, height: 700 },
+                            resource?.aspectRatio
+                        );
+                    }
                 })]
             });
 
-            doc.setData({
+            const templateData = {
                 ie: dg.institution || '',
                 institution: dg.institution || '',
                 ugel: dg.ugel || '',
@@ -771,10 +1136,30 @@ router.post('/sesion-word/generate', async (req, res) => {
                 fecha_creacion_sesion: formatSessionCreationDate(row),
                 fecha_registro_sesion: formatSessionCreationDate(row),
                 fecha_generacion_larga: formatGenerationDateLong(),
-                generation_date_long: formatGenerationDateLong()
-            });
+                generation_date_long: formatGenerationDateLong(),
+                recurso_instructivo_imagen: instructiveImage,
+                recurso_instructivo_titulo: resourceDisplayTitle(instructiveResource),
+                anexo_1_imagen: annex1Image,
+                anexo_1_tipo: resourceKindLabel(annex1Resource),
+                anexo_1_titulo: resourceDisplayTitle(annex1Resource),
+                anexo_1_enlace: annex1Resource?.metadata?.url || '',
+                anexo_1_datos: buildResourceDataBlock(annex1Resource, { includeReason: true }),
+                anexo_2_imagen: annex2Image,
+                anexo_2_tipo: resourceKindLabel(annex2Resource),
+                anexo_2_titulo: resourceDisplayTitle(annex2Resource),
+                anexo_2_enlace: annex2Resource?.metadata?.url || '',
+                anexo_2_evidencia: annex2Resource?.metadata?.deliverable || '',
+                anexo_2_datos: buildResourceDataBlock(annex2Resource),
+                instrumento_evaluacion_titulo: getInstrumentTitleText(sessionData),
+                instrumento_evaluacion: INSTRUMENT_BLOCK_TOKEN
+            };
 
-            doc.render();
+            const numberedTemplateLists = prepareNumberedTemplateLists(templateZip, templateData);
+            doc.render(numberedTemplateLists.data);
+            applyNumberedTemplateLists(doc.getZip(), numberedTemplateLists.replacements);
+
+            const renderedDocumentXml = doc.getZip().file('word/document.xml')?.asText() || '';
+            doc.getZip().file('word/document.xml', replaceInstrumentToken(renderedDocumentXml, sessionData, sessionStudents));
 
             const fileName = `SES ${sanitizeFileLabel(row.session_number, '1')} - ${sanitizeFileLabel(areaName, 'Area')} - ${sanitizeFileLabel(row.grade, 'Grado')} ${sanitizeFileLabel(row.section, 'Seccion')} - U${sanitizeFileLabel(row.unit_number, '1')}.docx`;
             const finalPath = path.join(outputPath, fileName);
@@ -792,6 +1177,7 @@ router.post('/sesion-word/generate', async (req, res) => {
         if (generationProgress.generatedCount === 0) throw new Error('La exportación de sesiones terminó sin generar archivos.');
         generationProgress.active = false;
     } catch (e) {
+        console.error('[SESION WORD] Error al generar documentos:', e?.stack || e);
         generationProgress.error = formatTemplateError(e);
         generationProgress.active = false;
     }

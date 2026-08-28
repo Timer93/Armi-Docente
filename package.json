@@ -1,7 +1,7 @@
 {
   "name": "armi-docente-web",
   "private": true,
-  "version": "11.1.7",
+  "version": "11.2.2",
   "description": "ARMI Docente",
   "author": "ARMI",
   "type": "module",
@@ -26,6 +26,7 @@
     "@google/genai": "^1.35.0",
     "@vitejs/plugin-react": "^5.1.2",
     "@vladmandic/human": "^3.3.6",
+    "archiver": "^8.0.0",
     "better-sqlite3": "^12.5.0",
     "body-parser": "^2.2.1",
     "child_process": "^1.0.2",
@@ -37,13 +38,16 @@
     "express": "^5.2.1",
     "fs": "^0.0.1-security",
     "lucide-react": "^1.17.0",
+    "multer": "^2.2.0",
     "path": "^0.12.7",
+    "pdfkit": "^0.20.1",
     "pizzip": "^3.1.7",
     "qrcode": "^1.5.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-quill-new": "^3.8.3",
     "recharts": "^3.6.0",
+    "sharp": "^0.35.4",
     "url": "^0.11.4",
     "vite": "^7.3.0",
     "xlsx": "^0.18.5"
@@ -73,10 +77,12 @@
     "artifactName": "ARMI_DOCENTE_Setup.${ext}",
     "asar": true,
     "asarUnpack": [
-      "node_modules/better-sqlite3/**/*"
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/sharp/**/*",
+      "node_modules/@img/**/*"
     ],
-    "buildDependenciesFromSource": true,
-    "npmRebuild": true,
+    "buildDependenciesFromSource": false,
+    "npmRebuild": false,
     "nodeGypRebuild": false,
     "directories": {
       "output": "dist_electron"

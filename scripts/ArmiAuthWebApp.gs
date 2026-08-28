@@ -120,8 +120,16 @@ function handleRequest_(e, method) {
         return SyncStatus_(params);
       case 'sync_push':
         return SyncPush_(params);
+      case 'sync_push_start':
+        return SyncPushStart_(params);
+      case 'sync_push_chunk':
+        return SyncPushChunk_(params);
+      case 'sync_push_commit':
+        return SyncPushCommit_(params);
       case 'sync_pull':
         return SyncPull_(params);
+      case 'sync_pull_chunk':
+        return SyncPullChunk_(params);
       case 'sync_pull_artifact':
         return SyncPullArtifact_(params);
       case 'sync_resolve_conflict':
@@ -312,11 +320,187 @@ function SyncStatus_(params) {
         manifest: manifest,
         hasCloudCopy: !!manifest,
         currentSource: currentCopy ? currentCopy.source : '',
+        capabilities: {
+          chunkedSync: true,
+          protocol: 'zip-parts-v1'
+        },
         activity: {
           conflicts: conflicts,
           versions: versions
         }
       }
+    });
+  } catch (error) {
+    return jsonResponse_({ success: false, message: error.message });
+  }
+}
+
+function SyncPushStart_(params) {
+  try {
+    var userKey = sanitizeSyncUserKey_(params.syncUserKey || params.userKey || params.username);
+    var userLabel = normalizeText_(params.syncUserLabel || params.userLabel || userKey, userKey);
+    var deviceId = sanitizeSyncUserKey_(params.deviceId || 'unknown-device');
+    var baseCloudVersion = normalizeText_(params.baseCloudVersion || params.baseVersion || '');
+    var manifest = typeof params.manifest === 'object' ? params.manifest : parseJsonSafe_(params.manifest);
+    var totalParts = parsePositiveInteger_(params.totalParts, 0);
+    var totalBytes = Math.max(Number(params.totalBytes || 0), 0);
+    if (!manifest || !manifest.digest) throw new Error('No se recibio un manifiesto valido.');
+    if (!totalParts || totalParts > 500) throw new Error('El numero de fragmentos no es valido.');
+
+    var folderInfo = resolveSyncUserFolderFromParams_(params, true) || ensureSyncUserFolder_(userKey, userLabel);
+    var currentManifest = readJsonFileFromFolder_(folderInfo.currentFolder, 'manifest.json');
+    var currentVersion = normalizeText_(currentManifest && currentManifest.cloudVersion);
+    var localDigest = normalizeText_(manifest.digest);
+    if (currentManifest && localDigest === normalizeText_(currentManifest.digest)) {
+      return jsonResponse_({
+        success: true,
+        message: 'No hubo cambios nuevos para subir a Drive.',
+        data: {
+          user: publicSyncFolderInfo_(folderInfo),
+          manifest: currentManifest,
+          skippedUpload: true,
+          reason: 'same-digest'
+        }
+      });
+    }
+
+    var artifactKind = currentManifest && currentVersion && baseCloudVersion !== currentVersion ? 'conflict' : 'version';
+    var uploadId = buildSyncVersionId_(deviceId, localDigest, artifactKind === 'conflict' ? 'conflict' : 'v');
+    var cloudManifest = copyObject_(manifest);
+    cloudManifest.cloudVersion = uploadId;
+    cloudManifest.baseCloudVersion = baseCloudVersion;
+    cloudManifest.syncUserKey = userKey;
+    cloudManifest.syncUserLabel = userLabel;
+    cloudManifest.deviceId = deviceId;
+    cloudManifest.provider = 'google-apps-script-drive';
+    cloudManifest.storageMode = 'apps_script_drive';
+    cloudManifest.generatedAt = new Date().toISOString();
+    cloudManifest.packageParts = {
+      count: totalParts,
+      totalBytes: totalBytes,
+      format: 'zip-parts-v1'
+    };
+
+    var targetFolder = artifactKind === 'conflict' ? folderInfo.conflictsFolder : folderInfo.versionsFolder;
+    pruneAbandonedUploads_(targetFolder);
+    removeFilesByPrefix_(targetFolder, uploadId + '.zip.part-');
+    trashFilesByName_(targetFolder, uploadId + '-upload.json');
+    createOrReplaceJsonFile_(targetFolder, uploadId + '-upload.json', {
+      uploadId: uploadId,
+      artifactKind: artifactKind,
+      totalParts: totalParts,
+      totalBytes: totalBytes,
+      createdAt: new Date().toISOString(),
+      baseCloudVersion: baseCloudVersion,
+      currentCloudVersion: currentVersion,
+      deviceId: deviceId,
+      manifest: manifest,
+      cloudManifest: cloudManifest
+    });
+
+    return jsonResponse_({
+      success: true,
+      data: {
+        user: publicSyncFolderInfo_(folderInfo),
+        uploadId: uploadId,
+        artifactKind: artifactKind,
+        totalParts: totalParts
+      }
+    });
+  } catch (error) {
+    return jsonResponse_({ success: false, message: error.message });
+  }
+}
+
+function SyncPushChunk_(params) {
+  try {
+    var uploadId = sanitizeSyncUserKey_(params.uploadId);
+    var artifactKind = normalizeText_(params.artifactKind, 'version') === 'conflict' ? 'conflict' : 'version';
+    var index = Number(params.index);
+    var totalParts = parsePositiveInteger_(params.totalParts, 0);
+    var chunkBase64 = normalizeText_(params.chunkBase64);
+    if (!uploadId || !Number.isInteger(index) || index < 0 || index >= totalParts) throw new Error('Fragmento de subida invalido.');
+    if (!chunkBase64) throw new Error('El fragmento llego vacio.');
+
+    var folderInfo = resolveSyncUserFolderFromParams_(params, false);
+    if (!folderInfo) throw new Error('No encontre la carpeta de sincronizacion del usuario.');
+    var targetFolder = artifactKind === 'conflict' ? folderInfo.conflictsFolder : folderInfo.versionsFolder;
+    var marker = readJsonFileFromFolder_(targetFolder, uploadId + '-upload.json');
+    if (!marker || Number(marker.totalParts) !== totalParts || normalizeText_(marker.artifactKind) !== artifactKind) {
+      throw new Error('La sesion de subida ya no existe o no coincide con este fragmento.');
+    }
+
+    var bytes = Utilities.base64Decode(chunkBase64);
+    var expectedSha256 = normalizeText_(params.chunkSha256).toLowerCase();
+    var actualSha256 = sha256Hex_(bytes);
+    if (expectedSha256 && actualSha256 !== expectedSha256) {
+      throw new Error('El fragmento ' + (index + 1) + ' llego alterado y no se guardo.');
+    }
+    var partName = buildPackagePartName_(uploadId + '.zip', index, totalParts);
+    createOrReplaceBytesFile_(targetFolder, partName, bytes, 'application/octet-stream');
+    return jsonResponse_({ success: true, data: { uploadId: uploadId, index: index, sha256: actualSha256 } });
+  } catch (error) {
+    return jsonResponse_({ success: false, message: error.message });
+  }
+}
+
+function SyncPushCommit_(params) {
+  try {
+    var uploadId = sanitizeSyncUserKey_(params.uploadId);
+    var artifactKind = normalizeText_(params.artifactKind, 'version') === 'conflict' ? 'conflict' : 'version';
+    var folderInfo = resolveSyncUserFolderFromParams_(params, false);
+    if (!folderInfo) throw new Error('No encontre la carpeta de sincronizacion del usuario.');
+    var targetFolder = artifactKind === 'conflict' ? folderInfo.conflictsFolder : folderInfo.versionsFolder;
+    var markerName = uploadId + '-upload.json';
+    var marker = readJsonFileFromFolder_(targetFolder, markerName);
+    if (!marker) throw new Error('La sesion de subida ya no existe.');
+    var totalParts = parsePositiveInteger_(marker.totalParts, 0);
+    var parts = getPackagePartFiles_(targetFolder, uploadId + '.zip', totalParts);
+    if (parts.length !== totalParts) {
+      throw new Error('La subida esta incompleta: llegaron ' + parts.length + ' de ' + totalParts + ' fragmentos.');
+    }
+
+    var config = getConfig_();
+    var markerFile = getFirstFileByName_(targetFolder, markerName);
+    if (markerFile) markerFile.setTrashed(true);
+    if (artifactKind === 'conflict') {
+      var conflictPayload = {
+        conflict: true,
+        conflictId: uploadId,
+        uploadedAt: new Date().toISOString(),
+        baseCloudVersion: marker.baseCloudVersion,
+        currentCloudVersion: marker.currentCloudVersion,
+        deviceId: marker.deviceId,
+        packageParts: marker.cloudManifest.packageParts,
+        manifest: marker.manifest
+      };
+      createOrReplaceJsonFile_(targetFolder, uploadId + '-manifest.json', conflictPayload);
+      pruneVersionArtifacts_(targetFolder, parsePositiveInteger_(getConfigValue_(config, 'SYNC_KEEP_CONFLICTS', config.syncKeepConflicts), ARMI_DEFAULTS.syncKeepConflicts), 'conflict');
+      return jsonResponse_({
+        success: false,
+        conflict: true,
+        message: 'La nube tiene una version distinta. El paquete local completo quedo guardado como conflicto protegido.',
+        data: {
+          user: publicSyncFolderInfo_(folderInfo),
+          currentManifest: readJsonFileFromFolder_(folderInfo.currentFolder, 'manifest.json'),
+          conflictId: uploadId
+        }
+      });
+    }
+
+    var cloudManifest = marker.cloudManifest;
+    createOrReplaceJsonFile_(targetFolder, uploadId + '-manifest.json', cloudManifest);
+    clearFolder_(folderInfo.currentFolder);
+    for (var i = 0; i < parts.length; i += 1) {
+      parts[i].file.makeCopy(buildPackagePartName_('snapshot.zip', i, totalParts), folderInfo.currentFolder);
+    }
+    createOrReplaceJsonFile_(folderInfo.currentFolder, 'manifest.json', cloudManifest);
+    pruneVersionArtifacts_(targetFolder, parsePositiveInteger_(getConfigValue_(config, 'SYNC_KEEP_VERSIONS', config.syncKeepVersions), ARMI_DEFAULTS.syncKeepVersions), 'version');
+
+    return jsonResponse_({
+      success: true,
+      message: 'Copia fragmentada guardada en Drive correctamente.',
+      data: { user: publicSyncFolderInfo_(folderInfo), manifest: cloudManifest }
     });
   } catch (error) {
     return jsonResponse_({ success: false, message: error.message });
@@ -424,8 +608,22 @@ function SyncPull_(params) {
     if (!currentCopy || !currentCopy.manifest) {
       return jsonResponse_({ success: false, message: 'Este usuario todavia no tiene copia en Drive.' });
     }
-    if (!currentCopy.file) {
-      return jsonResponse_({ success: false, message: 'La copia actual no tiene paquete snapshot.zip.' });
+    if (!currentCopy.file && !(currentCopy.parts && currentCopy.parts.length)) {
+      return jsonResponse_({ success: false, message: 'La copia actual no tiene paquete de datos.' });
+    }
+    if (currentCopy.parts && currentCopy.parts.length) {
+      return jsonResponse_({
+        success: true,
+        data: {
+          user: publicSyncFolderInfo_(folderInfo),
+          manifest: currentCopy.manifest,
+          currentSource: currentCopy.source,
+          chunked: true,
+          totalParts: currentCopy.parts.length,
+          artifactId: currentCopy.artifactId || '',
+          artifactKind: currentCopy.artifactKind || 'current'
+        }
+      });
     }
     return jsonResponse_({
       success: true,
@@ -457,10 +655,25 @@ function SyncPullArtifact_(params) {
     var zipName = artifactKind === 'current' ? 'snapshot.zip' : artifactId + '.zip';
     var manifestName = artifactKind === 'current' ? 'manifest.json' : artifactId + '-manifest.json';
     var file = getFirstFileByName_(folder, zipName);
-    if (!file) {
+    var manifest = readJsonFileFromFolder_(folder, manifestName);
+    var totalParts = Number(manifest && (manifest.packageParts && manifest.packageParts.count || manifest.manifest && manifest.manifest.packageParts && manifest.manifest.packageParts.count) || 0);
+    var parts = totalParts ? getPackagePartFiles_(folder, zipName, totalParts) : [];
+    if (!file && !parts.length) {
       return jsonResponse_({ success: false, message: 'No encontre el paquete solicitado en Drive.' });
     }
-    var manifest = readJsonFileFromFolder_(folder, manifestName);
+    if (parts.length) {
+      return jsonResponse_({
+        success: true,
+        data: {
+          user: publicSyncFolderInfo_(folderInfo),
+          artifactId: artifactId,
+          artifactKind: artifactKind,
+          manifest: manifest,
+          chunked: true,
+          totalParts: parts.length
+        }
+      });
+    }
     return jsonResponse_({
       success: true,
       data: {
@@ -469,6 +682,37 @@ function SyncPullArtifact_(params) {
         artifactKind: artifactKind,
         manifest: manifest,
         packageBase64: Utilities.base64Encode(file.getBlob().getBytes())
+      }
+    });
+  } catch (error) {
+    return jsonResponse_({ success: false, message: error.message });
+  }
+}
+
+function SyncPullChunk_(params) {
+  try {
+    var artifactId = normalizeText_(params.artifactId || params.id);
+    var artifactKind = normalizeText_(params.artifactKind || params.kind, 'current');
+    var index = Number(params.index);
+    var totalParts = parsePositiveInteger_(params.totalParts, 0);
+    if (!Number.isInteger(index) || index < 0 || index >= totalParts) throw new Error('Indice de fragmento invalido.');
+    var folderInfo = resolveSyncUserFolderFromParams_(params, false);
+    if (!folderInfo) throw new Error('No encontre la carpeta historica de este usuario en Drive.');
+    var folder = artifactKind === 'conflict'
+      ? folderInfo.conflictsFolder
+      : artifactKind === 'version'
+        ? folderInfo.versionsFolder
+        : folderInfo.currentFolder;
+    var zipName = artifactKind === 'current' ? 'snapshot.zip' : artifactId + '.zip';
+    var partName = buildPackagePartName_(zipName, index, totalParts);
+    var file = getFirstFileByName_(folder, partName);
+    if (!file) throw new Error('No encontre el fragmento ' + (index + 1) + ' de ' + totalParts + ' en Drive.');
+    return jsonResponse_({
+      success: true,
+      data: {
+        index: index,
+        totalParts: totalParts,
+        chunkBase64: Utilities.base64Encode(file.getBlob().getBytes())
       }
     });
   } catch (error) {
@@ -501,6 +745,11 @@ function SyncResolveConflict_(params) {
     if (zipFile) zipFile.moveTo(resolvedFolder);
     if (manifestFile) {
       var manifest = readJsonFileFromFile_(manifestFile) || {};
+      var conflictPartCount = Number(manifest.packageParts && manifest.packageParts.count || manifest.manifest && manifest.manifest.packageParts && manifest.manifest.packageParts.count || 0);
+      var conflictParts = conflictPartCount ? getPackagePartFiles_(folderInfo.conflictsFolder, zipName, conflictPartCount) : [];
+      for (var partIndex = 0; partIndex < conflictParts.length; partIndex += 1) {
+        conflictParts[partIndex].file.moveTo(resolvedFolder);
+      }
       manifest.resolved = true;
       manifest.resolvedAt = new Date().toISOString();
       manifest.resolvedBy = userKey;
@@ -1172,6 +1421,68 @@ function createOrReplaceBase64File_(folder, name, base64, mimeType) {
   return folder.createFile(blob);
 }
 
+function createOrReplaceBytesFile_(folder, name, bytes, mimeType) {
+  if (!folder) throw new Error('No se encontro la carpeta de Drive donde debia guardarse el fragmento.');
+  trashFilesByName_(folder, name);
+  return folder.createFile(Utilities.newBlob(bytes, mimeType || 'application/octet-stream', name));
+}
+
+function trashFilesByName_(folder, name) {
+  if (!folder) return;
+  var files = folder.getFilesByName(name);
+  while (files.hasNext()) files.next().setTrashed(true);
+}
+
+function removeFilesByPrefix_(folder, prefix) {
+  if (!folder) return;
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var file = files.next();
+    if (normalizeText_(file.getName()).indexOf(prefix) === 0) file.setTrashed(true);
+  }
+}
+
+function pruneAbandonedUploads_(folder) {
+  if (!folder) return;
+  var markers = listFolderFilesBySuffix_(folder, '-upload.json');
+  var cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  markers.forEach(function(item) {
+    var marker = readJsonFileFromFile_(item.file) || {};
+    var createdAt = Date.parse(marker.createdAt || item.createdAt || '') || 0;
+    if (createdAt >= cutoff) return;
+    var uploadId = normalizeText_(marker.uploadId || item.name.replace(/-upload\.json$/i, ''));
+    item.file.setTrashed(true);
+    if (uploadId) removeFilesByPrefix_(folder, uploadId + '.zip.part-');
+  });
+}
+
+function padPackagePart_(value) {
+  return ('00000' + String(value)).slice(-5);
+}
+
+function buildPackagePartName_(zipName, index, totalParts) {
+  return zipName + '.part-' + padPackagePart_(Number(index) + 1) + '-of-' + padPackagePart_(totalParts);
+}
+
+function getPackagePartFiles_(folder, zipName, totalParts) {
+  var parts = [];
+  if (!folder || !totalParts) return parts;
+  for (var index = 0; index < totalParts; index += 1) {
+    var name = buildPackagePartName_(zipName, index, totalParts);
+    var file = getFirstFileByName_(folder, name);
+    if (!file) return parts;
+    parts.push({ name: name, file: file, index: index });
+  }
+  return parts;
+}
+
+function sha256Hex_(bytes) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes).map(function(value) {
+    var normalized = value < 0 ? value + 256 : value;
+    return ('0' + normalized.toString(16)).slice(-2);
+  }).join('');
+}
+
 function readJsonFileFromFolder_(folder, name) {
   if (!folder) return null;
   var file = getFirstFileByName_(folder, name);
@@ -1184,6 +1495,18 @@ function resolveCurrentCloudCopy_(folderInfo) {
 
   var currentManifest = readJsonFileFromFolder_(folderInfo.currentFolder, 'manifest.json');
   var currentZip = getFirstFileByName_(folderInfo.currentFolder, 'snapshot.zip');
+  var currentPartCount = Number(currentManifest && currentManifest.packageParts && currentManifest.packageParts.count || 0);
+  var currentParts = currentPartCount ? getPackagePartFiles_(folderInfo.currentFolder, 'snapshot.zip', currentPartCount) : [];
+  if (currentManifest && currentParts.length === currentPartCount && currentPartCount > 0) {
+    return {
+      manifest: currentManifest,
+      file: null,
+      parts: currentParts,
+      artifactId: '',
+      artifactKind: 'current',
+      source: 'current-chunked'
+    };
+  }
   if (currentManifest && currentZip) {
     return {
       manifest: currentManifest,
@@ -1197,6 +1520,9 @@ function resolveCurrentCloudCopy_(folderInfo) {
     return {
       manifest: latestVersion.manifest,
       file: latestVersion.file,
+      parts: latestVersion.parts || [],
+      artifactId: latestVersion.artifactId || '',
+      artifactKind: 'version',
       source: 'versions-fallback'
     };
   }
@@ -1217,10 +1543,14 @@ function getLatestVersionCloudCopy_(versionsFolder) {
     if (!manifest) continue;
     var zipName = item.name.replace(/-manifest\.json$/i, '.zip');
     var zipFile = getFirstFileByName_(versionsFolder, zipName);
-    if (!zipFile) continue;
+    var partCount = Number(manifest.packageParts && manifest.packageParts.count || 0);
+    var parts = partCount ? getPackagePartFiles_(versionsFolder, zipName, partCount) : [];
+    if (!zipFile && (!partCount || parts.length !== partCount)) continue;
     return {
       manifest: manifest,
       file: zipFile,
+      parts: parts,
+      artifactId: item.name.replace(/-manifest\.json$/i, ''),
       manifestName: item.name,
       zipName: zipName
     };
@@ -1324,6 +1654,7 @@ function pruneVersionArtifacts_(folder, keepCount, mode) {
     var zipName = item.name.replace(/-manifest\.json$/i, '.zip');
     var zipFile = getFirstFileByName_(folder, zipName);
     if (zipFile) zipFile.setTrashed(true);
+    removeFilesByPrefix_(folder, zipName + '.part-');
   });
 }
 

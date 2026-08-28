@@ -46,6 +46,7 @@ export interface GeneralData {
   // Word Configuration
   /* Added path_word_default to fix missing property error */
   path_word_default?: string;
+  evidence_storage_path?: string;
 
   // CalendarizaciÃ³n - Bimestres
   b1_start?: string; b1_end?: string;

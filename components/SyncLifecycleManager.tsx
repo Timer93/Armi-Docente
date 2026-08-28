@@ -2,13 +2,16 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from './auth/AuthContext';
 import {
   CloudSyncStatusData,
+  ResourceDeliveryStatus,
   discardPendingCloudSync,
   getCloudSyncStatus,
   getLocalCloudSyncStatus,
+  getResourceDeliveryStatus,
   markPendingCloudSync,
   pullCloudSync,
   pushCloudSync,
   saveCloudFrontendState,
+  saveCloudSyncConfig,
 } from '../services/apiService';
 import { applyArmiLocalState, CLOUD_SYNC_EVENT, collectArmiLocalState, emitCloudSyncUpdated } from '../utils/cloudSyncState';
 
@@ -34,9 +37,16 @@ const toneStyles: Record<NoticeTone, string> = {
 };
 
 const canAutoRestoreFromCloud = (status: CloudSyncStatusData) => {
-  if (status.config.mode !== 'apps_script_drive') return false;
+  if (status.config.mode === 'local') return false;
   if (status.comparison !== 'mirror-newer') return false;
   return !status.localManifest;
+};
+
+const formatTransferBytes = (value: number) => {
+  const bytes = Math.max(0, Number(value || 0));
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 };
 
 const SKIP_NEXT_LOCAL_PUSH_FLAG = 'armi-sync-skip-next-local-push';
@@ -75,7 +85,7 @@ const reloadApplicationView = () => {
 
 const buildDriveDiagnosticMessage = (status: CloudSyncStatusData | null | undefined, fallback?: string) => {
   const base = String(fallback || '').trim();
-  if (!status || status.config.mode !== 'apps_script_drive') {
+  if (!status || status.config.mode === 'local') {
     return base || 'No pude recuperar la copia del usuario desde Drive.';
   }
 
@@ -242,6 +252,7 @@ export const SyncLifecycleManager: React.FC = () => {
   const [closeMessage, setCloseMessage] = useState('Guardando datos locales...');
   const [closeError, setCloseError] = useState<string | null>(null);
   const [closeContext, setCloseContext] = useState<'sync' | 'offline' | 'manual'>('manual');
+  const [resourceDelivery, setResourceDelivery] = useState<ResourceDeliveryStatus | null>(null);
   const handledSessionRef = useRef('');
   const closeInFlightRef = useRef(false);
   const restorePromptDiffs = useMemo(
@@ -252,6 +263,86 @@ export const SyncLifecycleManager: React.FC = () => {
     () => hasOnlyFrontendStateDifference(status?.localManifest, status?.mirrorManifest),
     [status]
   );
+
+  useEffect(() => {
+    if (status?.config.mode !== 'drive_mirror') {
+      setResourceDelivery(null);
+      return undefined;
+    }
+    setResourceDelivery(status.resourceDelivery || null);
+    if (!status.resourceDelivery?.pendingFilesCount && !status.resourceDelivery?.activeTransfers?.length) {
+      return undefined;
+    }
+    let active = true;
+    let timer: number | undefined;
+    const refreshResourceDelivery = async () => {
+      if (!active) return;
+      if (document.visibilityState !== 'visible') {
+        timer = window.setTimeout(refreshResourceDelivery, 2000);
+        return;
+      }
+      const response = await getResourceDeliveryStatus();
+      if (!active) return;
+      if (response.success && response.data) {
+        setResourceDelivery(response.data);
+        if (!response.data.pendingFilesCount && !response.data.activeTransfers?.length) return;
+      }
+      timer = window.setTimeout(refreshResourceDelivery, 1200);
+    };
+    void refreshResourceDelivery();
+    return () => {
+      active = false;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [status?.config.mode, status?.resourceDelivery?.manifestDigest, status?.resourceDelivery?.pendingFilesCount]);
+
+  useEffect(() => {
+    if (status?.config.mode !== 'drive_mirror') return undefined;
+    const retryCounts = new WeakMap<Element, number>();
+    const timers = new Set<number>();
+    const clearRetryQuery = (value: string) => {
+      try {
+        const url = new URL(value, window.location.href);
+        url.searchParams.delete('armiSyncRetry');
+        return url.toString();
+      } catch {
+        return value;
+      }
+    };
+    const handleMediaError = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLImageElement || target instanceof HTMLVideoElement || target instanceof HTMLAudioElement)) return;
+      const source = target.currentSrc || target.src;
+      if (!source) return;
+      let url: URL;
+      try { url = new URL(source, window.location.href); } catch { return; }
+      if (url.origin !== window.location.origin || !url.pathname.startsWith('/uploads/')) return;
+      const attempts = retryCounts.get(target) || 0;
+      if (attempts >= 24) return;
+      retryCounts.set(target, attempts + 1);
+      const timer = window.setTimeout(() => {
+        timers.delete(timer);
+        if (!target.isConnected) return;
+        const retryUrl = new URL(clearRetryQuery(source));
+        retryUrl.searchParams.set('armiSyncRetry', String(Date.now()));
+        target.src = retryUrl.toString();
+        if (target instanceof HTMLVideoElement || target instanceof HTMLAudioElement) target.load();
+      }, Math.min(15000, 3000 + attempts * 500));
+      timers.add(timer);
+    };
+    const handleMediaLoaded = (event: Event) => {
+      if (event.target instanceof Element) retryCounts.delete(event.target);
+    };
+    window.addEventListener('error', handleMediaError, true);
+    window.addEventListener('load', handleMediaLoaded, true);
+    window.addEventListener('loadeddata', handleMediaLoaded, true);
+    return () => {
+      window.removeEventListener('error', handleMediaError, true);
+      window.removeEventListener('load', handleMediaLoaded, true);
+      window.removeEventListener('loadeddata', handleMediaLoaded, true);
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [status?.config.mode]);
 
   useEffect(() => {
     if (!notice || notice.tone === 'warning' || notice.tone === 'error') return undefined;
@@ -371,14 +462,17 @@ export const SyncLifecycleManager: React.FC = () => {
     return true;
   };
 
-  const pushLocalSnapshotToDrive = async () => {
+  const pushLocalSnapshotToDrive = async (options?: { force?: boolean }) => {
     setStartupGateOpen(true);
     setStartupFlow('syncing');
     setStartupMessage('Esta PC tiene datos mas recientes. Los subiremos a Drive antes de continuar.');
     setCloseError(null);
 
     await saveCloudFrontendState(collectArmiLocalState());
-    const response = await pushCloudSync();
+    const response = await pushCloudSync({
+      force: options?.force === true,
+      reason: options?.force ? 'user-confirmed-conflict-resolution' : 'automatic-or-retry',
+    });
     if (!response.success) {
       const refreshed = await refreshStatus();
       const failureMessage = response.message || 'No pude actualizar Drive con la copia de esta PC.';
@@ -386,7 +480,7 @@ export const SyncLifecycleManager: React.FC = () => {
       setNotice({
         title: (response as any).conflict === true ? 'Drive protegió la copia actual' : 'No se pudo subir esta copia',
         message: (response as any).conflict === true
-          ? `${failureMessage} Tu paquete quedó guardado como conflicto protegido en Drive.`
+          ? `${failureMessage} Tus cambios permanecen guardados localmente en esta PC.`
           : failureMessage,
         tone: 'error',
       });
@@ -405,10 +499,19 @@ export const SyncLifecycleManager: React.FC = () => {
     setStartupFlow('idle');
     setCloseError(null);
     markRecentManualPush();
+    const protectedPreviousDriveCopy = String(response.data?.protectedMirrorBackup || '').trim();
     setNotice({
-      title: 'Drive actualizado al abrir',
-      message: 'La copia mas reciente de esta PC ya quedo subida a Drive antes de comenzar a trabajar.',
-      tone: 'success',
+      title: protectedPreviousDriveCopy
+        ? 'Conflicto resuelto con respaldo'
+        : response.data?.cloudDeliveryPending
+          ? 'Carpeta espejo preparada'
+          : 'Espejo actualizado al abrir',
+      message: protectedPreviousDriveCopy
+        ? 'Esta PC quedo como copia principal. La version anterior de Drive se guardo completa en el historial protegido del espejo.'
+        : response.data?.cloudDeliveryPending
+        ? 'ARMI preparo la copia local; Google Drive la enviara cuando vuelva a estar activo.'
+        : 'La copia mas reciente de esta PC ya quedo en la carpeta espejo antes de comenzar a trabajar.',
+      tone: response.data?.cloudDeliveryPending ? 'warning' : 'success',
     });
     emitCloudSyncUpdated();
     await refreshStatus();
@@ -476,20 +579,80 @@ export const SyncLifecycleManager: React.FC = () => {
           tone: 'info',
         });
       }
-      const freshStatus = await refreshStatus();
+      let freshStatus = await refreshStatus();
       setCloseFlow('idle');
       if (!freshStatus) {
         setStartupGateOpen(false);
         setStartupFlow('idle');
         return;
       }
-      if (freshStatus.config.mode !== 'apps_script_drive') {
+      if (freshStatus.config.mode === 'local'
+        && freshStatus.config.legacyMode === 'apps_script_drive'
+        && freshStatus.driveDesktop?.existingMirrors?.length === 1) {
+        const migrated = await saveCloudSyncConfig({
+          mode: 'drive_mirror',
+          mirrorPath: freshStatus.driveDesktop.existingMirrors[0],
+          autoSyncOnClose: freshStatus.config.autoSyncOnClose,
+          syncUserKey: freshStatus.config.syncUserKey,
+          syncUserLabel: freshStatus.config.syncUserLabel,
+        });
+        if (migrated.success) {
+          freshStatus = await refreshStatus();
+        }
+      }
+
+      if (!freshStatus || freshStatus.config.mode === 'local') {
         setStartupGateOpen(false);
         setStartupFlow('idle');
         return;
       }
 
-      if (!navigator.onLine) {
+      if (freshStatus.config.mode === 'drive_mirror' && !freshStatus.driveDesktop?.folderAccessible) {
+        setStartupGateOpen(false);
+        setStartupFlow('idle');
+        setNotice({
+          title: 'No encontramos la carpeta espejo',
+          message: 'Tus datos locales siguen disponibles. Abre el panel de sincronizacion y selecciona nuevamente la carpeta de ARMI dentro de Mi unidad; no intentaremos descargar ni sobrescribir nada mientras no exista.',
+          tone: 'warning',
+        });
+        return;
+      }
+
+      if (freshStatus.config.mode === 'drive_mirror' && freshStatus.comparison === 'mirror-missing') {
+        setStartupFlow('syncing');
+        setStartupMessage('La carpeta espejo esta vacia. Creando automaticamente la primera copia de esta PC...');
+        await markPendingCloudSync({
+          reason: 'initial-mirror-upload',
+          note: 'Primera subida automatica despues de vincular la carpeta espejo.',
+        });
+        const initialPush = await pushCloudSync();
+        if (!initialPush.success) {
+          setStartupGateOpen(false);
+          setStartupFlow('idle');
+          setCloseError(null);
+          setNotice({
+            title: 'La primera copia quedo pendiente',
+            message: initialPush.message || 'No se pudo preparar la primera copia en la carpeta espejo. Tus datos locales siguen intactos.',
+            tone: 'warning',
+          });
+          return;
+        }
+        const deliveryPending = initialPush.data?.cloudDeliveryPending === true;
+        setNotice({
+          title: deliveryPending ? 'Copia preparada; Drive sigue pendiente' : 'Primera copia preparada automaticamente',
+          message: deliveryPending
+            ? initialPush.data?.message || 'ARMI preparo los archivos, pero Google Drive debe reanudar la sincronizacion para subirlos.'
+            : 'ARMI copio automaticamente tus datos en la carpeta espejo. No fue necesario pulsar Subir.',
+          tone: deliveryPending ? 'warning' : 'success',
+        });
+        setStartupGateOpen(false);
+        setStartupFlow('idle');
+        emitCloudSyncUpdated();
+        await refreshStatus();
+        return;
+      }
+
+      if (freshStatus.config.mode === 'apps_script_drive' && !navigator.onLine) {
         setStartupFlow('offline');
         setStartupMessage('Drive esta activado, pero esta PC esta sin internet. Puedes seguir solo con lo local o esperar para sincronizar primero.');
         return;
@@ -520,6 +683,12 @@ export const SyncLifecycleManager: React.FC = () => {
       }
 
       if (freshStatus.comparison === 'local-newer') {
+        if (freshStatus.config.mode === 'drive_mirror') {
+          setStartupFlow('syncing');
+          setStartupMessage('Esta PC tiene la copia mas completa. La guardaremos automaticamente en la carpeta espejo.');
+          await pushLocalSnapshotToDrive();
+          return;
+        }
         if (hasOnlyFrontendStateDifference(freshStatus.localManifest, freshStatus.mirrorManifest)) {
           setStartupGateOpen(false);
           setStartupFlow('idle');
@@ -593,7 +762,23 @@ export const SyncLifecycleManager: React.FC = () => {
   }, [sessionFingerprint]);
 
   useEffect(() => {
-    if (!status || status.config.mode !== 'apps_script_drive') return;
+    if (!status || status.config.mode === 'local') return;
+    if (status.mirrorOperation?.state === 'origin-copy-pending') {
+      setNotice({
+        title: 'Otra PC no termino de preparar sus archivos',
+        message: `Drive recibio el catalogo de una operacion, pero no su confirmacion final. ${status.mirrorOperation.resourceFiles || 0} recurso${status.mirrorOperation.resourceFiles === 1 ? '' : 's'} puede${status.mirrorOperation.resourceFiles === 1 ? '' : 'n'} seguir pendiente${status.mirrorOperation.resourceFiles === 1 ? '' : 's'}. Puedes trabajar con los datos disponibles y reintentar cuando la otra PC vuelva a conectarse.`,
+        tone: 'warning',
+      });
+      return;
+    }
+    if (status.mirrorOperation?.state === 'catalog-ahead-of-manifest') {
+      setNotice({
+        title: 'Google Drive todavia esta entregando cambios',
+        message: 'Ya llego el catalogo de una copia mas nueva, pero aun no llegaron su manifiesto y todos sus archivos. ARMI conservara la version valida actual y volvera a comprobarla.',
+        tone: 'warning',
+      });
+      return;
+    }
     if ((status.config.remoteActivity?.conflicts?.count || 0) > 0) {
       const conflictCount = status.config.remoteActivity?.conflicts?.count || 0;
       setNotice({
@@ -636,17 +821,14 @@ export const SyncLifecycleManager: React.FC = () => {
         const localStatusResponse = await getLocalCloudSyncStatus();
         const localStatus = localStatusResponse.success ? localStatusResponse.data || null : null;
 
-        if (!localStatus || localStatus.config.mode !== 'apps_script_drive' || !localStatus.config.autoSyncOnClose) {
+        if (!localStatus || localStatus.config.mode === 'local' || !localStatus.config.autoSyncOnClose) {
           setCloseFlow('ready-to-close');
           setCloseMessage('La copia local quedo guardada. Cerrando aplicativo...');
           await continueDesktopClose();
           return;
         }
 
-        if (!localStatus.hasUnsyncedChanges) {
-          if (localStatus.pendingLocal) {
-            await discardPendingCloudSync();
-          }
+        if (!localStatus.hasUnsyncedChanges && !localStatus.pendingLocal) {
           setCloseFlow('ready-to-close');
           setCloseMessage('No habia cambios nuevos por subir. Cerrando aplicativo...');
           await continueDesktopClose();
@@ -658,7 +840,7 @@ export const SyncLifecycleManager: React.FC = () => {
           note: 'Se preparo una copia local de emergencia antes de intentar subir a Drive.',
         });
 
-        if (!navigator.onLine) {
+        if (localStatus.config.mode === 'apps_script_drive' && !navigator.onLine) {
           setCloseContext('offline');
           setCloseFlow('needs-attention');
           setCloseError('No hay internet. Tus cambios quedaron guardados localmente, pero aun no se subieron a Drive.');
@@ -673,12 +855,16 @@ export const SyncLifecycleManager: React.FC = () => {
             setCloseFlow('needs-attention');
             setCloseError(
               pushResult.message
-              || 'Drive cambio desde la ultima vez que esta PC lo conocia. Guardamos este paquete como conflicto para no sobrescribir la nube.'
+              || (localStatus.config.mode === 'drive_mirror'
+                ? 'Drive cambio desde otra PC. No se sobrescribio la copia compartida y tus cambios siguen guardados localmente.'
+                : 'Drive cambio desde la ultima vez que esta PC lo conocia. Guardamos este paquete como conflicto para no sobrescribir la nube.')
             );
             setCloseMessage('Se detecto un conflicto entre esta PC y Drive. Tus cambios locales siguen intactos.');
             setNotice({
               title: 'Conflicto detectado y protegido',
-              message: 'La app no sobrescribio la nube. Tu paquete se guardo como conflicto en Drive y la copia local sigue a salvo. Ese conflicto puede incluir asistencias nuevas.',
+              message: localStatus.config.mode === 'drive_mirror'
+                ? 'La app no sobrescribio Drive. Tus cambios siguen en esta PC; primero recupera la copia compartida para poder revisar y combinar las diferencias.'
+                : 'La app no sobrescribio la nube. Tu paquete se guardo como conflicto en Drive y la copia local sigue a salvo. Ese conflicto puede incluir asistencias nuevas.',
               tone: 'warning',
             });
             closeInFlightRef.current = false;
@@ -690,9 +876,14 @@ export const SyncLifecycleManager: React.FC = () => {
           return;
         }
 
-        await discardPendingCloudSync();
+        const deliveryPending = pushResult.data?.cloudDeliveryPending === true;
+        if (!deliveryPending) {
+          await discardPendingCloudSync();
+        }
         setCloseFlow('ready-to-close');
-        setCloseMessage('La copia local y la de Drive quedaron actualizadas. Cerrando aplicativo...');
+        setCloseMessage(deliveryPending
+          ? 'La copia local y la carpeta espejo quedaron actualizadas. Google Drive continuara cuando se reanude. Cerrando aplicativo...'
+          : 'La copia local y la carpeta espejo quedaron actualizadas. Cerrando aplicativo...');
         emitCloudSyncUpdated();
         await continueDesktopClose();
       } catch (error: any) {
@@ -719,8 +910,74 @@ export const SyncLifecycleManager: React.FC = () => {
         ? 'Sin internet para sincronizar'
         : 'No pudimos alinear las copias';
 
+  const currentResourceTransfer = resourceDelivery?.activeTransfers?.[0] || null;
+  const currentMirrorTransfer = resourceDelivery?.mirrorTransfer || null;
+  const resourceProgress = currentResourceTransfer?.totalBytes
+    ? Math.min(100, Math.round((currentResourceTransfer.copiedBytes / currentResourceTransfer.totalBytes) * 100))
+    : 0;
+  const mirrorProgress = currentMirrorTransfer?.totalBytes
+    ? Math.min(100, Math.round((currentMirrorTransfer.copiedBytes / currentMirrorTransfer.totalBytes) * 100))
+    : 0;
+
   return (
     <>
+      {currentResourceTransfer || currentMirrorTransfer ? (
+        <div className="fixed bottom-5 left-1/2 z-[95] w-[min(92vw,28rem)] -translate-x-1/2 print:hidden">
+          <div className={`rounded-2xl border px-4 py-3 shadow-[0_18px_40px_rgba(15,23,42,0.22)] backdrop-blur ${
+            currentResourceTransfer?.state === 'error' || currentMirrorTransfer?.state === 'error'
+              ? 'border-rose-200 bg-rose-50/95 text-rose-900'
+              : currentResourceTransfer?.state === 'waiting-for-drive-upload'
+                ? 'border-amber-200 bg-amber-50/95 text-amber-900'
+                : 'border-sky-200 bg-white/95 text-slate-800'
+          }`}>
+            <div className="flex items-center gap-3">
+              <span className={`h-3 w-3 shrink-0 rounded-full ${
+                currentResourceTransfer?.state === 'waiting-for-drive-upload'
+                  ? 'bg-amber-500'
+                  : currentResourceTransfer?.state === 'error' || currentMirrorTransfer?.state === 'error'
+                    ? 'bg-rose-500'
+                    : 'animate-pulse bg-sky-500'
+              }`} />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-black">
+                  {currentResourceTransfer
+                    ? currentResourceTransfer.state === 'waiting-for-drive-upload'
+                      ? 'Archivo pendiente en la otra PC'
+                      : currentResourceTransfer.state === 'error'
+                        ? 'No se pudo descargar el archivo'
+                        : currentResourceTransfer.state === 'available'
+                          ? 'Archivo disponible'
+                          : 'Descargando recurso desde Drive'
+                    : currentMirrorTransfer?.state === 'error'
+                      ? 'No se pudo preparar la copia'
+                      : 'Copiando cambios a la carpeta de Drive'}
+                </p>
+                <p className="mt-0.5 truncate text-xs font-semibold opacity-75">
+                  {currentResourceTransfer
+                    ? currentResourceTransfer.message || currentResourceTransfer.fileName
+                    : currentMirrorTransfer?.currentFile || 'Preparando catalogo de sincronizacion'}
+                </p>
+              </div>
+              <span className="shrink-0 text-xs font-black">
+                {currentResourceTransfer
+                  ? currentResourceTransfer.state === 'downloading'
+                    ? `${formatTransferBytes(currentResourceTransfer.copiedBytes)} / ${formatTransferBytes(currentResourceTransfer.totalBytes)}`
+                    : ''
+                  : `${mirrorProgress}%`}
+              </span>
+            </div>
+            {(currentResourceTransfer?.state === 'downloading' || currentMirrorTransfer?.state === 'copying-to-drive-folder') ? (
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-200/80">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-sky-500 to-emerald-400 transition-[width] duration-300"
+                  style={{ width: `${currentResourceTransfer ? resourceProgress : mirrorProgress}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {notice ? (
         <div className="fixed left-4 right-4 top-4 z-[90] mx-auto w-full max-w-xl print:hidden">
           <div className={`flex items-start justify-between gap-3 rounded-3xl border px-4 py-3 text-sm shadow-sm ${toneStyles[notice.tone]}`}>
@@ -833,24 +1090,40 @@ export const SyncLifecycleManager: React.FC = () => {
                   setStartupFlow('idle');
                   setCloseError(null);
                 }}
-                title="Mantener esta copia local por ahora y entrar sin subir ni descargar nada."
+                title="Mantener esta copia local por ahora sin subir ni descargar nada. La sincronizacion seguira pendiente."
                 className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:border-slate-400"
               >
                 <ActionIcon kind="local" />
-                {restorePromptReason === 'pending-local' ? 'Usar copia local pendiente' : 'Seguir con esta PC'}
+                {restorePromptReason === 'diverged'
+                  ? 'Trabajar temporalmente sin sincronizar'
+                  : restorePromptReason === 'pending-local'
+                    ? 'Usar copia local pendiente'
+                    : 'Seguir con esta PC'}
               </button>
               {restorePromptReason === 'diverged' || restorePromptReason === 'local-newer' || restorePromptReason === 'pending-local' ? (
                 <button
                   type="button"
                   onClick={async () => {
+                    if (restorePromptReason === 'diverged') {
+                      const confirmed = window.confirm(
+                        'Esta accion convertira los datos de esta PC en la copia principal. Antes de reemplazar Drive, ARMI guardara una copia completa de la version actual de Drive. ¿Deseas continuar?'
+                      );
+                      if (!confirmed) return;
+                    }
                     setShowRestorePrompt(false);
-                    await pushLocalSnapshotToDrive();
+                    await pushLocalSnapshotToDrive({ force: restorePromptReason === 'diverged' });
                   }}
-                  title="Subir esta copia local a Drive y tomarla como la version principal antes de trabajar."
+                  title={restorePromptReason === 'diverged'
+                    ? 'Guardar primero una copia completa de Drive y despues convertir esta PC en la version principal.'
+                    : 'Subir esta copia local a Drive y tomarla como la version principal antes de trabajar.'}
                   className="inline-flex items-center gap-2 rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm font-bold text-emerald-800 transition hover:border-emerald-400"
                 >
                   <ActionIcon kind="push" />
-                  {restorePromptReason === 'pending-local' ? 'Subir copia pendiente' : 'Conservar esta PC y subirla'}
+                  {restorePromptReason === 'diverged'
+                    ? 'Respaldar Drive y usar esta PC'
+                    : restorePromptReason === 'pending-local'
+                      ? 'Reintentar copia pendiente'
+                      : 'Conservar esta PC y subirla'}
                 </button>
               ) : null}
               {restorePromptReason === 'pending-local' ? (
@@ -910,12 +1183,12 @@ export const SyncLifecycleManager: React.FC = () => {
                     setStartupMessage('Reintentando verificacion de Drive...');
                     setCloseError(null);
                     const freshStatus = await refreshStatus();
-                    if (!freshStatus || freshStatus.config.mode !== 'apps_script_drive') {
+                    if (!freshStatus || freshStatus.config.mode === 'local') {
                       setStartupGateOpen(false);
                       setStartupFlow('idle');
                       return;
                     }
-                    if (!navigator.onLine) {
+                    if (freshStatus.config.mode === 'apps_script_drive' && !navigator.onLine) {
                       setStartupFlow('offline');
                       setStartupMessage('Drive esta activado, pero esta PC sigue sin internet. Puedes seguir solo con lo local o esperar para sincronizar primero.');
                       return;

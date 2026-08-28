@@ -40,7 +40,7 @@ const toMonthDay = (isoDate: string) => String(isoDate || '').slice(5, 10);
 
 const isBirthdaySyncReady = (status: CloudSyncStatusData | null) => {
   if (!status) return false;
-  if (status.config.mode !== 'apps_script_drive') return true;
+  if (status.config.mode === 'local') return true;
   const conflictCount = status.config.remoteActivity?.conflicts?.count || 0;
   return conflictCount === 0 && status.comparison === 'in-sync';
 };

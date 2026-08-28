@@ -464,18 +464,20 @@ export const LoginScreen: React.FC = () => {
 
       setGeneralData(nextData);
       setMessage(null);
+      const optimizedImage = target === 'insignia' ? nextData.insignia : nextData.logo;
       if (target === 'insignia') {
-        setInsigniaImage(dataUrl);
+        setInsigniaImage(optimizedImage);
       } else {
-        setLogoImage(dataUrl);
+        setLogoImage(optimizedImage);
       }
       broadcastGeneralImagesUpdate({
-        insignia: target === 'insignia' ? dataUrl : nextData.insignia,
-        logo: target === 'logo' ? dataUrl : nextData.logo,
+        insignia: nextData.insignia,
+        logo: nextData.logo,
       });
       void saveImageAssetFile({
-        imageData: dataUrl,
+        imageData: optimizedImage,
         kind: target === 'insignia' ? 'general_insignia' : 'general_logo',
+        alreadyOptimized: true,
       });
     } catch (error) {
       const nextMessage = error instanceof Error ? error.message : 'No se pudo procesar la imagen.';

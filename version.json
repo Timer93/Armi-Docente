@@ -1,18 +1,41 @@
 {
-  "version": "11.1.7",
-  "releaseName": "Armi Docente 11.1.7",
-  "publishedAt": "2026-03-29",
+  "version": "11.2.2",
+  "releaseName": "Armi Docente 11.2.2",
+  "publishedAt": "2026-08-28",
   "assetName": "ARMI_DOCENTE_Setup.exe",
   "downloadUrl": "https://github.com/Timer93/Armi-Docente/releases/download/Armi_Docente_2026/ARMI_DOCENTE_Setup.exe",
   "changelog": [
-    "Nueva versión de Armi Docente en aplicación web y escritorio.",
-    "Actializaciones detectables.",
-    "Apartado para asistencias faciales."
+    "Subida binaria de evidencias mediante archivos temporales, sin cargar documentos completos en la memoria RAM.",
+    "Compresión automática de fotografías a WebP y conservación exacta de documentos, audio y video.",
+    "Portal estudiantil y evidencias organizados en módulos seguros, con sesiones persistentes después de reiniciar.",
+    "Identificación portátil de cada evidencia por estudiante, sesión, unidad y ruta relativa en la carpeta espejo.",
+    "Sincronización continua con menor actividad en segundo plano para mejorar el rendimiento del equipo docente.",
+    "Correcciones de seguridad, cámara remota, codificación UTF-8 y acceso exclusivo al portal del estudiante."
   ],
   "history": [
     {
-      "version": "11.1.7",
-      "releaseName": "Armi Docente 11.1.7",
+      "version": "11.2.2",
+      "releaseName": "Armi Docente 11.2.2",
+      "publishedAt": "2026-08-28",
+      "changelog": [
+        "Subida de evidencias por streaming temporal y compresión WebP eficiente.",
+        "Backend modular reparado y rutas estudiantiles montadas correctamente.",
+        "Sesiones persistentes, protección de archivos y sincronización más liviana."
+      ]
+    },
+    {
+      "version": "11.2.1",
+      "releaseName": "Armi Docente 11.2.1",
+      "publishedAt": "2026-08-27",
+      "changelog": [
+        "Metadatos portátiles y recuperación automática para evidencias almacenadas en la carpeta espejo.",
+        "Protección adicional contra sobrescrituras desde computadoras desactualizadas.",
+        "Sincronización continua y diagnóstico automático de Google Drive e internet."
+      ]
+    },
+    {
+      "version": "11.2.0",
+      "releaseName": "Armi Docente 11.2.0",
       "publishedAt": "2026-03-29",
       "changelog": [
         "Migración funcional consolidada hacia aplicación web y escritorio.",

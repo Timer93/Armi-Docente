@@ -13,8 +13,8 @@ const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 const requiresSymlinkPrivilege = process.platform === 'win32' && packageJson?.build?.win?.signAndEditExecutable === true;
 
 const stages = [
+  { label: 'Cerrando procesos de desarrollo ARMI', command: npmCmd, args: ['run', 'dev:stop'] },
   { label: 'Preparando icono Windows', command: npmCmd, args: ['run', 'prepare:win-icon'] },
-  { label: 'Reconstruyendo dependencias nativas para Electron', command: npxCmd, args: ['electron-builder', 'install-app-deps'] },
   {
     label: 'Recompilando better-sqlite3 para Electron',
     command: npmCmd,
@@ -56,7 +56,7 @@ const runStage = (stage, index) => new Promise((resolve, reject) => {
       return;
     }
 
-    const hint = stage.label.includes('Reconstruyendo dependencias nativas para Electron')
+    const hint = stage.label.includes('better-sqlite3 para Electron')
       ? '\nCierra antes cualquier instancia de ARMI, Electron, npm run dev o backend abierto, y vuelve a intentar.'
       : '';
 
@@ -116,8 +116,25 @@ const main = async () => {
   console.log(`Salida de esta compilacion: ${outputDir}`);
   runPreflightChecks();
   renderBar(0);
-  for (let index = 0; index < stages.length; index += 1) {
-    await runStage(stages[index], index);
+  let electronNativeReady = false;
+  let nodeNativeRestored = false;
+  try {
+    for (let index = 0; index < stages.length; index += 1) {
+      await runStage(stages[index], index);
+      if (stages[index].label.includes('better-sqlite3 para Electron')) electronNativeReady = true;
+      if (stages[index].label.includes('better-sqlite3 para desarrollo Node')) nodeNativeRestored = true;
+    }
+  } finally {
+    if (electronNativeReady && !nodeNativeRestored) {
+      console.log('\nRestaurando better-sqlite3 para Node despues del fallo...');
+      await runStage({
+        label: 'Restaurando better-sqlite3 para desarrollo Node',
+        command: npmCmd,
+        args: ['run', 'rebuild:native:node'],
+      }, stages.length - 1).catch((restoreError) => {
+        console.error(`No se pudo restaurar better-sqlite3 para Node: ${restoreError.message}`);
+      });
+    }
   }
   console.log(`\nInstalable generado en ${outputDir}`);
 };

@@ -3,6 +3,7 @@ export type AiIssueKind =
   | 'quota_minute'
   | 'quota_daily'
   | 'quota_general'
+  | 'billing_required'
   | 'saturation'
   | 'model_access'
   | 'malformed_json'
@@ -13,6 +14,13 @@ export const classifyAiIssue = (error: unknown): { kind: AiIssueKind; raw: strin
   const raw = String((error as any)?.message || error || '').trim();
   const msg = raw.toLowerCase();
 
+  if (msg.includes('billing details') || msg.includes('limit: 0') || msg.includes('billing account')) {
+    return {
+      kind: 'billing_required',
+      raw,
+      userMessage: 'La generación de imágenes no tiene cuota habilitada en este proyecto. Debes activar la facturación de Gemini API o usar una clave perteneciente a un proyecto con cuota de imágenes.'
+    };
+  }
   if (msg.includes('401') || msg.includes('403') || msg.includes('api key') || msg.includes('unauthorized') || msg.includes('permission')) {
     return { kind: 'auth', raw, userMessage: 'Revisa tu API key o los permisos de tu cuenta.' };
   }

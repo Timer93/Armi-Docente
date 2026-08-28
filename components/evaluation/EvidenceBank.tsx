@@ -3,13 +3,18 @@ import {
   deleteEvaluacionEvidencia,
   getAllSesiones,
   getDatosGenerales,
+  getEvidenceStorageConfig,
   getEvaluacionEvidencias,
   getEstudiantes,
   getProgramacionesAnuales,
   getUnidadDidactica,
+  pickEvidenceStorageFolder,
+  recoverEvidenceStorageToMirror,
+  saveEvidenceStorageConfig,
   saveEvaluacionEvidencia
 } from '../../services/apiService';
 import { Student, TeachingAssignment } from '../../types';
+import { StudentChatMonitor } from './StudentChatMonitor';
 
 type EvidenceFilters = {
   year: string;
@@ -33,6 +38,13 @@ type EvidenceFileItem = {
   filters: EvidenceFilters;
   studentIds: Array<string | number>;
   studentNames: string[];
+  versionGroupId: string;
+  versionNumber: number;
+  isLatest: boolean;
+  submittedAt: string;
+  submissionIp: string;
+  available: boolean;
+  availabilitySource: string;
 };
 
 const BIMESTER_OPTIONS = [
@@ -139,6 +151,12 @@ export const EvidenceBank: React.FC = () => {
   const [selectedStudentIds, setSelectedStudentIds] = useState<Array<string | number>>([]);
   const [evidences, setEvidences] = useState<EvidenceFileItem[]>([]);
   const [uploadMessage, setUploadMessage] = useState('');
+  const [storagePath, setStoragePath] = useState('');
+  const [portalUrls, setPortalUrls] = useState<string[]>([]);
+  const [storageMessage, setStorageMessage] = useState('');
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [automaticMirrorStorage, setAutomaticMirrorStorage] = useState(false);
+  const [storageRecovery, setStorageRecovery] = useState<any>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const replaceInputRef = useRef<HTMLInputElement | null>(null);
   const [replaceEvidenceId, setReplaceEvidenceId] = useState<string | number | null>(null);
@@ -153,6 +171,7 @@ export const EvidenceBank: React.FC = () => {
   });
 
   useEffect(() => {
+    let active = true;
     const loadData = async () => {
       setLoading(true);
       try {
@@ -162,6 +181,7 @@ export const EvidenceBank: React.FC = () => {
           getProgramacionesAnuales(),
           getAllSesiones()
         ]);
+        if (!active) return;
 
         const savedAssignments = localStorage.getItem('armi_assignments');
         if (savedAssignments) {
@@ -176,17 +196,37 @@ export const EvidenceBank: React.FC = () => {
         setStudents(Array.isArray(fetchedStudents) ? fetchedStudents : []);
         setPrograms(fetchedPrograms || {});
         setAllSessions(Object.values(fetchedSessions || {}));
-        await loadSavedEvidences();
         setFilters((prev) => ({
           ...prev,
           year: generalData?.year || prev.year || getDefaultYear()
         }));
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
+      }
+    };
+
+    const loadSecondaryData = async () => {
+      void loadSavedEvidences();
+      let storageConfig = await getEvidenceStorageConfig();
+      if (!storageConfig.success) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1200));
+        if (!active) return;
+        storageConfig = await getEvidenceStorageConfig();
+      }
+      if (!active) return;
+      if (storageConfig.success) {
+        setStoragePath(storageConfig.data?.configuredPath || storageConfig.data?.effectivePath || '');
+        setPortalUrls(Array.isArray(storageConfig.data?.portalUrls) ? storageConfig.data.portalUrls : []);
+        setAutomaticMirrorStorage(storageConfig.data?.automaticMirror === true);
+        setStorageRecovery(storageConfig.data?.recovery || null);
+      } else {
+        setStorageMessage(storageConfig.message || 'No se pudo detectar la red local.');
       }
     };
 
     loadData();
+    loadSecondaryData();
+    return () => { active = false; };
   }, []);
 
   const loadSavedEvidences = async () => {
@@ -212,9 +252,24 @@ export const EvidenceBank: React.FC = () => {
       },
       studentIds: Array.isArray(item.studentIds) ? item.studentIds : [],
       studentNames: Array.isArray(item.studentNames) ? item.studentNames : []
+      ,versionGroupId: item.versionGroupId || `legacy-${item.id}`
+      ,versionNumber: Number(item.versionNumber || 1)
+      ,isLatest: item.isLatest !== false
+      ,submittedAt: item.submittedAt || item.updatedAt || ''
+      ,submissionIp: item.submissionIp || ''
+      ,available: item.available === true
+      ,availabilitySource: item.availabilitySource || 'missing'
     })) as EvidenceFileItem[];
     setEvidences(rows);
   };
+
+  useEffect(() => {
+    if (!evidences.some((item) => !item.available)) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadSavedEvidences();
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [evidences]);
 
   const areaOptions = useMemo(() => {
     const unique = new Map<string, string>();
@@ -439,6 +494,11 @@ export const EvidenceBank: React.FC = () => {
       filters: { ...filters },
       studentIds: [...selectedStudentIds],
       studentNames: selectedStudents.map((student) => String(student.name || 'Sin nombre'))
+      ,versionGroupId: ''
+      ,versionNumber: 1
+      ,isLatest: true
+      ,submittedAt: new Date().toISOString()
+      ,submissionIp: ''
     };
   };
 
@@ -557,6 +617,55 @@ export const EvidenceBank: React.FC = () => {
     ));
   }, [evidences, filters, selectedStudentIds]);
 
+  const chooseStorageFolder = async () => {
+    setStorageBusy(true);
+    setStorageMessage('');
+    const result = await pickEvidenceStorageFolder();
+    if (result.success && result.path) setStoragePath(result.path);
+    else if (!result.cancelled) setStorageMessage(result.message || 'No se pudo seleccionar la carpeta.');
+    setStorageBusy(false);
+  };
+
+  const saveStorageFolder = async () => {
+    setStorageBusy(true);
+    setStorageMessage('');
+    const result = await saveEvidenceStorageConfig(storagePath);
+    if (result.success) {
+      setStoragePath(result.data?.configuredPath || storagePath);
+      setPortalUrls(Array.isArray(result.data?.portalUrls) ? result.data.portalUrls : portalUrls);
+      setAutomaticMirrorStorage(result.data?.automaticMirror === true);
+      setStorageRecovery(result.data?.recovery || storageRecovery);
+      setStorageMessage('Carpeta verificada y guardada.');
+    } else {
+      setStorageMessage(result.message || 'No se pudo guardar la carpeta.');
+    }
+    setStorageBusy(false);
+  };
+
+  const recoverStorageToMirror = async () => {
+    setStorageBusy(true);
+    setStorageMessage('Copiando y verificando las evidencias disponibles en esta PC...');
+    const result = await recoverEvidenceStorageToMirror();
+    if (result.success) {
+      setStorageRecovery(result.data?.recovery || null);
+      setStorageMessage(result.message || 'Recuperacion terminada. Los archivos originales se conservaron.');
+      await loadSavedEvidences();
+    } else {
+      setStorageMessage(result.message || 'No se pudieron recuperar las evidencias desde esta PC.');
+    }
+    setStorageBusy(false);
+  };
+
+  const copyPortalUrl = async () => {
+    const url = portalUrls[0];
+    if (!url) {
+      setStorageMessage('No se detectó una dirección LAN. Verifica la conexión de red.');
+      return;
+    }
+    await navigator.clipboard.writeText(url);
+    setStorageMessage('Dirección del portal copiada.');
+  };
+
   const FilterSelect = ({
     label,
     value,
@@ -602,6 +711,62 @@ export const EvidenceBank: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <StudentChatMonitor />
+      <div className="overflow-hidden rounded-[2rem] border border-violet-100 bg-gradient-to-br from-slate-950 via-violet-950 to-cyan-950 p-6 text-white shadow-xl">
+        <div className="grid gap-5 xl:grid-cols-[1fr_0.75fr]">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-violet-300">Recepción por red local</div>
+            <h2 className="mt-2 text-xl font-black">Carpeta de evidencias de estudiantes</h2>
+            <p className="mt-2 max-w-2xl text-xs font-semibold leading-relaxed text-slate-300">
+              {automaticMirrorStorage
+                ? 'El modo espejo asigno esta carpeta automaticamente. Las evidencias nuevas se guardaran aqui y conservaran enlaces portatiles entre computadoras.'
+                : 'ARMI conserva rutas relativas para poder reencontrar los archivos si configuras esta carpeta en otro equipo.'}
+            </p>
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+              <input
+                value={storagePath}
+                onChange={(event) => setStoragePath(event.target.value)}
+                placeholder="Selecciona la carpeta donde se guardarán las evidencias"
+                readOnly={automaticMirrorStorage}
+                className="min-w-0 flex-1 rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-xs font-bold text-white outline-none placeholder:text-slate-400 focus:border-violet-300 read-only:cursor-default read-only:text-emerald-200"
+              />
+              {!automaticMirrorStorage ? (
+                <>
+                  <button type="button" onClick={chooseStorageFolder} disabled={storageBusy} className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-[10px] font-black uppercase tracking-widest hover:bg-white/20 disabled:opacity-50">Elegir carpeta</button>
+                  <button type="button" onClick={saveStorageFolder} disabled={storageBusy || !storagePath.trim()} className="rounded-2xl bg-emerald-400 px-5 py-3 text-[10px] font-black uppercase tracking-widest text-emerald-950 hover:bg-emerald-300 disabled:opacity-50">Guardar ruta</button>
+                </>
+              ) : (
+                <span className="inline-flex items-center justify-center rounded-2xl border border-emerald-300/40 bg-emerald-400/15 px-5 py-3 text-[10px] font-black uppercase tracking-widest text-emerald-200">Ruta automatica del espejo</span>
+              )}
+            </div>
+            {automaticMirrorStorage && storageRecovery ? (
+              <div className={`mt-3 rounded-2xl border px-4 py-3 text-xs font-semibold ${storageRecovery.missingFiles > 0 || storageRecovery.recoverableHere > 0 ? 'border-amber-300/40 bg-amber-300/10 text-amber-100' : 'border-emerald-300/40 bg-emerald-300/10 text-emerald-100'}`}>
+                <p className="font-black uppercase tracking-[0.12em]">{storageRecovery.sharedFiles || 0} compartidas · {storageRecovery.recoverableHere || 0} recuperables aqui · {storageRecovery.missingFiles || 0} pendientes</p>
+                {storageRecovery.recoverableHere > 0 ? (
+                  <button type="button" onClick={recoverStorageToMirror} disabled={storageBusy} className="mt-3 rounded-xl bg-amber-300 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-amber-950 disabled:opacity-50">
+                    Copiar y enlazar {storageRecovery.recoverableHere} archivos sin borrar originales
+                  </button>
+                ) : storageRecovery.missingFiles > 0 ? (
+                  <p className="mt-2 leading-relaxed">Los enlaces estan protegidos. Abre ARMI en la PC2, entra a este banco y ejecuta alli la recuperacion cuando aparezcan como recuperables.</p>
+                ) : (
+                  <p className="mt-2">Todas las evidencias registradas estan disponibles desde la carpeta espejo.</p>
+                )}
+              </div>
+            ) : null}
+            {storageMessage ? <div className="mt-3 text-[11px] font-bold text-amber-200">{storageMessage}</div> : null}
+          </div>
+          <div className="rounded-3xl border border-white/10 bg-white/10 p-5 backdrop-blur-sm">
+            <div className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-200">Acceso para estudiantes</div>
+            <div className="mt-3 break-all rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-sm font-black text-white">
+              {portalUrls[0] || 'Conecta este equipo a una red para detectar su IP.'}
+            </div>
+            <button type="button" onClick={copyPortalUrl} disabled={!portalUrls.length} className="mt-3 w-full rounded-2xl bg-white px-4 py-3 text-[10px] font-black uppercase tracking-widest text-violet-800 hover:bg-violet-50 disabled:opacity-50">
+              Copiar dirección para el celular
+            </button>
+            <p className="mt-3 text-[10px] font-semibold leading-relaxed text-slate-300">ARMI Docente debe permanecer abierto y ambos dispositivos deben estar en la misma red Wi-Fi o LAN.</p>
+          </div>
+        </div>
+      </div>
       <div className="rounded-[2rem] border border-slate-100 bg-white p-8 shadow-lg">
         <div className="mb-8 flex items-center justify-between gap-4">
           <div>
@@ -846,7 +1011,13 @@ export const EvidenceBank: React.FC = () => {
                         const accent = getFileAccent(card.previewKind);
                         return (
                           <>
-                      {card.previewKind === 'image' ? (
+                      {!card.available ? (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-amber-50 px-6 text-center text-amber-900">
+                          <span className="flex h-14 w-14 items-center justify-center rounded-full border-2 border-dashed border-amber-400 bg-white text-xl font-black">!</span>
+                          <p className="text-[10px] font-black uppercase tracking-widest">Archivo pendiente de la PC2</p>
+                          <p className="text-[9px] font-semibold leading-relaxed">El enlace, estudiante y sesion estan protegidos. No se eliminara mientras recuperas el original.</p>
+                        </div>
+                      ) : card.previewKind === 'image' ? (
                         <img src={card.fileUrl} alt={card.fileName} className="h-full w-full object-cover" />
                       ) : card.previewKind === 'video' ? (
                         <video
@@ -869,6 +1040,7 @@ export const EvidenceBank: React.FC = () => {
                           </>
                         );
                       })()}
+                      {card.available ? (
                       <div className="absolute right-3 top-3 z-10 flex gap-2 opacity-0 transition-opacity group-hover:opacity-100">
                         <button
                           type="button"
@@ -895,13 +1067,21 @@ export const EvidenceBank: React.FC = () => {
                           ✕
                         </button>
                       </div>
+                      ) : (
+                        <button type="button" onClick={loadSavedEvidences} className="absolute right-3 top-3 z-10 rounded-full border border-amber-300 bg-white px-3 py-2 text-[9px] font-black uppercase text-amber-800 shadow-sm">Comprobar</button>
+                      )}
                       <div className="pointer-events-none absolute inset-0 bg-slate-900/0 transition-colors group-hover:bg-slate-900/10" />
                     </div>
                     <div className="p-5">
                       <div className="mb-2 flex items-start justify-between gap-3">
-                        <span className="truncate text-[8px] font-black uppercase tracking-widest text-emerald-600">
-                          {sessionOptions.find((item) => item.value === card.filters.session)?.label || `Sesion ${card.filters.session}`}
-                        </span>
+                        <div className="min-w-0">
+                          <span className="block truncate text-[8px] font-black uppercase tracking-widest text-emerald-600">
+                            {sessionOptions.find((item) => item.value === card.filters.session)?.label || `Sesion ${card.filters.session}`}
+                          </span>
+                          <span className={`mt-1 inline-flex rounded-full px-2 py-1 text-[7px] font-black uppercase tracking-widest ${card.isLatest ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                            Versión {card.versionNumber} · {card.isLatest ? 'Última' : 'Anterior'}
+                          </span>
+                        </div>
                         <span className="whitespace-nowrap text-[8px] font-bold uppercase text-slate-400">{card.uploadedAt}</span>
                       </div>
                       <h4 className="mb-2 truncate text-[10px] font-black uppercase text-slate-800">{card.fileName}</h4>
@@ -914,6 +1094,9 @@ export const EvidenceBank: React.FC = () => {
                       <p className="mt-1 text-[9px] font-black uppercase tracking-widest text-slate-400">
                         {`${card.filters.grade} ${card.filters.section} | U${card.filters.unit} | ${card.filters.bimester}`}
                       </p>
+                      {card.submissionIp ? (
+                        <p className="mt-1 text-[8px] font-bold text-slate-400">Envío LAN: {card.submissionIp.replace('::ffff:', '')}</p>
+                      ) : null}
                     </div>
                   </div>
                 ))

@@ -1,6 +1,7 @@
 ﻿
 import { API_BASE_URL, INITIAL_GENERAL_DATA, INITIAL_MODULE_STATUS, DEPARTAMENTOS_PERU_MOCK } from '../constants';
 import { GeneralData, ModuleStatus, ApiResponse, Student, AttendanceRecord, FaceProfile, AuthSession } from '../types';
+import { optimizeImageDataUrl, type OptimizableImageKind } from '../utils/imageOptimization';
 
 const BACKEND_URL = '/api';
 
@@ -94,6 +95,8 @@ export interface CloudSyncManifest {
             egresados?: number;
             asistencias?: number;
             rostros?: number;
+            evaluaciones?: number;
+            evidencias?: number;
         };
         includesAttendance?: boolean;
         includesFaceProfiles?: boolean;
@@ -111,6 +114,7 @@ export interface CloudSyncStatusData {
         syncUserKey: string;
         syncUserLabel: string;
         lastUpdatedAt: string | null;
+        legacyMode?: 'apps_script_drive';
         remoteProvider?: string | null;
         lastCloudVersion?: string;
         remoteLookupMessage?: string;
@@ -171,14 +175,39 @@ export interface CloudSyncStatusData {
     localManifest: CloudSyncManifest | null;
     savedManifest: CloudSyncManifest | null;
     mirrorManifest: CloudSyncManifest | null;
+    mirrorOperation?: {
+        operationId: string;
+        deviceId?: string;
+        createdAt?: string;
+        completedAt?: string | null;
+        manifestDigest?: string;
+        state: 'origin-copy-pending' | 'catalog-ahead-of-manifest' | 'prepared-in-local-drive-folder';
+        resourceFiles: number;
+        resourceBytes: number;
+    } | null;
     comparison: 'local-mode' | 'no-data' | 'mirror-missing' | 'mirror-newer' | 'local-newer' | 'in-sync' | 'diverged' | 'mirror-incomplete';
     lastFrontendStateAt: string | null;
     driveDesktop: {
         detected: boolean;
+        state?: 'inactive' | 'not-configured' | 'folder-missing' | 'app-not-running' | 'starting' | 'paused' | 'offline' | 'ready';
+        message?: string;
+        processRunning?: boolean | null;
+        installed?: boolean;
+        executablePath?: string;
+        launchAttempted?: boolean;
+        internetOnline?: boolean | null;
+        folderConfigured?: boolean;
+        folderAccessible?: boolean;
+        markerPresent?: boolean;
+        paused?: boolean | null;
+        pauseObservedAt?: string | null;
+        pauseDetection?: 'best-effort';
+        pauseMessage?: string;
         candidates: Array<{
             basePath: string;
             suggestedMirrorPath: string;
         }>;
+        existingMirrors?: string[];
     };
     pendingLocal?: {
         createdAt?: string;
@@ -188,6 +217,15 @@ export interface CloudSyncStatusData {
         counts?: Record<string, number> | null;
         note?: string;
     } | null;
+    continuousSync?: {
+        enabled: boolean;
+        state: string;
+        message: string;
+        updatedAt?: string | null;
+        lastSuccessAt?: string;
+        lastErrorAt?: string;
+    };
+    resourceDelivery?: ResourceDeliveryStatus;
     frontendState?: {
         exportedAt?: string | null;
         keys: Record<string, string>;
@@ -196,7 +234,40 @@ export interface CloudSyncStatusData {
         restorePointsPath: string;
         retention: number;
         missingMirrorFiles: string[];
+        missingMirrorCoreFiles?: string[];
+        pendingMirrorResources?: string[];
     };
+}
+
+export interface ResourceTransferState {
+    relativePath: string;
+    fileName: string;
+    state: 'downloading' | 'available' | 'waiting-for-drive-upload' | 'error';
+    copiedBytes: number;
+    totalBytes: number;
+    message?: string;
+}
+
+export interface ResourceDeliveryStatus {
+    manifestDigest?: string;
+    totalFiles: number;
+    totalBytes: number;
+    availableFiles: number;
+    availableBytes: number;
+    pendingFilesCount: number;
+    pendingBytes: number;
+    pendingFiles: string[];
+    activeTransfers: ResourceTransferState[];
+    mirrorTransfer?: {
+        operationId: string;
+        state: string;
+        copiedFiles: number;
+        totalFiles: number;
+        copiedBytes: number;
+        totalBytes: number;
+        currentFile?: string;
+        message?: string;
+    } | null;
 }
 
 export interface LocalCloudSyncStatusData {
@@ -216,6 +287,7 @@ export interface LocalCloudSyncStatusData {
         counts?: Record<string, number> | null;
         note?: string;
     } | null;
+    continuousSync?: CloudSyncStatusData['continuousSync'];
     hasUnsyncedChanges: boolean;
     lastFrontendStateAt: string | null;
     frontendState?: {
@@ -448,18 +520,47 @@ export const saveDatosGenerales = async (data: GeneralData): Promise<ApiResponse
 
 export const saveImageAssetFile = async (data: {
     imageData: string;
-    kind: 'general_insignia' | 'general_logo' | 'profile';
+    kind: 'general_insignia' | 'general_logo' | 'profile' | 'session_resource';
     userKey?: string;
+    alreadyOptimized?: boolean;
 }): Promise<ApiResponse<{ fileUrl: string; relativePath: string }>> => {
     try {
+        const shouldOptimize = !data.alreadyOptimized && data.kind !== 'profile';
+        const imageData = shouldOptimize
+            ? await optimizeImageDataUrl(data.imageData, data.kind as OptimizableImageKind)
+            : data.imageData;
         const res = await safeFetch(`${BACKEND_URL}/assets/image-file`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data),
+            body: JSON.stringify({
+                imageData,
+                kind: data.kind,
+                userKey: data.userKey,
+            }),
         });
         return await readJsonResponse(res);
     } catch (e: any) {
         return { success: false, message: "Error: " + e.message };
+    }
+};
+
+export const verifyYouTubeResource = async (url: string): Promise<ApiResponse<{
+    platform: 'YouTube';
+    url: string;
+    videoId: string;
+    title: string;
+    authorName: string;
+    thumbnailUrl: string;
+}>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/resources/youtube/verify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+        });
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: `Error: ${e.message}` };
     }
 };
 
@@ -511,12 +612,32 @@ export const saveCloudSyncConfig = async (data: {
     }
 };
 
-export const pushCloudSync = async (): Promise<ApiResponse<any>> => {
+export const pushCloudSync = async (data?: { force?: boolean; reason?: string }): Promise<ApiResponse<any>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/sync/push`, {
             method: 'POST',
-        }, 120000);
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data || {}),
+        }, 600000);
         return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const getResourceDeliveryStatus = async (): Promise<ApiResponse<ResourceDeliveryStatus>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/resources/status`, undefined, 5000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const pickCloudSyncFolder = async (): Promise<{ success: boolean; path?: string; cancelled?: boolean; message?: string }> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/pick-folder`, undefined, 600000);
+        return await readJsonResponse(res) as any;
     } catch (e: any) {
         return { success: false, message: e.message };
     }
@@ -1232,7 +1353,7 @@ export const getEvaluacionRegistros = async (filters?: any): Promise<ApiResponse
     } catch (e: any) { return { success: false, message: e.message }; }
 };
 
-export const saveEvaluacionRegistros = async (data: { records: any[] }): Promise<ApiResponse<any>> => {
+export const saveEvaluacionRegistros = async (data: { records: any[]; gradingMode?: GradingMode }): Promise<ApiResponse<any>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/evaluacion/registros`, {
             method: 'POST',
@@ -1241,6 +1362,42 @@ export const saveEvaluacionRegistros = async (data: { records: any[] }): Promise
         });
         return await res.json();
   } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export type GradingMode = 'literal_traditional' | 'criterial_predominance' | 'hybrid_vigesimal';
+
+export const getModoCalificacion = async (filters: {
+    year: string;
+    areaId: string;
+    grade?: string;
+    section?: string;
+}): Promise<ApiResponse<any>> => {
+    try {
+        const params = new URLSearchParams();
+        Object.entries(filters).forEach(([key, value]) => {
+            if (value !== undefined && value !== null && String(value).trim() !== '') params.set(key, String(value));
+        });
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/modo-calificacion?${params.toString()}`);
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const saveModoCalificacion = async (data: {
+    year: string;
+    areaId: string;
+    grade?: string;
+    section?: string;
+    gradingMode: GradingMode;
+    effectiveFrom?: string;
+}): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/modo-calificacion`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
 };
 
 export const getEvaluacionConclusiones = async (filters?: any): Promise<ApiResponse<any[]>> => {
@@ -1294,6 +1451,92 @@ export const deleteEvaluacionEvidencia = async (id: number | string): Promise<Ap
         const res = await safeFetch(`${BACKEND_URL}/evaluacion/evidencias/${id}`, {
             method: 'DELETE',
         }, 30000);
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const getEvidenceStorageConfig = async (): Promise<ApiResponse<any>> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    try {
+        const res = await fetch(`${BACKEND_URL}/evidence-storage/config`, { signal: controller.signal });
+        return await res.json();
+    } catch (e: any) {
+        return { success: false, message: e?.name === 'AbortError' ? 'La detección de red no respondió.' : e.message };
+    } finally {
+        clearTimeout(timeout);
+    }
+};
+
+export const saveEvidenceStorageConfig = async (path: string): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evidence-storage/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        }, 30000);
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const recoverEvidenceStorageToMirror = async (): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evidence-storage/recover-to-mirror`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        }, 600000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const pickEvidenceStorageFolder = async (): Promise<{ success: boolean; path?: string; message?: string; cancelled?: boolean }> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evidence-storage/pick-folder`, undefined, 600000);
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const getEvidenceDeliveryWindow = async (sessionId: string): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/ventana-entrega/${encodeURIComponent(sessionId)}`);
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const saveEvidenceDeliveryWindow = async (sessionId: string, data: {
+    enabled: boolean;
+    exceptional?: boolean;
+    openFrom?: string;
+    closeAt?: string;
+}): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/ventana-entrega/${encodeURIComponent(sessionId)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const resetEvidenceDeliveryWindow = async (sessionId: string): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/ventana-entrega/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const getPendingEvidenceReviews = async (sessionId: string): Promise<ApiResponse<Array<{
+    studentId: string;
+    latestSubmissionAt: string;
+    reviewedAt: string;
+    pending: boolean;
+}>>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/revision-pendientes/${encodeURIComponent(sessionId)}`);
         return await res.json();
     } catch (e: any) { return { success: false, message: e.message }; }
 };

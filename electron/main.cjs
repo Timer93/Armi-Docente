@@ -3,6 +3,7 @@ const fs = require('fs');
 const { pathToFileURL } = require('url');
 const { app, BrowserWindow, Menu, dialog, ipcMain } = require('electron');
 const { createUpdaterController } = require('./updater.cjs');
+const { ensureLanAccess } = require('./lan-access.cjs');
 
 const appRoot = path.resolve(__dirname, '..');
 const isDev = !app.isPackaged;
@@ -32,6 +33,18 @@ let updaterController = null;
 let mainWindowRef = null;
 let allowWindowClose = false;
 let closeHandshakePending = false;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
+    if (mainWindowRef.isMinimized()) mainWindowRef.restore();
+    mainWindowRef.show();
+    mainWindowRef.focus();
+  });
+}
 
 const logLine = (message, extra = null) => {
   try {
@@ -237,6 +250,8 @@ const createMainWindow = async () => {
 
   await mainWindow.loadURL('http://127.0.0.1:3000');
 
+  await ensureLanAccess(mainWindow, logLine);
+
   updaterController = createUpdaterController(mainWindow);
 
   if (typeof updaterController?.start === 'function') {
@@ -270,6 +285,7 @@ const startBackend = async () => {
 };
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
   try {
     logLine('Electron listo');
 

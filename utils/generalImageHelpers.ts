@@ -1,6 +1,7 @@
 import type { GeneralData } from '../types';
 import { INITIAL_GENERAL_DATA } from '../constants';
 import { saveDatosGenerales } from '../services/apiService';
+import { optimizeImageDataUrl } from './imageOptimization';
 
 export const GENERAL_IMAGES_UPDATED_EVENT = 'armi-general-images-updated';
 const GENERAL_IMAGES_STORAGE_KEY = 'armi_general_images_state';
@@ -20,7 +21,11 @@ export const persistGeneralImageField = async (
   field: 'insignia' | 'logo',
   imageData: string
 ) => {
-  const nextData = mergeGeneralDataImage(current, field, imageData);
+  const optimizedImage = await optimizeImageDataUrl(
+    imageData,
+    field === 'insignia' ? 'general_insignia' : 'general_logo',
+  );
+  const nextData = mergeGeneralDataImage(current, field, optimizedImage);
   const result = await saveDatosGenerales(nextData);
   return {
     result,

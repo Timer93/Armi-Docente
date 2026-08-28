@@ -115,7 +115,6 @@ const normalizeText = (value) => String(value || '')
     .trim();
 
 const normalizeLooseText = (value) => normalizeText(value).replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-const superNormalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9 Ã¡Ã©Ã­Ã³ÃºÃ±]/gi, '').trim();
 const normalizeApproachName = (value) => normalizeLooseText(value).replace(/^ENFOQUE\s+/i, '').trim();
 
 const escapeXml = (value) => String(value || '')
@@ -124,6 +123,116 @@ const escapeXml = (value) => String(value || '')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+
+const decodeXmlText = (value) => String(value || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+
+const extractParagraphText = (paragraphXml) => decodeXmlText(
+    Array.from(String(paragraphXml || '').matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g))
+        .map((match) => match[1] || '')
+        .join('')
+);
+
+const LIST_MARKER_PATTERN = /[•●◦▪■□◆❖➢➤✓✔]/g;
+
+const cleanListItemText = (value) => String(value || '')
+    .trim()
+    .replace(/^[•●◦▪■□◆❖➢➤✓✔]\s*/u, '')
+    .replace(/^[-–—]\s+/u, '')
+    .trim();
+
+const splitListItems = (value) => {
+    const normalized = String(value || '')
+        .replace(/\r\n/g, '\n')
+        .replace(LIST_MARKER_PATTERN, '\n')
+        .replace(/(^|\n)\s*[-–—]\s+/g, '$1');
+    return normalized
+        .split('\n')
+        .map(cleanListItemText)
+        .filter(Boolean);
+};
+
+const prepareNumberedTemplateLists = (zip, sourceData) => {
+    const data = { ...(sourceData || {}) };
+    const replacements = [];
+    const fieldTokens = new Map();
+    const xmlNames = Object.keys(zip?.files || {}).filter((name) =>
+        name.startsWith('word/') && name.endsWith('.xml')
+    );
+
+    xmlNames.forEach((name) => {
+        const xml = zip.file(name)?.asText() || '';
+        const paragraphs = xml.match(/<w:p\b[\s\S]*?<\/w:p>/g) || [];
+        paragraphs.forEach((paragraph) => {
+            if (!/<w:numPr\b/.test(paragraph)) return;
+            const paragraphText = extractParagraphText(paragraph);
+            const markerPattern = /<<\s*([^<>]+?)\s*>>/g;
+            let markerMatch;
+            while ((markerMatch = markerPattern.exec(paragraphText)) !== null) {
+                const field = String(markerMatch[1] || '').trim();
+                if (!field || !Object.prototype.hasOwnProperty.call(data, field)) continue;
+                if (typeof data[field] !== 'string') continue;
+
+                let token = fieldTokens.get(field);
+                if (!token) {
+                    token = `__ARMI_NUMBERED_LIST_${fieldTokens.size + 1}__`;
+                    fieldTokens.set(field, token);
+                    replacements.push({
+                        field,
+                        token,
+                        items: splitListItems(data[field])
+                    });
+                    data[field] = token;
+                }
+            }
+        });
+    });
+
+    return { data, replacements };
+};
+
+const expandNumberedListParagraphs = (xml, replacements) => {
+    let next = String(xml || '');
+    (Array.isArray(replacements) ? replacements : []).forEach((replacement) => {
+        const token = String(replacement?.token || '');
+        if (!token || !next.includes(token)) return;
+        const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const paragraphPattern = new RegExp(
+            `<w:p\\b[^>]*>(?:(?!<\\/w:p>)[\\s\\S])*?${escapedToken}(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`,
+            'g'
+        );
+        next = next.replace(paragraphPattern, (paragraph) => {
+            const items = Array.isArray(replacement.items) ? replacement.items : [];
+            if (items.length === 0) return paragraph.replace(token, '');
+            return items.map((item, index) => {
+                let cloned = paragraph.replace(token, escapeXml(item));
+                if (index > 0) {
+                    cloned = cloned
+                        .replace(/\s+w14:paraId="[^"]*"/g, '')
+                        .replace(/\s+w14:textId="[^"]*"/g, '');
+                }
+                return cloned;
+            }).join('');
+        });
+    });
+    return next;
+};
+
+const applyNumberedTemplateLists = (zip, replacements) => {
+    if (!Array.isArray(replacements) || replacements.length === 0) return;
+    Object.keys(zip?.files || {})
+        .filter((name) => name.startsWith('word/') && name.endsWith('.xml'))
+        .forEach((name) => {
+            const xml = zip.file(name)?.asText() || '';
+            if (!xml) return;
+            const rendered = expandNumberedListParagraphs(xml, replacements);
+            if (rendered !== xml) zip.file(name, rendered);
+        });
+};
 
 const normalizeBrokenModelTokens = (xml, keys) => {
     let next = String(xml || '').replace(/<w:proofErr\b[^>]*\/>/g, '');
@@ -1075,17 +1184,33 @@ router.post('/unidad-word/generate', async (req, res) => {
             );
             const unitMatrixChecks = JSON.parse(row.program_matrix_checks || '{}');
             const currentUnitIndex = Math.max(0, Number(unitNumber || 1) - 1);
-            const selectedApproachNames = ENFOQUES_LIST.filter((name) => unitMatrixChecks[`enfoque-${superNormalize(name)}-${currentUnitIndex}`]);
+            const selectedApproachNames = ENFOQUES_LIST.filter((name) =>
+                Object.entries(unitMatrixChecks).some(([key, selected]) => {
+                    if (!selected) return false;
+                    const match = String(key || '').match(/^enfoque-(.+)-(\d+)$/i);
+                    if (!match || Number(match[2]) !== currentUnitIndex) return false;
+                    return normalizeApproachName(match[1]) === normalizeApproachName(name);
+                })
+            );
             const groupedTransversalApproaches = selectedApproachNames.map((name) => {
                 const matchingRows = enfoquesDbRows.filter((item) =>
                     normalizeApproachName(item?.enfoque || '') === normalizeApproachName(name)
                 );
-                const filas = matchingRows.map((item) => ({
-                    enfoque: normalizeApproachName(item?.enfoque || '') || normalizeApproachName(name),
-                    valor: String(item?.valores || '').trim(),
-                    actitud: String(item?.actitudes || '').trim(),
-                    demuestra: String(item?.se_demuestra_cuando || '').trim()
-                }));
+                const filas = Array.from(new Map(matchingRows.map((item) => {
+                    const rowData = {
+                        enfoque: normalizeApproachName(item?.enfoque || '') || normalizeApproachName(name),
+                        valor: String(item?.valores || '').trim(),
+                        actitud: cleanListItemText(item?.actitudes || ''),
+                        demuestra: cleanListItemText(item?.se_demuestra_cuando || '')
+                    };
+                    const dedupeKey = [
+                        normalizeLooseText(rowData.enfoque),
+                        normalizeLooseText(rowData.valor),
+                        normalizeLooseText(rowData.actitud),
+                        normalizeLooseText(rowData.demuestra)
+                    ].join('|');
+                    return [dedupeKey, rowData];
+                })).values());
                 return { enfoque: name, filas };
             }).filter((group) => Array.isArray(group.filas) && group.filas.length > 0);
             const transversalCapacityColorMap = new Map();
@@ -1179,7 +1304,7 @@ router.post('/unidad-word/generate', async (req, res) => {
                 modules: [imageModule]
             });
 
-            doc.setData({
+            const templateData = {
                 institution: dg.institution || '',
                 ie: dg.institution || '',
                 motto: dg.motto || '',
@@ -1263,9 +1388,12 @@ router.post('/unidad-word/generate', async (req, res) => {
                 linkografia: String(bibliografia.links || '').trim(),
                 recursos,
                 bibliografia
-            });
+            };
+            const numberedTemplateLists = prepareNumberedTemplateLists(zip, templateData);
+            doc.setData(numberedTemplateLists.data);
 
             doc.render();
+            applyNumberedTemplateLists(doc.getZip(), numberedTemplateLists.replacements);
             let renderedDocumentXml = doc.getZip().file('word/document.xml')?.asText() || '';
             renderedDocumentXml = renderLearningGoalsTableModel(renderedDocumentXml, groupedLearningGoals);
             renderedDocumentXml = renderLearningGoalsTableModelWithConfig(renderedDocumentXml, transversal1Groups, {

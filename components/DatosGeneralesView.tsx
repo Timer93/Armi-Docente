@@ -16,6 +16,7 @@ import { Select } from './Select';
 import { TextArea } from './TextArea';
 import { readImageFileAsDataUrl } from '../utils/imageStorage';
 import { broadcastGeneralImagesUpdate } from '../utils/generalImageHelpers';
+import { optimizeImageDataUrl, type OptimizableImageKind } from '../utils/imageOptimization';
 import { saveImageAssetFile } from '../services/apiService';
 
 interface Props {
@@ -181,12 +182,16 @@ const ImageUploader: React.FC<{
     onImageChange: (base64: string) => void;
     onRemove: () => void;
     placeholderIcon: string;
-}> = ({ label, imageSrc, onImageChange, onRemove, placeholderIcon }) => {
+    imageKind: Extract<OptimizableImageKind, 'general_insignia' | 'general_logo'>;
+}> = ({ label, imageSrc, onImageChange, onRemove, placeholderIcon, imageKind }) => {
     const inputRef = useRef<HTMLInputElement>(null);
     const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
-            void readImageFileAsDataUrl(file).then(onImageChange);
+            void readImageFileAsDataUrl(file)
+                .then((imageData) => optimizeImageDataUrl(imageData, imageKind))
+                .then(onImageChange)
+                .catch((error) => console.error('No se pudo optimizar la imagen institucional:', error));
         }
     };
     return (
@@ -368,7 +373,7 @@ export const DatosGeneralesView: React.FC<Props> = ({ onSuccess, activeSection }
 
         if (dataToSave.insignia && uploadedImageSignatureRef.current.insignia !== dataToSave.insignia) {
           uploadedImageSignatureRef.current.insignia = dataToSave.insignia;
-          void saveImageAssetFile({ imageData: dataToSave.insignia, kind: 'general_insignia' });
+          void saveImageAssetFile({ imageData: dataToSave.insignia, kind: 'general_insignia', alreadyOptimized: true });
         }
         if (!dataToSave.insignia) {
           uploadedImageSignatureRef.current.insignia = '';
@@ -376,7 +381,7 @@ export const DatosGeneralesView: React.FC<Props> = ({ onSuccess, activeSection }
 
         if (dataToSave.logo && uploadedImageSignatureRef.current.logo !== dataToSave.logo) {
           uploadedImageSignatureRef.current.logo = dataToSave.logo;
-          void saveImageAssetFile({ imageData: dataToSave.logo, kind: 'general_logo' });
+          void saveImageAssetFile({ imageData: dataToSave.logo, kind: 'general_logo', alreadyOptimized: true });
         }
         if (!dataToSave.logo) {
           uploadedImageSignatureRef.current.logo = '';
@@ -444,10 +449,10 @@ export const DatosGeneralesView: React.FC<Props> = ({ onSuccess, activeSection }
                                 <div className="mb-3 px-6 py-1.5 rounded-full bg-slate-800 text-white text-[9px] font-black uppercase tracking-[0.2em] shadow-md select-none border border-slate-700">
                                     Nivel {formData.level || 'Secundaria'}
                                 </div>
-                                <ImageUploader label="Insignia I.E." imageSrc={formData.insignia} placeholderIcon="🛡️" onImageChange={(val) => { setFormData({...formData, insignia: val}); setIsDirty(true); }} onRemove={() => { setFormData({...formData, insignia: ''}); setIsDirty(true); }} />
+                                <ImageUploader label="Insignia I.E." imageKind="general_insignia" imageSrc={formData.insignia} placeholderIcon="🛡️" onImageChange={(val) => { setFormData({...formData, insignia: val}); setIsDirty(true); }} onRemove={() => { setFormData({...formData, insignia: ''}); setIsDirty(true); }} />
                             </div>
                             <div className="hidden lg:block w-8 h-px bg-slate-200"></div>
-                            <ImageUploader label="Logo UGEL" imageSrc={formData.logo} placeholderIcon="🏛️" onImageChange={(val) => { setFormData({...formData, logo: val}); setIsDirty(true); }} onRemove={() => { setFormData({...formData, logo: ''}); setIsDirty(true); }} />
+                            <ImageUploader label="Logo UGEL" imageKind="general_logo" imageSrc={formData.logo} placeholderIcon="🏛️" onImageChange={(val) => { setFormData({...formData, logo: val}); setIsDirty(true); }} onRemove={() => { setFormData({...formData, logo: ''}); setIsDirty(true); }} />
                         </div>
                         <div className="flex-1 space-y-8">
                             <div className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm space-y-6">

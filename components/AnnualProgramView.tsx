@@ -359,6 +359,34 @@ const AuthOverlay: React.FC<{
     const [unitPedagogicalFocus, setUnitPedagogicalFocus] = useState(initialUnitPedagogicalFocus);
     const canSave = provider === 'gemini' ? !!geminiKey.trim() : !!openaiKey.trim();
 
+    const saveConfiguration = () => onSave({
+        provider,
+        geminiKey: geminiKey.trim(),
+        openaiKey: openaiKey.trim(),
+        geminiModel,
+        openaiModel,
+        aiPedagogicalRoute: aiPedagogicalRoute.trim(),
+        institutionalProblems: institutionalProblems.trim(),
+        unitPedagogicalFocus: unitPedagogicalFocus.trim()
+    });
+
+    useEffect(() => {
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key !== 'Enter' || event.defaultPrevented || isSaving || !canSave) return;
+            const target = event.target as HTMLElement | null;
+            if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+            event.preventDefault();
+            saveConfiguration();
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            window.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [provider, geminiKey, openaiKey, geminiModel, openaiModel, aiPedagogicalRoute, institutionalProblems, unitPedagogicalFocus, isSaving, canSave]);
+
     useEffect(() => {
         let cancelled = false;
         const loadModels = async () => {
@@ -417,8 +445,8 @@ const AuthOverlay: React.FC<{
     }, [provider, geminiKey, openaiKey]);
 
     return (
-        <div className="fixed inset-0 z-[5000] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
-            <div className="bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col lg:flex-row">
+        <div className="fixed inset-0 z-[5000] flex items-start justify-center overflow-y-auto overscroll-contain p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
+            <div className="my-2 bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col lg:flex-row">
                 <div className="bg-blue-600 w-full md:w-60 p-6 text-white flex flex-col">
                     <div>
                         <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center text-3xl mb-6 shadow-inner">🤖</div>
@@ -563,16 +591,7 @@ const AuthOverlay: React.FC<{
                     </div>
 
                     <button
-                        onClick={() => onSave({
-                            provider,
-                            geminiKey: geminiKey.trim(),
-                            openaiKey: openaiKey.trim(),
-                            geminiModel,
-                            openaiModel,
-                            aiPedagogicalRoute: aiPedagogicalRoute.trim(),
-                            institutionalProblems: institutionalProblems.trim(),
-                            unitPedagogicalFocus: unitPedagogicalFocus.trim()
-                        })}
+                        onClick={saveConfiguration}
                         disabled={isSaving || !canSave}
                         className="mt-4 w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-black uppercase tracking-widest text-[10px] disabled:opacity-50"
                     >

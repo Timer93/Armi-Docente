@@ -1,4 +1,3 @@
-﻿
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
@@ -6,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { Readable } from 'stream';
+import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
 import db from './db.js';
 import { appRoot, uploadsRoot, ensureDir } from './paths.js';
@@ -14,16 +13,24 @@ import programacionRoutes from './routes/programacionAnual.routes.js';
 import programacionWordRoutes from './routes/programacionWord.routes.js';
 import unidadWordRoutes from './routes/unidadWord.routes.js';
 import sesionWordRoutes from './routes/sesionWord.routes.js';
+import studentPortalRoutes from './routes/studentPortal.routes.js';
+import evidenciasRoutes from './routes/evidencias.routes.js';
+import remoteCameraRoutes, { remoteCameraPublicRoutes } from './routes/remoteCamera.routes.js';
+import {
+  getEvidenceStorageContext,
+  resolveEvidenceFilePathDetailed,
+  reconcilePortableEvidenceIndex,
+  copyEvidenceToMirrorSafely,
+} from './evidenceStorage.js';
 import { checkPurchaseStatus, getAuthProviderInfo, getPurchaseConfig, loginUser, submitPurchase } from './auth.js';
-import { applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, getLocalSyncStatus, getSyncStatus, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, resolveCloudConflict, saveFrontendStateSnapshot, updateSyncConfig } from './sync.js';
+import { applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, ensureMirrorResourceAvailable, getDriveMirrorEvidenceStorage, getLocalSyncStatus, getResourceDeliveryStatus, getSyncStatus, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, resolveCloudConflict, saveFrontendStateSnapshot, startContinuousMirrorSync, updateSyncConfig } from './sync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootFolder = appRoot;
 const uploadsFolder = uploadsRoot;
-const evidenceUploadsFolder = path.join(uploadsFolder, 'evaluacion-evidencias');
-const remoteCameraSessions = new Map();
-const REMOTE_CAMERA_TTL_MS = 1000 * 60 * 45;
+const STUDENT_PORTAL_MAX_SESSIONS = Math.max(200, Number(process.env.ARMI_STUDENT_MAX_SESSIONS) || 500);
+const STUDENT_PORTAL_MAX_CONNECTIONS = Math.max(200, Number(process.env.ARMI_STUDENT_MAX_CONNECTIONS) || 500);
 
 const GENERAL_DATA_COLUMN_DEFINITIONS = {
   b1_start: 'TEXT',
@@ -69,6 +76,7 @@ const GENERAL_DATA_COLUMN_DEFINITIONS = {
   ai_institutional_problems: "TEXT DEFAULT ''",
   ai_unit_pedagogical_focus: "TEXT DEFAULT ''",
   year_name: 'TEXT',
+  evidence_storage_path: "TEXT DEFAULT ''",
 };
 
 const ensureGeneralDataColumn = (col, type) => {
@@ -129,16 +137,22 @@ const ensureGeneralDataReady = () => {
   }
 };
 
-ensureDir(evidenceUploadsFolder);
+
 
 const getLanIpv4Addresses = () => {
   try {
     const interfaces = os.networkInterfaces();
-    return Object.values(interfaces)
+    const addresses = Object.values(interfaces)
       .flat()
       .filter(Boolean)
-      .filter((entry) => entry.family === 'IPv4' && !entry.internal)
-      .map((entry) => entry.address);
+      .filter((entry) => (entry.family === 'IPv4' || entry.family === 4) && !entry.internal)
+      .map((entry) => String(entry.address || '').trim())
+      .filter((address) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(address))
+      .filter((address) => !address.startsWith('127.') && !address.startsWith('169.254.'));
+    return [...new Set(addresses)].sort((left, right) => {
+      const priority = (address) => address.startsWith('192.168.') ? 0 : address.startsWith('10.') ? 1 : 2;
+      return priority(left) - priority(right);
+    });
   } catch {
     return [];
   }
@@ -339,9 +353,21 @@ const buildRemoteCameraHtml = (sessionId) => `<!DOCTYPE html>
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.ARMI_BACKEND_PORT || 3000);
+  const STUDENT_PORTAL_PORT = Number(process.env.ARMI_STUDENT_PORTAL_PORT || (PORT + 1));
 
-// InicializaciÃ³n de tabla de plantillas si no existe
+  const initialEvidenceReconciliation = reconcilePortableEvidenceIndex();
+  if (initialEvidenceReconciliation?.enabled) {
+    const { exported, imported, updated, pendingFiles } = initialEvidenceReconciliation;
+    console.log(`[evidencias] Indice portatil listo: ${exported} fichas publicadas, ${imported} recuperadas, ${updated} actualizadas, ${pendingFiles} esperando archivo.`);
+  }
+  // Las altas y cambios escriben su ficha portátil inmediatamente. Este barrido
+  // es solo una red de seguridad y no necesita recorrer Drive cada 15 segundos.
+  const evidenceReconciliationTimer = setInterval(reconcilePortableEvidenceIndex, 60_000);
+  evidenceReconciliationTimer.unref?.();
+  startContinuousMirrorSync();
+
+// Inicialización de tabla de plantillas si no existe
 db.prepare(`
   CREATE TABLE IF NOT EXISTS plantillas_area (
     id_plantilla TEXT PRIMARY KEY,
@@ -358,10 +384,10 @@ db.prepare(`
 ========================= */
 
 const DEPARTAMENTOS_PERU = [
-  "AMAZONAS", "ÃNCASH", "APURÃMAC", "AREQUIPA", "AYACUCHO", "CAJAMARCA",
-  "CALLAO", "CUSCO", "HUANCAVELICA", "HUÃNUCO", "ICA", "JUNÃN",
+  "AMAZONAS", "ÁNCASH", "APURÍMAC", "AREQUIPA", "AYACUCHO", "CAJAMARCA",
+  "CALLAO", "CUSCO", "HUANCAVELICA", "HUÁNUCO", "ICA", "JUNÍN",
   "LA LIBERTAD", "LAMBAYEQUE", "LIMA", "LORETO", "MADRE DE DIOS",
-  "MOQUEGUA", "PASCO", "PIURA", "PUNO", "SAN MARTÃN",
+  "MOQUEGUA", "PASCO", "PIURA", "PUNO", "SAN MARTÍN",
   "TACNA", "TUMBES", "UCAYALI"
 ];
 
@@ -369,7 +395,7 @@ const superNormalize = (str) => {
   if (!str) return "";
   return String(str)
     .toLowerCase()
-    .replace(/[^a-z0-9 Ã¡Ã©Ã­Ã³ÃºÃ±]/gi, "")
+    .replace(/[^a-z0-9 áéíóúñ]/gi, "")
     .trim();
 };
 
@@ -396,6 +422,7 @@ const parseDataUrlImage = (value) => {
 
 const imageExtensionFromMime = (mimeType) => {
   const clean = String(mimeType || '').toLowerCase();
+  if (clean.includes('svg')) return 'svg';
   if (clean.includes('png')) return 'png';
   if (clean.includes('jpeg') || clean.includes('jpg')) return 'jpg';
   if (clean.includes('webp')) return 'webp';
@@ -412,6 +439,9 @@ const resolveImageAssetTarget = ({ kind, userKey }) => {
   if (kind === 'general_logo') {
     return path.join(uploadsFolder, 'user-assets', 'general', 'logo');
   }
+  if (kind === 'session_resource') {
+    return path.join(uploadsFolder, 'session-resources', safeUser);
+  }
   return path.join(uploadsFolder, 'user-assets', 'profiles', safeUser, 'profile');
 };
 
@@ -419,130 +449,84 @@ const resolveImageAssetTarget = ({ kind, userKey }) => {
    MIDDLEWARE
 ========================= */
 
-app.use(cors({ origin: '*' }));
+const isStudentGatewayRequest = (req) => Number(req.socket?.localPort || 0) === STUDENT_PORTAL_PORT;
+app.use((req, res, next) => {
+  if (!isStudentGatewayRequest(req)) return next();
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.setHeader('X-ARMI-Portal', 'student-only');
+
+  const pathname = String(req.path || '/');
+  const method = String(req.method || 'GET').toUpperCase();
+  const isRead = method === 'GET' || method === 'HEAD';
+  const allowed = pathname.startsWith('/estudiante')
+    || pathname.startsWith('/estudiante-assets/')
+    || pathname.startsWith('/api/student-portal/')
+    || (isRead && pathname.startsWith('/api/evaluacion/evidencias/') && pathname.endsWith('/file'))
+    || (isRead && pathname === '/api/health');
+
+  if (allowed) return next();
+  const acceptsHtml = String(req.headers.accept || '').includes('text/html');
+  if (isRead && (pathname === '/' || acceptsHtml)) return res.redirect(302, '/estudiante');
+  return res.status(404).json({ success: false, message: 'Esta direccion publica solo permite el portal estudiantil.' });
+});
+app.use(cors((req, callback) => {
+  callback(null, isStudentGatewayRequest(req) ? { origin: false } : { origin: '*' });
+}));
 app.use(bodyParser.json({ limit: '100mb' }));
+app.use(['/api/student-portal', '/estudiante'], (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+app.use('/uploads', async (req, res, next) => {
+  if (!['GET', 'HEAD'].includes(req.method)) return next();
+  try {
+    const requestedPath = `uploads/${decodeURIComponent(req.path).replace(/^\/+/, '')}`;
+    const result = await ensureMirrorResourceAvailable(requestedPath);
+    if (result.success || result.code === 'unknown-resource') return next();
+    if (result.code === 'waiting-for-drive-upload') {
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json(result);
+    }
+    return next();
+  } catch (error) {
+    return res.status(503).json({
+      success: false,
+      code: 'resource-download-failed',
+      message: error?.message || 'No se pudo preparar el recurso desde Drive.',
+    });
+  }
+});
 app.use('/uploads', express.static(uploadsFolder));
 
 app.use((req, res, next) => {
-  console.log(`ðŸ“© [${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
+  const verboseHttp = process.env.ARMI_VERBOSE_HTTP === '1';
+  const routineRequest = req.method === 'GET'
+    || req.path.endsWith('/ping')
+    || req.path.endsWith('/frame')
+    || req.path === '/api/sync/frontend-state'
+    || req.path === '/api/sync/status';
+  if (verboseHttp || !routineRequest) {
+    console.log(`📩 [${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
+  }
   next();
 });
 
-app.post('/api/remote-camera/session', (req, res) => {
-  cleanupRemoteCameraSessions();
-  const sessionId = crypto.randomBytes(5).toString('hex');
-  const addresses = getLanIpv4Addresses();
-  const primaryAddress = addresses[0] || 'localhost';
-  const phoneUrl = `http://${primaryAddress}:${PORT}/remote-camera/${sessionId}`;
-  const createdAt = new Date().toISOString();
-  remoteCameraSessions.set(sessionId, {
-    id: sessionId,
-    createdAt,
-    updatedAt: Date.now(),
-    lastFrameAt: null,
-    imageData: '',
-    width: 0,
-    height: 0,
-  });
-  res.json({
-    success: true,
-    data: {
-      sessionId,
-      phoneUrl,
-      lanAddresses: addresses,
-      createdAt,
-    },
-  });
-});
-
-app.get('/api/remote-camera/session/:sessionId', (req, res) => {
-  cleanupRemoteCameraSessions();
-  const session = remoteCameraSessions.get(String(req.params.sessionId || ''));
-  if (!session) {
-    return res.status(404).json({ success: false, message: 'La sesion remota ya no existe o vencio.' });
-  }
-  return res.json({
-    success: true,
-    data: {
-      sessionId: session.id,
-      connected: Boolean(session.imageData),
-      imageData: session.imageData || '',
-      width: session.width || 0,
-      height: session.height || 0,
-      createdAt: session.createdAt,
-      lastFrameAt: session.lastFrameAt,
-    },
-  });
-});
-
-app.post('/api/remote-camera/session/:sessionId/frame', (req, res) => {
-  cleanupRemoteCameraSessions();
-  const session = remoteCameraSessions.get(String(req.params.sessionId || ''));
-  if (!session) {
-    return res.status(404).json({ success: false, message: 'Sesion remota no encontrada.' });
-  }
-  const imageData = String(req.body?.imageData || '');
-  if (!imageData.startsWith('data:image/')) {
-    return res.status(400).json({ success: false, message: 'Frame invalido.' });
-  }
-  session.imageData = imageData;
-  session.width = Number(req.body?.width || 0);
-  session.height = Number(req.body?.height || 0);
-  session.lastFrameAt = new Date().toISOString();
-  session.updatedAt = Date.now();
-  remoteCameraSessions.set(session.id, session);
-  return res.json({ success: true, data: { lastFrameAt: session.lastFrameAt } });
-});
-
-app.delete('/api/remote-camera/session/:sessionId', (req, res) => {
-  remoteCameraSessions.delete(String(req.params.sessionId || ''));
-  return res.json({ success: true });
-});
-
-app.get('/remote-camera/:sessionId', (req, res) => {
-  cleanupRemoteCameraSessions();
-  const sessionId = String(req.params.sessionId || '');
-  if (!remoteCameraSessions.has(sessionId)) {
-    return res.status(404).send('<h1>Sesion remota no disponible</h1><p>Vuelve a generarla desde la PC.</p>');
-  }
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  return res.send(buildRemoteCameraHtml(sessionId));
-});
-
-app.get('/api/ip-camera/proxy', async (req, res) => {
-  const targetUrl = String(req.query.url || '').trim();
-  if (!/^https?:\/\//i.test(targetUrl)) {
-    return res.status(400).json({ success: false, message: 'URL de camara invalida. Usa http:// o https://.' });
-  }
-  let upstream;
-  try {
-    upstream = await fetch(targetUrl, {
-      headers: {
-        'User-Agent': 'ARMI-Docente-IP-Camera',
-      },
-    });
-  } catch (error) {
-    return res.status(502).json({ success: false, message: 'No se pudo conectar con la camara IP del celular.' });
-  }
-  if (!upstream.ok || !upstream.body) {
-    return res.status(502).json({ success: false, message: `La camara IP respondio con HTTP ${upstream.status}.` });
-  }
-  const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
-  if (contentType) res.setHeader('Content-Type', contentType);
-  const cacheControl = upstream.headers.get('cache-control') || 'no-store, no-cache, must-revalidate';
-  res.setHeader('Cache-Control', cacheControl);
-  const fromWeb = Readable.fromWeb(upstream.body);
-  fromWeb.on('error', () => {
-    if (!res.headersSent) res.status(502).end();
-    else res.end();
-  });
-  fromWeb.pipe(res);
-});
-
-  app.use('/api', programacionRoutes);
-  app.use('/api', programacionWordRoutes);
-  app.use('/api', unidadWordRoutes);
-  app.use('/api', sesionWordRoutes);
+app.use('/api', programacionRoutes);
+app.use('/api', programacionWordRoutes);
+app.use('/api', unidadWordRoutes);
+app.use('/api', sesionWordRoutes);
+app.use('/api', studentPortalRoutes);
+app.use('/api', evidenciasRoutes);
+app.use('/api', remoteCameraRoutes);
+app.use(remoteCameraPublicRoutes);
 
 app.get('/api/auth/provider', (req, res) => {
   try {
@@ -617,8 +601,41 @@ app.post('/api/assets/image-file', (req, res) => {
   }
 });
 
+app.post('/api/resources/youtube/verify', async (req, res) => {
+  try {
+    const rawUrl = String(req.body?.url || '').trim();
+    const idMatch = rawUrl.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i);
+    if (!idMatch) {
+      return res.status(400).json({ success: false, message: 'El enlace de YouTube no es válido.' });
+    }
+    const videoId = idMatch[1];
+    const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const upstream = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(canonicalUrl)}&format=json`, {
+      headers: { 'User-Agent': 'Armi-Docente/11.1' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!upstream.ok) {
+      return res.status(422).json({ success: false, message: 'YouTube no confirmó que el video esté disponible públicamente.' });
+    }
+    const metadata = await upstream.json();
+    return res.json({
+      success: true,
+      data: {
+        platform: 'YouTube',
+        url: canonicalUrl,
+        videoId,
+        title: String(metadata?.title || '').trim(),
+        authorName: String(metadata?.author_name || '').trim(),
+        thumbnailUrl: String(metadata?.thumbnail_url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`).trim(),
+      },
+    });
+  } catch (error) {
+    return res.status(502).json({ success: false, message: error?.message || 'No se pudo verificar el video de YouTube.' });
+  }
+});
+
 /* =====================================================
-   PLANTILLAS DE ÃREA (NUEVO)
+   PLANTILLAS DE ÁREA (NUEVO)
 ===================================================== */
 
 app.get('/api/plantillas-area', (req, res) => {
@@ -662,7 +679,7 @@ app.get('/api/sesiones', (req, res) => {
         return res.json({ success: true, data: row ? JSON.parse(row.session_data) : null });
     }
     
-    // Si no hay filtros especÃ­ficos, devolver lista para el gestor
+    // Si no hay filtros específicos, devolver lista para el gestor
     const rows = db.prepare('SELECT * FROM sesiones ORDER BY updated_at DESC').all();
     const dataMap = {};
     rows.forEach(r => {
@@ -675,7 +692,9 @@ app.get('/api/sesiones', (req, res) => {
             section: r.section,
             unitNumber: r.unit_number,
             sessionNumber: r.session_number,
-            title: parsed.title || 'Sin TÃ­tulo'
+            title: parsed.title || 'Sin Título',
+            thematicField: parsed?.competenciaPrio?.field || '',
+            learningResources: parsed?.learningResources || null
         };
     });
     res.json({ success: true, data: dataMap });
@@ -732,7 +751,7 @@ app.delete('/api/sesiones/:id', (req, res) => {
 });
 
 /* =====================================================
-   UNIDADES DIDÃCTICAS
+   UNIDADES DIDÁCTICAS
 ===================================================== */
 
 app.get('/api/unidades-didacticas', (req, res) => {
@@ -766,7 +785,7 @@ app.get('/api/unidades-didacticas', (req, res) => {
           grade: row.grade,
           section: row.section,
           unitNumber: row.unit_number,
-          title: row.title || 'Sin TÃ­tulo'
+          title: row.title || 'Sin Título'
         };
       });
       return res.json({ success: true, data: dataMap });
@@ -1004,7 +1023,7 @@ app.post('/api/metas-aprendizaje', (req, res) => {
 });
 
 /* =====================================================
-   UBIGEO â€“ DATOS GENERALES â€“ ESTUDIANTES â€“ DIAGNÃ“STICO
+   UBIGEO – DATOS GENERALES – ESTUDIANTES – DIAGNÓSTICO
 ===================================================== */
 
 app.get('/api/ubigeo/departamentos', (req, res) => {
@@ -1096,6 +1115,247 @@ app.post('/api/datos-generales', (req, res) => {
     res.json({ success: true, message: 'Guardado OK' });
   } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 });
+
+const getStudentPortalUrls = (port = STUDENT_PORTAL_PORT) =>
+  getLanIpv4Addresses().map((address) => `http://${address}:${port}/estudiante`);
+
+const requireLocalTeacherRequest = (req, res, next) => {
+  const remote = String(req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  if (remote === '127.0.0.1' || remote === '::1') return next();
+  return res.status(403).json({ success: false, message: 'Esta operación solo puede realizarse desde el equipo docente.' });
+};
+
+const ensureEvidenceMirrorRoot = (context = getEvidenceStorageContext()) => {
+  if (!context.automaticMirror) return;
+  ensureDir(context.effectivePath);
+  const markerPath = path.join(context.effectivePath, '.armi-evidence-storage.json');
+  if (!fs.existsSync(markerPath)) {
+    fs.writeFileSync(markerPath, JSON.stringify({
+      format: 1,
+      application: 'ARMI Docente',
+      purpose: 'Evidencias de estudiantes compartidas entre computadoras',
+      createdAt: new Date().toISOString(),
+      warning: 'No elimine ni cambie de nombre esta carpeta mientras ARMI use el modo espejo.',
+    }, null, 2), 'utf8');
+  }
+};
+
+const getEvidenceRecoveryStatus = () => {
+  const context = getEvidenceStorageContext();
+  const rows = db.prepare('SELECT * FROM evaluacion_evidencias ORDER BY id').all();
+  let sharedFiles = 0;
+  let recoverableHere = 0;
+  let missingFiles = 0;
+  let sharedBytes = 0;
+  let recoverableBytes = 0;
+  const missingItems = [];
+  rows.forEach((row) => {
+    const relative = evidenceRelativePathFromRow(row);
+    const canonical = context.automaticMirror
+      ? resolveEvidenceCandidate(context.effectivePath, relative)
+      : '';
+    if (evidenceFileMatchesRecord(row, canonical)) {
+      sharedFiles += 1;
+      sharedBytes += Number(row.file_size || fs.statSync(canonical).size || 0);
+      return;
+    }
+    const resolved = resolveEvidenceFilePathDetailed(row);
+    if (context.automaticMirror && resolved.path && resolved.source !== 'drive-mirror') {
+      recoverableHere += 1;
+      recoverableBytes += Number(row.file_size || fs.statSync(resolved.path).size || 0);
+      return;
+    }
+    missingFiles += 1;
+    if (missingItems.length < 30) {
+      missingItems.push({ id: row.id, fileName: row.file_name || '', studentId: row.student_id || '', relativePath: relative });
+    }
+  });
+  return {
+    automaticMirror: context.automaticMirror,
+    effectivePath: context.effectivePath,
+    legacyConfiguredPath: context.legacyConfiguredPath,
+    totalRecords: rows.length,
+    sharedFiles,
+    sharedBytes,
+    recoverableHere,
+    recoverableBytes,
+    missingFiles,
+    missingItems,
+  };
+};
+
+app.get('/api/evidence-storage/config', (req, res) => {
+  try {
+    ensureGeneralDataReady();
+    const context = getEvidenceStorageContext();
+    ensureEvidenceMirrorRoot(context);
+    res.json({
+      success: true,
+      data: {
+        configuredPath: context.automaticMirror ? context.effectivePath : context.configuredPath,
+        effectivePath: context.effectivePath,
+        legacyConfiguredPath: context.legacyConfiguredPath,
+        isConfigured: context.automaticMirror || !!context.configuredPath,
+        automaticMirror: context.automaticMirror,
+        exists: fs.existsSync(context.effectivePath),
+        portalUrls: getStudentPortalUrls(),
+        recovery: getEvidenceRecoveryStatus(),
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/evidence-storage/config', (req, res) => {
+  try {
+    ensureGeneralDataReady();
+    const currentContext = getEvidenceStorageContext();
+    if (currentContext.automaticMirror) {
+      ensureEvidenceMirrorRoot(currentContext);
+      return res.json({
+        success: true,
+        message: 'El modo espejo administra automaticamente la carpeta de evidencias.',
+        data: {
+          configuredPath: currentContext.effectivePath,
+          effectivePath: currentContext.effectivePath,
+          automaticMirror: true,
+          exists: true,
+          portalUrls: getStudentPortalUrls(),
+          recovery: getEvidenceRecoveryStatus(),
+        },
+      });
+    }
+    const requestedPath = String(req.body?.path || '').trim();
+    if (!requestedPath) return res.status(400).json({ success: false, message: 'Selecciona una carpeta.' });
+    const resolved = path.resolve(requestedPath);
+    ensureDir(resolved);
+    const testFile = path.join(resolved, `.armi-write-test-${Date.now()}.tmp`);
+    fs.writeFileSync(testFile, 'ok');
+    fs.unlinkSync(testFile);
+    const row = db.prepare('SELECT id FROM datos_generales ORDER BY id DESC LIMIT 1').get();
+    db.prepare('UPDATE datos_generales SET evidence_storage_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(resolved, row.id);
+    res.json({ success: true, data: { configuredPath: resolved, effectivePath: resolved, exists: true, portalUrls: getStudentPortalUrls() } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `No se puede usar esa carpeta: ${error.message}` });
+  }
+});
+
+app.post('/api/evidence-storage/recover-to-mirror', requireLocalTeacherRequest, (req, res) => {
+  try {
+    const context = getEvidenceStorageContext();
+    if (!context.automaticMirror) {
+      return res.status(400).json({ success: false, message: 'Activa primero la sincronizacion por carpeta espejo.' });
+    }
+    ensureEvidenceMirrorRoot(context);
+    const rows = db.prepare('SELECT * FROM evaluacion_evidencias ORDER BY id').all();
+    const updatePortableReference = db.prepare(`
+      UPDATE evaluacion_evidencias
+      SET file_path = '', relative_path = ?, file_size = ?, updated_at = updated_at
+      WHERE id = ?
+    `);
+    let recoveredFiles = 0;
+    let recoveredBytes = 0;
+    let alreadyShared = 0;
+    const failures = [];
+
+    rows.forEach((row) => {
+      const relative = evidenceRelativePathFromRow(row);
+      if (!relative) {
+        failures.push({ id: row.id, fileName: row.file_name || '', reason: 'El registro no contiene una ruta relativa recuperable.' });
+        return;
+      }
+      let portableRelative = relative;
+      let destinationPath = path.resolve(context.effectivePath, portableRelative);
+      const destinationCheck = path.relative(context.effectivePath, destinationPath);
+      if (destinationCheck.startsWith('..') || path.isAbsolute(destinationCheck)) {
+        failures.push({ id: row.id, fileName: row.file_name || '', reason: 'La ruta relativa no es segura.' });
+        return;
+      }
+      if (fs.existsSync(destinationPath)) {
+        const expectedSize = Number(row.file_size || 0);
+        if (!expectedSize || Number(fs.statSync(destinationPath).size) === expectedSize) {
+          updatePortableReference.run(relative, Number(fs.statSync(destinationPath).size), row.id);
+          alreadyShared += 1;
+          return;
+        }
+        const extension = path.extname(relative);
+        const baseName = path.basename(relative, extension);
+        portableRelative = path.join(path.dirname(relative), `${baseName}-recuperado-${row.id}${extension}`);
+        destinationPath = path.resolve(context.effectivePath, portableRelative);
+      }
+      const source = resolveEvidenceFilePathDetailed(row);
+      if (!source.path || source.source === 'drive-mirror') {
+        failures.push({
+          id: row.id,
+          fileName: row.file_name || '',
+          reason: 'El archivo original no esta disponible en esta PC. Ejecuta esta recuperacion en la PC donde los estudiantes lo subieron.',
+        });
+        return;
+      }
+      try {
+        copyEvidenceToMirrorSafely(source.path, destinationPath);
+        const copiedSize = Number(fs.statSync(destinationPath).size);
+        updatePortableReference.run(portableRelative, copiedSize, row.id);
+        recoveredFiles += 1;
+        recoveredBytes += copiedSize;
+      } catch (error) {
+        failures.push({ id: row.id, fileName: row.file_name || '', reason: error?.message || 'No se pudo copiar.' });
+      }
+    });
+
+    return res.json({
+      success: failures.length === 0 || recoveredFiles > 0 || alreadyShared > 0,
+      message: failures.length
+        ? `Se protegieron ${recoveredFiles + alreadyShared} archivos; ${failures.length} siguen pendientes y sus enlaces se conservaron. Google Drive puede continuar subiendo las copias recuperadas.`
+        : `Las ${recoveredFiles + alreadyShared} evidencias quedaron enlazadas a la carpeta espejo sin borrar los originales. Espera a que Google Drive indique que esta actualizado antes de apagar la PC.`,
+      data: {
+        recoveredFiles,
+        recoveredBytes,
+        alreadyShared,
+        failures,
+        recovery: getEvidenceRecoveryStatus(),
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: `No se pudo recuperar las evidencias: ${error.message}` });
+  }
+});
+
+app.get('/api/evidence-storage/pick-folder', (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(400).json({ success: false, message: 'Selector nativo disponible solo en Windows.' });
+  }
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    '$owner = New-Object System.Windows.Forms.Form',
+    "$owner.Text = 'ARMI_EvidenceFolderOwner'",
+    '$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen',
+    '$owner.Size = New-Object System.Drawing.Size(1, 1)',
+    '$owner.ShowInTaskbar = $false',
+    '$owner.TopMost = $true',
+    '$owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None',
+    '$owner.Opacity = 0.01',
+    '$owner.Show()',
+    '$owner.Activate()',
+    '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+    "$dialog.Description = 'Seleccione la carpeta de evidencias de estudiantes'",
+    '$dialog.ShowNewFolderButton = $true',
+    '$result = $dialog.ShowDialog($owner)',
+    '$owner.Close()',
+    '$owner.Dispose()',
+    'if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }'
+  ].join('; ');
+  execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, encoding: 'utf8' }, (error, stdout) => {
+    if (error) return res.status(500).json({ success: false, message: error.message });
+    const selectedPath = String(stdout || '').trim();
+    if (!selectedPath) return res.json({ success: false, cancelled: true });
+    return res.json({ success: true, path: selectedPath });
+  });
+});
+
+
 
 app.get('/api/sync/status/local', async (req, res) => {
   try {
@@ -1477,7 +1737,7 @@ app.delete('/api/resultados-diagnostico', (req, res) => {
 });
 
 /* =====================================================
-   MÃ“DULO EVALUACIÃ“N (NUEVO)
+   MÓDULO EVALUACIÓN (NUEVO)
 ===================================================== */
 
 const EVAL_DEFAULT_LAYOUT_STYLE = {
@@ -1658,7 +1918,7 @@ app.delete('/api/evaluacion/instrumentos/:id', (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) {
-      return res.status(400).json({ success: false, message: 'ID invÃ¡lido' });
+      return res.status(400).json({ success: false, message: 'ID inválido' });
     }
     const result = db.prepare('DELETE FROM evaluacion_instrumentos WHERE id = ?').run(id);
     res.json({ success: true, deleted: result.changes || 0 });
@@ -1667,9 +1927,10 @@ app.delete('/api/evaluacion/instrumentos/:id', (req, res) => {
 
 app.get('/api/evaluacion/registros', (req, res) => {
   const { studentId, sessionId, unitId } = req.query;
+  const gradingMode = String(req.query.gradingMode || 'literal_traditional').trim();
   try {
-    let sql = 'SELECT * FROM evaluacion_registros WHERE 1=1';
-    const params = [];
+    let sql = 'SELECT * FROM evaluacion_registros WHERE grading_mode = ?';
+    const params = [gradingMode];
     if (studentId) { sql += ' AND student_id = ?'; params.push(studentId); }
     if (sessionId) { sql += ' AND session_id = ?'; params.push(sessionId); }
     if (unitId) { sql += ' AND unit_id = ?'; params.push(unitId); }
@@ -1680,22 +1941,105 @@ app.get('/api/evaluacion/registros', (req, res) => {
 
 app.post('/api/evaluacion/registros', (req, res) => {
   const { records } = req.body;
+  const requestGradingMode = String(req.body?.gradingMode || 'literal_traditional').trim();
   try {
     const transaction = db.transaction((list) => {
-      const del = db.prepare('DELETE FROM evaluacion_registros WHERE student_id = ? AND session_id = ? AND criteria_id = ?');
-      const ins = db.prepare('INSERT INTO evaluacion_registros (student_id, session_id, unit_id, instrument_id, criteria_id, level, observation) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      const del = db.prepare('DELETE FROM evaluacion_registros WHERE student_id = ? AND session_id = ? AND criteria_id = ? AND grading_mode = ?');
+      const ins = db.prepare('INSERT INTO evaluacion_registros (student_id, session_id, unit_id, instrument_id, criteria_id, level, observation, grading_mode, numeric_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
       
       for (const r of list) {
-        del.run(r.student_id, r.session_id, r.criteria_id);
+        const gradingMode = String(r.grading_mode || r.gradingMode || requestGradingMode || 'literal_traditional').trim();
+        const numericScore = r.numeric_score === null || r.numeric_score === undefined || String(r.numeric_score).trim() === ''
+          ? null
+          : Number(r.numeric_score);
+        if (numericScore !== null && (!Number.isFinite(numericScore) || numericScore < 0 || numericScore > 20)) {
+          throw new Error(`La nota vigesimal debe estar entre 0 y 20 (estudiante ${r.student_id}, criterio ${r.criteria_id}).`);
+        }
+
+        del.run(r.student_id, r.session_id, r.criteria_id, gradingMode);
         const hasLevel = String(r.level || '').trim().length > 0;
         const hasObservation = String(r.observation || '').trim().length > 0;
-        if (hasLevel || hasObservation) {
-          ins.run(r.student_id, r.session_id, r.unit_id, r.instrument_id, r.criteria_id, r.level, r.observation);
+        if (hasLevel || hasObservation || numericScore !== null) {
+          ins.run(r.student_id, r.session_id, r.unit_id, r.instrument_id, r.criteria_id, r.level, r.observation, gradingMode, numericScore);
         }
       }
     });
-    transaction(records);
+    transaction(Array.isArray(records) ? records : []);
     res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+const VALID_GRADING_MODES = new Set(['literal_traditional', 'criterial_predominance', 'hybrid_vigesimal']);
+
+app.get('/api/evaluacion/modo-calificacion', (req, res) => {
+  const year = String(req.query.year || '').trim();
+  const areaId = String(req.query.areaId || '').trim();
+  const grade = String(req.query.grade || '').trim();
+  const section = String(req.query.section || '').trim();
+
+  if (!year || !areaId) {
+    return res.status(400).json({ success: false, message: 'Año y área son obligatorios.' });
+  }
+
+  try {
+    const candidates = db.prepare(`
+      SELECT *
+      FROM evaluacion_modos_calificacion
+      WHERE year = ? AND area_id = ?
+        AND (grade = ? OR grade = '')
+        AND (section = ? OR section = '')
+      ORDER BY
+        CASE WHEN grade = ? THEN 1 ELSE 0 END DESC,
+        CASE WHEN section = ? THEN 1 ELSE 0 END DESC,
+        updated_at DESC
+      LIMIT 1
+    `).get(year, areaId, grade, section, grade, section);
+
+    res.json({
+      success: true,
+      data: candidates ? {
+        year: candidates.year,
+        areaId: candidates.area_id,
+        grade: candidates.grade,
+        section: candidates.section,
+        gradingMode: candidates.grading_mode,
+        effectiveFrom: candidates.effective_from || '',
+        updatedAt: candidates.updated_at
+      } : {
+        year,
+        areaId,
+        grade,
+        section,
+        gradingMode: 'literal_traditional',
+        effectiveFrom: ''
+      }
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+app.post('/api/evaluacion/modo-calificacion', (req, res) => {
+  const year = String(req.body?.year || '').trim();
+  const areaId = String(req.body?.areaId || '').trim();
+  const grade = String(req.body?.grade || '').trim();
+  const section = String(req.body?.section || '').trim();
+  const gradingMode = String(req.body?.gradingMode || '').trim();
+  const effectiveFrom = String(req.body?.effectiveFrom || '').trim() || null;
+
+  if (!year || !areaId || !VALID_GRADING_MODES.has(gradingMode)) {
+    return res.status(400).json({ success: false, message: 'Configuración de calificación inválida.' });
+  }
+
+  try {
+    db.prepare(`
+      INSERT INTO evaluacion_modos_calificacion (year, area_id, grade, section, grading_mode, effective_from)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(year, area_id, grade, section) DO UPDATE SET
+        grading_mode = excluded.grading_mode,
+        effective_from = excluded.effective_from,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(year, areaId, grade, section, gradingMode, effectiveFrom);
+
+    res.json({ success: true, data: { year, areaId, grade, section, gradingMode, effectiveFrom: effectiveFrom || '' } });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
@@ -1779,221 +2123,7 @@ app.post('/api/evaluacion/conclusiones', (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-app.get('/api/evaluacion/evidencias', (req, res) => {
-  const { year, areaId, grade, section, bimester, unitNumber, sessionNumber, studentId, criteriaId } = req.query;
-  try {
-    let sql = 'SELECT * FROM evaluacion_evidencias WHERE 1=1';
-    const params = [];
-    if (year) { sql += ' AND year = ?'; params.push(year); }
-    if (areaId) { sql += ' AND area_id = ?'; params.push(areaId); }
-    if (grade) { sql += ' AND grade = ?'; params.push(grade); }
-    if (section) { sql += ' AND section = ?'; params.push(section); }
-    if (bimester) { sql += ' AND bimester = ?'; params.push(bimester); }
-    if (unitNumber) { sql += ' AND unit_number = ?'; params.push(unitNumber); }
-    if (sessionNumber) { sql += ' AND session_number = ?'; params.push(sessionNumber); }
-    if (studentId) { sql += ' AND student_id = ?'; params.push(String(studentId)); }
-    if (criteriaId) { sql += ' AND criteria_id = ?'; params.push(String(criteriaId)); }
-    sql += ' ORDER BY updated_at DESC';
 
-    const rows = db.prepare(sql).all(...params).map((row) => ({
-      id: row.id,
-      year: row.year || '',
-      areaId: row.area_id || '',
-      grade: row.grade || '',
-      section: row.section || '',
-      bimester: row.bimester || '',
-      unitNumber: row.unit_number || '',
-      sessionNumber: row.session_number || '',
-      studentId: row.student_id || '',
-      criteriaId: row.criteria_id || '',
-      observation: row.observation || '',
-      studentIds: JSON.parse(row.student_ids || '[]'),
-      studentNames: JSON.parse(row.student_names || '[]'),
-      fileName: row.file_name || path.basename(row.file_path || ''),
-      fileSize: Number(row.file_size || 0),
-      fileType: row.file_type || '',
-      filePath: row.file_path || '',
-      fileUrl: row.file_path ? fileUrlFromAbsolutePath(row.file_path) : '',
-      updatedAt: row.updated_at
-    }));
-
-    res.json({ success: true, data: rows });
-  } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
-  }
-});
-
-app.post('/api/evaluacion/evidencias', (req, res) => {
-  const {
-    id,
-    year,
-    areaId,
-    grade,
-    section,
-    bimester,
-    unitNumber,
-    sessionNumber,
-    studentIds,
-    studentNames,
-    criteriaId,
-    fileName,
-    fileType,
-    fileSize,
-    dataUrl,
-    observation
-  } = req.body || {};
-
-  try {
-    if (!year || !areaId || !grade || !section || !bimester || !unitNumber || !sessionNumber) {
-      return res.status(400).json({ success: false, message: 'Faltan metadatos obligatorios.' });
-    }
-    if (!fileName || !dataUrl) {
-      return res.status(400).json({ success: false, message: 'Falta el archivo de evidencia.' });
-    }
-
-    const match = String(dataUrl).match(/^data:(.*?);base64,(.*)$/);
-    if (!match) {
-      return res.status(400).json({ success: false, message: 'Archivo invÃ¡lido.' });
-    }
-
-    const base64Data = match[2];
-    const ext = path.extname(fileName) || '';
-    const subFolder = path.join(
-      evidenceUploadsFolder,
-      safeSlug(year),
-      safeSlug(areaId),
-      safeSlug(grade),
-      safeSlug(section),
-      `U${safeSlug(unitNumber)}`,
-      `S${safeSlug(sessionNumber)}`
-    );
-    fs.mkdirSync(subFolder, { recursive: true });
-
-    let previous = null;
-    if (id) previous = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = ?').get(id);
-
-    const finalName = `${Date.now()}-${safeSlug(path.basename(fileName, ext))}${ext}`;
-    const absoluteFilePath = path.join(subFolder, finalName);
-    fs.writeFileSync(absoluteFilePath, Buffer.from(base64Data, 'base64'));
-
-    const firstStudentId = Array.isArray(studentIds) && studentIds.length > 0 ? String(studentIds[0]) : '';
-    const sessionId = `${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`;
-
-    if (id && previous) {
-      db.prepare(`
-        UPDATE evaluacion_evidencias SET
-          student_id = ?, session_id = ?, criteria_id = ?,
-          file_path = ?, file_type = ?, observation = ?,
-          year = ?, area_id = ?, grade = ?, section = ?,
-          bimester = ?, unit_number = ?, session_number = ?,
-          student_ids = ?, student_names = ?, file_name = ?, file_size = ?,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(
-        firstStudentId,
-        sessionId,
-        String(criteriaId || ''),
-        absoluteFilePath,
-        fileType || '',
-        String(observation || ''),
-        year,
-        areaId,
-        grade,
-        section,
-        bimester,
-        String(unitNumber),
-        String(sessionNumber),
-        JSON.stringify(Array.isArray(studentIds) ? studentIds : []),
-        JSON.stringify(Array.isArray(studentNames) ? studentNames : []),
-        fileName,
-        Number(fileSize || 0),
-        id
-      );
-
-      if (previous.file_path && previous.file_path !== absoluteFilePath && fs.existsSync(previous.file_path)) {
-        try { fs.unlinkSync(previous.file_path); } catch {}
-      }
-    } else {
-      db.prepare(`
-        INSERT INTO evaluacion_evidencias (
-          student_id, session_id, criteria_id,
-          file_path, file_type, observation,
-          year, area_id, grade, section, bimester, unit_number, session_number,
-          student_ids, student_names, file_name, file_size
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        firstStudentId,
-        sessionId,
-        String(criteriaId || ''),
-        absoluteFilePath,
-        fileType || '',
-        String(observation || ''),
-        year,
-        areaId,
-        grade,
-        section,
-        bimester,
-        String(unitNumber),
-        String(sessionNumber),
-        JSON.stringify(Array.isArray(studentIds) ? studentIds : []),
-        JSON.stringify(Array.isArray(studentNames) ? studentNames : []),
-        fileName,
-        Number(fileSize || 0)
-      );
-    }
-
-    const saved = id
-      ? db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = ?').get(id)
-      : db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = last_insert_rowid()').get();
-
-    res.json({
-      success: true,
-      data: {
-        id: saved.id,
-        year: saved.year || '',
-        areaId: saved.area_id || '',
-        grade: saved.grade || '',
-        section: saved.section || '',
-        bimester: saved.bimester || '',
-        unitNumber: saved.unit_number || '',
-        sessionNumber: saved.session_number || '',
-        studentId: saved.student_id || '',
-        criteriaId: saved.criteria_id || '',
-        observation: saved.observation || '',
-        studentIds: JSON.parse(saved.student_ids || '[]'),
-        studentNames: JSON.parse(saved.student_names || '[]'),
-        fileName: saved.file_name || path.basename(saved.file_path || ''),
-        fileSize: Number(saved.file_size || 0),
-        fileType: saved.file_type || '',
-        filePath: saved.file_path || '',
-        fileUrl: saved.file_path ? fileUrlFromAbsolutePath(saved.file_path) : '',
-        updatedAt: saved.updated_at
-      }
-    });
-  } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
-  }
-});
-
-app.delete('/api/evaluacion/evidencias/:id', (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) {
-      return res.status(400).json({ success: false, message: 'ID invÃ¡lido' });
-    }
-    const row = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = ?').get(id);
-    if (!row) {
-      return res.json({ success: true, deleted: 0 });
-    }
-    db.prepare('DELETE FROM evaluacion_evidencias WHERE id = ?').run(id);
-    if (row.file_path && fs.existsSync(row.file_path)) {
-      try { fs.unlinkSync(row.file_path); } catch {}
-    }
-    res.json({ success: true, deleted: 1 });
-  } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
-  }
-});
 
 app.get('/api/evaluacion/configuracion', (req, res) => {
   const { year, areaId } = req.query;
@@ -2101,9 +2231,38 @@ app.post('/api/sync/config', async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   }
 });
+app.get('/api/sync/resources/status', (_req, res) => {
+  res.json(getResourceDeliveryStatus());
+});
+app.get('/api/sync/pick-folder', (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(400).json({ success: false, message: 'El selector de carpetas esta disponible en Windows.' });
+  }
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+    "$dialog.Description = 'Selecciona Mi unidad de Google Drive o una carpeta dentro de ella para ARMI Docente'",
+    '$dialog.ShowNewFolderButton = $true',
+    '$result = $dialog.ShowDialog()',
+    'if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
+    '$dialog.Dispose()'
+  ].join('; ');
+  execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    windowsHide: true,
+    encoding: 'utf8',
+  }, (error, stdout) => {
+    if (error) return res.status(500).json({ success: false, message: error.message });
+    const selectedPath = String(stdout || '').trim();
+    if (!selectedPath) return res.json({ success: false, cancelled: true });
+    return res.json({ success: true, path: selectedPath });
+  });
+});
 app.post('/api/sync/push', async (req, res) => {
   try {
-    res.json(await pushToCloud());
+    const evidenceIndex = reconcilePortableEvidenceIndex();
+    const result = await pushToCloud(req.body || {});
+    res.json({ ...result, data: result?.data ? { ...result.data, evidenceIndex } : result?.data });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }
@@ -2124,7 +2283,9 @@ app.post('/api/sync/pending/discard', async (req, res) => {
 });
 app.post('/api/sync/pull', async (req, res) => {
   try {
-    res.json(await pullFromCloud(req.body || {}));
+    const result = await pullFromCloud(req.body || {});
+    const evidenceIndex = result?.success ? reconcilePortableEvidenceIndex() : null;
+    res.json({ ...result, data: result?.data ? { ...result.data, evidenceIndex } : result?.data });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }
@@ -2253,6 +2414,18 @@ app.get('/api/competencias', (req, res) => { const { grado, area } = req.query; 
 app.get('/api/estandares', (req, res) => { const { grado, area } = req.query; try { let rows = db.prepare('SELECT * FROM db_estandares').all(); if (grado) rows = rows.filter(r => superNormalize(r.grado || '').includes(superNormalize(grado))); if (area) rows = rows.filter(r => superNormalize(r.area || '').includes(superNormalize(area)) || superNormalize(r.competencias || '').includes(superNormalize(area))); res.json({ success: true, data: rows }); } catch (e) { res.status(500).json({ success: false }); } });
 app.get('/api/areas', (req, res) => { try { res.json({ success: true, data: db.prepare('SELECT * FROM db_areas').all() }); } catch (e) { res.status(500).json({ success: false }); } });
 
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  console.error(`Error en ${req.method} ${req.path}:`, error);
+  return res.status(500).json({ success: false, message: error?.message || 'Error interno del servidor.' });
+});
+
+app.get('/estudiante-assets/Logo_bar.ico', (_req, res) => res.sendFile(path.join(appRoot, 'src', 'Logo_bar.ico')));
+app.use('/estudiante-assets', express.static(path.join(__dirname, 'public'), { fallthrough: false, maxAge: 0 }));
+app.get(/^\/estudiante(?:\/.*)?$/, (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'student-portal.html'));
+});
+
 // Vite middleware for development
 const isProduction = process.env.NODE_ENV === 'production';
 const useEmbeddedVite = process.env.ARMI_USE_VITE_MIDDLEWARE !== '0';
@@ -2271,9 +2444,22 @@ if (!isProduction && useEmbeddedVite) {
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`âœ… SERVIDOR ACTIVO EN http://0.0.0.0:${PORT}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ SERVIDOR ACTIVO EN http://0.0.0.0:${PORT}`);
+  console.log(`Portal estudiantil protegido en http://0.0.0.0:${STUDENT_PORTAL_PORT}/estudiante para hasta ${STUDENT_PORTAL_MAX_SESSIONS} sesiones activas.`);
 });
+server.maxConnections = STUDENT_PORTAL_MAX_CONNECTIONS;
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+if (STUDENT_PORTAL_PORT !== PORT) {
+  const studentServer = app.listen(STUDENT_PORTAL_PORT, '0.0.0.0');
+  studentServer.maxConnections = STUDENT_PORTAL_MAX_CONNECTIONS;
+  studentServer.keepAliveTimeout = 65_000;
+  studentServer.headersTimeout = 66_000;
+  studentServer.on('error', (error) => {
+    console.error(`No se pudo iniciar el portal estudiantil protegido en el puerto ${STUDENT_PORTAL_PORT}:`, error.message);
+  });
+}
 }
 
 startServer();

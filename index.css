@@ -7,6 +7,18 @@ body {
   overflow-x: hidden;
 }
 
+@keyframes session-missing-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(244, 63, 94, 0.2), 0 0 0 1px #e11d48 inset; }
+  50% { box-shadow: 0 0 0 8px rgba(244, 63, 94, 0.08), 0 0 0 2px #fb7185 inset; }
+}
+
+.session-field-missing {
+  position: relative;
+  z-index: 40;
+  border-radius: 0.85rem;
+  animation: session-missing-pulse 0.9s ease-in-out 3;
+}
+
 .purchase-shell {
   background: #ffffff;
   border-radius: 30px;
@@ -51,6 +63,35 @@ body,
 
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
+}
+
+@keyframes armi-evidence-review-shine {
+  0%, 100% { color: #0f172a; text-shadow: 0 0 0 rgba(16, 185, 129, 0); }
+  45% { color: #047857; text-shadow: 0 0 5px rgba(16, 185, 129, 0.7), 0 0 13px rgba(45, 212, 191, 0.45); }
+}
+
+.armi-evidence-review-pending {
+  animation: armi-evidence-review-shine 1.7s ease-in-out infinite;
+  position: relative;
+}
+
+.armi-evidence-review-pending::after {
+  content: 'NUEVA';
+  display: inline-flex;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: #d1fae5;
+  color: #047857;
+  padding: 2px 5px;
+  font-size: 7px;
+  line-height: 1;
+  letter-spacing: .08em;
+  vertical-align: 1px;
+}
+
+@media print {
+  .armi-evidence-review-pending { animation: none; color: inherit; text-shadow: none; }
+  .armi-evidence-review-pending::after { display: none; }
 }
 
 .btn-3d-plus, .btn-3d-minus, .btn-3d-save, .btn-3d-clear, .btn-3d-orange, .btn-3d-grey, .btn-3d-blue, .btn-3d-purple, .btn-3d-darkgreen {

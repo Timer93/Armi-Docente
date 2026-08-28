@@ -36,6 +36,7 @@ export const INITIAL_GENERAL_DATA: GeneralData = {
   ai_pedagogical_route: '',
   ai_institutional_problems: '',
   ai_unit_pedagogical_focus: '',
+  evidence_storage_path: '',
 
   // Initialize dates as empty strings
   b1_start: '', b1_end: '',

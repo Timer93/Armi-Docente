@@ -136,7 +136,6 @@ export const GeneralNotesOverlay: React.FC<GeneralNotesOverlayProps> = ({ visibl
   const [showTagInput, setShowTagInput] = useState(false);
   const [activeBlockByNote, setActiveBlockByNote] = useState<Record<string, string>>({}); 
   const blockTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
-  const noteCardRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const [board, setBoard] = useState<StickyNotesBoardState>(() => {
     const initial = readStickyNotesBoardState();
@@ -154,51 +153,20 @@ export const GeneralNotesOverlay: React.FC<GeneralNotesOverlayProps> = ({ visibl
   }, [board]);
 
   const resizeAllBlockTextareas = () => {
-    Object.values(blockTextareaRefs.current).forEach((element) => {
-      if (element) autoResizeBlockTextarea(element);
+    const elements = Object.values(blockTextareaRefs.current).filter(Boolean) as HTMLTextAreaElement[];
+    elements.forEach((element) => {
+      element.style.height = 'auto';
+    });
+    const heights = elements.map((element) => Math.max(element.scrollHeight, 24));
+    elements.forEach((element, index) => {
+      element.style.height = `${heights[index]}px`;
     });
   };
 
   useLayoutEffect(() => {
     if (!visible) return;
     resizeAllBlockTextareas();
-  }, [visible, board.notes, notesFilter]);
-
-  useEffect(() => {
-    if (!visible) return;
-
-    resizeAllBlockTextareas();
-    const frameA = window.requestAnimationFrame(() => {
-      resizeAllBlockTextareas();
-      window.requestAnimationFrame(() => {
-        resizeAllBlockTextareas();
-      });
-    });
-    const timeout = window.setTimeout(() => {
-      resizeAllBlockTextareas();
-    }, 120);
-
-    return () => {
-      window.cancelAnimationFrame(frameA);
-      window.clearTimeout(timeout);
-    };
-  }, [visible, board.notes, notesFilter]);
-
-  useEffect(() => {
-    if (!visible || typeof window === 'undefined' || typeof ResizeObserver === 'undefined') return;
-
-    const observer = new ResizeObserver(() => {
-      resizeAllBlockTextareas();
-    });
-
-    Object.values(noteCardRefs.current).forEach((element) => {
-      if (element) observer.observe(element);
-    });
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [visible, board.notes, notesFilter]);
+  }, [visible, notesFilter]);
 
   if (!visible) return null;
 
@@ -602,9 +570,6 @@ export const GeneralNotesOverlay: React.FC<GeneralNotesOverlayProps> = ({ visibl
                   return (
                     <article
                       key={note.id}
-                      ref={(element) => {
-                        noteCardRefs.current[note.id] = element;
-                      }}
                       className="group relative mb-5 break-inside-avoid rounded-[1.55rem] border border-white/80 bg-white p-2.5 shadow-[0_16px_38px_rgba(15,23,42,0.08)] transition hover:-translate-y-1 hover:shadow-[0_22px_55px_rgba(15,23,42,0.14)]"
                       style={{ transform: `rotate(${rotation})` }}
                     >

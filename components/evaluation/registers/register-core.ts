@@ -18,6 +18,63 @@ import type {
 const SESSION_LEVEL_ORDER: Array<Exclude<RegisterLevelCode, 'ne'>> = ['c', 'b', 'a', 'ad'];
 const OVERALL_SCORE_MAP: Record<Exclude<RegisterLevelCode, 'ne'>, number> = { c: 0, b: 1, a: 2, ad: 3 };
 
+const isPredominanceMode = () => (globalThis as any)?.window?.__armiActiveGradingMode === 'criterial_predominance';
+const isHybridMode = () => (globalThis as any)?.window?.__armiActiveGradingMode === 'hybrid_vigesimal';
+
+type ScoredResult = {
+  code: RegisterLevelCode;
+  numericScore: number | null;
+  pending: boolean;
+};
+const normalizeNumericScore = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const score = Number(value);
+  return Number.isFinite(score) && score >= 0 && score <= 20 ? score : null;
+};
+export const numericScoreToRegisterLevel = (score: number): Exclude<RegisterLevelCode, 'ne'> => {
+  if (score >= 18) return 'ad';
+  if (score >= 14) return 'a';
+  if (score >= 11) return 'b';
+  return 'c';
+};
+
+const aggregateResults = (
+  values: Array<{ code?: RegisterLevelCode | ''; numericScore?: number | null; pending?: boolean }>,
+  inactiveCode: RegisterLevelCode | null = null,
+  literalStrategy: 'session' | 'average' = 'average'
+): ScoredResult => {
+  if (inactiveCode) return { code: inactiveCode, numericScore: null, pending: false };
+
+  if (isHybridMode()) {
+    const scores = values.map((value) => normalizeNumericScore(value.numericScore));
+    if (!values.length || values.some((value, index) => value.pending || scores[index] === null)) {
+      return { code: 'ne', numericScore: null, pending: true };
+    }
+    const numericScore = scores.reduce<number>((sum, score) => sum + (score as number), 0) / scores.length;
+    return { code: numericScoreToRegisterLevel(numericScore), numericScore, pending: false };
+  }
+
+  const codes = values.map((value) => value.code || '');
+  const code = literalStrategy === 'session'
+    ? (getSessionMedianLevel(codes) || 'ne')
+    : getAverageLevelFromZeroBasedScale(codes);
+  return { code, numericScore: null, pending: false };
+};
+
+const getPredominantLevel = (codes: Array<RegisterLevelCode | ''>): RegisterLevelCode | '' => {
+  const validCodes = codes.filter((code): code is Exclude<RegisterLevelCode, 'ne'> => SESSION_LEVEL_ORDER.includes(code as Exclude<RegisterLevelCode, 'ne'>));
+  if (!validCodes.length) return '';
+  const counts = validCodes.reduce<Record<string, number>>((result, code) => {
+    result[code] = (result[code] || 0) + 1;
+    return result;
+  }, {});
+  // Ante empate se conserva el nivel menor; evita una promociÃ³n automÃ¡tica
+  // cuando la evidencia no muestra una predominancia real.
+  return SESSION_LEVEL_ORDER.reduce<{ code: Exclude<RegisterLevelCode, 'ne'>; count: number }>((best, code) => (
+    (counts[code] || 0) > best.count ? { code, count: counts[code] || 0 } : best
+  ), { code: 'c', count: -1 }).code;
+};
+
 const getStudentInactiveCode = (student: Student | undefined): RegisterLevelCode | null => {
   const normalizedEstado = normalizeLoose(String(student?.estado || ''));
   if (
@@ -50,6 +107,7 @@ export const normalizeRegisterLevelCode = (rawLevel: any): RegisterLevelCode | '
 };
 
 const getSessionMedianLevel = (codes: Array<RegisterLevelCode | ''>): RegisterLevelCode | '' => {
+  if (isPredominanceMode()) return getPredominantLevel(codes);
   const validCodes = codes.filter((code): code is Exclude<RegisterLevelCode, 'ne'> => SESSION_LEVEL_ORDER.includes(code as Exclude<RegisterLevelCode, 'ne'>));
   if (!validCodes.length) return '';
 
@@ -69,6 +127,7 @@ const getSessionMedianLevel = (codes: Array<RegisterLevelCode | ''>): RegisterLe
 };
 
 const getAverageLevelFromZeroBasedScale = (codes: Array<RegisterLevelCode | ''>): RegisterLevelCode => {
+  if (isPredominanceMode()) return getPredominantLevel(codes) || 'ne';
   const validCodes = codes.filter((code): code is Exclude<RegisterLevelCode, 'ne'> => SESSION_LEVEL_ORDER.includes(code as Exclude<RegisterLevelCode, 'ne'>));
   if (!validCodes.length) return 'ne';
 
@@ -83,25 +142,28 @@ const buildCompetenciesFromCapacities = (
   capacities: RegisterCapacityResult[],
   inactiveCode: RegisterLevelCode | null
 ): RegisterCompetencyResult[] => {
-  const competencyBuckets = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; codes: RegisterLevelCode[] }>();
+  const competencyBuckets = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; values: RegisterCapacityResult[] }>();
 
   capacities.forEach((capacity) => {
     if (!competencyBuckets.has(capacity.key.split('::').slice(0, 2).join('::'))) {
       competencyBuckets.set(capacity.key.split('::').slice(0, 2).join('::'), {
         source: capacity.source,
         competencyName: capacity.competencyName,
-        codes: []
+        values: []
       });
     }
-    competencyBuckets.get(capacity.key.split('::').slice(0, 2).join('::'))!.codes.push(capacity.code);
+    competencyBuckets.get(capacity.key.split('::').slice(0, 2).join('::'))!.values.push(capacity);
   });
 
-  return Array.from(competencyBuckets.entries()).map(([key, bucket]) => ({
-    key,
-    source: bucket.source,
-    competencyName: bucket.competencyName,
-    code: inactiveCode || getAverageLevelFromZeroBasedScale(bucket.codes)
-  }));
+  return Array.from(competencyBuckets.entries()).map(([key, bucket]) => {
+    const result = aggregateResults(bucket.values, inactiveCode, 'average');
+    return {
+      key,
+      source: bucket.source,
+      competencyName: bucket.competencyName,
+      ...result
+    };
+  });
 };
 
 const getRecordMap = (records: EvaluationRecordRow[]) => {
@@ -163,7 +225,7 @@ const sanitizeSessionAssessmentRows = (rows: any[], sessionData: any) => {
     const groupKey = `${source}::${normalizeLoose(competencyName)}::${normalizeLoose(capacityName)}`;
     const groupedIndexes = groupedRows.get(groupKey) || [];
     const currentIndex = groupedIndexes.indexOf(sourceRows.indexOf(row));
-    const looksCombined = /[.;•·]\s+/.test(capacityName) || extractCapacidades(capacityName).length > 1;
+    const looksCombined = /[.;â€¢Â·]\s+/.test(capacityName) || extractCapacidades(capacityName).length > 1;
     const sequentialExpected = groupedIndexes.length > 1 && groupedIndexes.length <= expectedCapacities.length
       && looksCombined
       ? expectedCapacities
@@ -192,13 +254,13 @@ const getSessionRows = (session: SessionDetailEntry) => {
   return sanitizeSessionAssessmentRows(Array.isArray(model?.rows) ? model.rows : [], session?.sessionData || {});
 };
 
-const getSessionRecordLevelCode = (
+const getSessionRecord = (
   recordMap: Map<string, EvaluationRecordRow>,
   studentId: string | number,
   session: SessionDetailEntry,
   row: any,
   rowIndex: number
-): RegisterLevelCode | '' => {
+): EvaluationRecordRow | undefined => {
   const keysToTry = [
     String(row?.id || '').trim(),
     String(rowIndex + 1),
@@ -207,11 +269,10 @@ const getSessionRecordLevelCode = (
 
   for (const criteriaId of keysToTry) {
     const stored = recordMap.get(`${String(studentId)}::${session.id}::${criteriaId}`);
-    const code = normalizeRegisterLevelCode(stored?.level);
-    if (code) return code;
+    if (stored) return stored;
   }
 
-  return '';
+  return undefined;
 };
 
 export const buildSessionRegisterSnapshots = ({ sessions, students, records }: RegisterSourceBundle): SessionRegisterSnapshot[] => {
@@ -249,42 +310,34 @@ export const buildSessionRegisterSnapshots = ({ sessions, students, records }: R
     const studentSnapshots: SessionStudentSnapshot[] = students.map((student) => {
       const inactiveCode = getStudentInactiveCode(student);
 
-      const competencies: RegisterCompetencyResult[] = Array.from(competencyBuckets.entries()).map(([key, bucket]) => {
-        const code = inactiveCode || getSessionMedianLevel(
-          bucket.rowIds.map((rowId) => {
-            const rowIndex = rows.findIndex((currentRow: any) => String(currentRow?.id || '').trim() === rowId);
-            return rowIndex >= 0
-              ? getSessionRecordLevelCode(recordMap, student.id, session, rows[rowIndex], rowIndex)
-              : '';
-          })
-        ) || 'ne';
-
-        return {
-          key,
-          source: bucket.source,
-          competencyName: bucket.competencyName,
-          code
-        };
-      });
+      const getBucketResult = (rowIds: string[]) => aggregateResults(
+        rowIds.map((rowId) => {
+          const rowIndex = rows.findIndex((currentRow: any) => String(currentRow?.id || '').trim() === rowId);
+          const record = rowIndex >= 0
+            ? getSessionRecord(recordMap, student.id, session, rows[rowIndex], rowIndex)
+            : undefined;
+          return {
+            code: normalizeRegisterLevelCode(record?.level),
+            numericScore: normalizeNumericScore(record?.numeric_score),
+            pending: !record
+          };
+        }),
+        inactiveCode,
+        'session'
+      );
 
       const capacities: RegisterCapacityResult[] = Array.from(capacityBuckets.entries()).map(([key, bucket]) => {
-        const code = inactiveCode || getSessionMedianLevel(
-          bucket.rowIds.map((rowId) => {
-            const rowIndex = rows.findIndex((currentRow: any) => String(currentRow?.id || '').trim() === rowId);
-            return rowIndex >= 0
-              ? getSessionRecordLevelCode(recordMap, student.id, session, rows[rowIndex], rowIndex)
-              : '';
-          })
-        ) || 'ne';
+        const result = getBucketResult(bucket.rowIds);
 
         return {
           key,
           source: bucket.source,
           competencyName: bucket.competencyName,
           capacityName: bucket.capacityName,
-          code
+          ...result
         };
       });
+      const competencies = buildCompetenciesFromCapacities(capacities, inactiveCode);
 
       return {
         studentId: String(student.id),
@@ -346,53 +399,35 @@ const buildUnitSnapshotsFromSessionSnapshots = (
           .map((snapshot) => snapshot.students.find((entry) => entry.studentId === String(student.id)))
           .filter(Boolean) as SessionStudentSnapshot[];
 
-        const competencyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; codes: RegisterLevelCode[] }>();
-        const capacityMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; capacityName: string; codes: RegisterLevelCode[] }>();
+        const capacityMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; capacityName: string; values: RegisterCapacityResult[] }>();
 
         sessionRows.forEach((row) => {
-          row.competencies.forEach((competency) => {
-            if (!competencyMap.has(competency.key)) {
-              competencyMap.set(competency.key, {
-                source: competency.source,
-                competencyName: competency.competencyName,
-                codes: []
-              });
-            }
-            competencyMap.get(competency.key)!.codes.push(competency.code);
-          });
-
           row.capacities.forEach((capacity) => {
             if (!capacityMap.has(capacity.key)) {
               capacityMap.set(capacity.key, {
                 source: capacity.source,
                 competencyName: capacity.competencyName,
                 capacityName: capacity.capacityName,
-                codes: []
+                values: []
               });
             }
-            capacityMap.get(capacity.key)!.codes.push(capacity.code);
+            capacityMap.get(capacity.key)!.values.push(capacity);
           });
         });
 
+        const inactiveCode = getStudentInactiveCode(student);
+        const capacities: RegisterCapacityResult[] = Array.from(capacityMap.entries()).map(([key, item]) => ({
+          key,
+          source: item.source,
+          competencyName: item.competencyName,
+          capacityName: item.capacityName,
+          ...aggregateResults(item.values, inactiveCode, 'average')
+        }));
+
         return {
           studentId: String(student.id),
-          capacities: Array.from(capacityMap.entries()).map(([key, item]) => ({
-            key,
-            source: item.source,
-            competencyName: item.competencyName,
-            capacityName: item.capacityName,
-            code: getAverageLevelFromZeroBasedScale(item.codes)
-          })),
-          competencies: buildCompetenciesFromCapacities(
-            Array.from(capacityMap.entries()).map(([key, item]) => ({
-              key,
-              source: item.source,
-              competencyName: item.competencyName,
-              capacityName: item.capacityName,
-              code: getAverageLevelFromZeroBasedScale(item.codes)
-            })),
-            null
-          )
+          capacities,
+          competencies: buildCompetenciesFromCapacities(capacities, inactiveCode)
         };
       });
 
@@ -412,31 +447,19 @@ export const buildUnitRegisterAggregation = ({ sessions, students, records }: Re
     const inactiveCode = getStudentInactiveCode(student);
     const sessionRows = sessionSnapshots.map((snapshot) => snapshot.students.find((entry) => entry.studentId === String(student.id))).filter(Boolean) as SessionStudentSnapshot[];
 
-    const competencyKeyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; codes: RegisterLevelCode[] }>();
-    const capacityKeyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; capacityName: string; codes: RegisterLevelCode[] }>();
+    const capacityKeyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; capacityName: string; values: RegisterCapacityResult[] }>();
 
     sessionRows.forEach((sessionRow) => {
-      sessionRow.competencies.forEach((competency) => {
-        if (!competencyKeyMap.has(competency.key)) {
-          competencyKeyMap.set(competency.key, {
-            source: competency.source,
-            competencyName: competency.competencyName,
-            codes: []
-          });
-        }
-        competencyKeyMap.get(competency.key)!.codes.push(competency.code);
-      });
-
       sessionRow.capacities.forEach((capacity) => {
         if (!capacityKeyMap.has(capacity.key)) {
           capacityKeyMap.set(capacity.key, {
             source: capacity.source,
             competencyName: capacity.competencyName,
             capacityName: capacity.capacityName,
-            codes: []
+            values: []
           });
         }
-        capacityKeyMap.get(capacity.key)!.codes.push(capacity.code);
+        capacityKeyMap.get(capacity.key)!.values.push(capacity);
       });
     });
 
@@ -445,21 +468,24 @@ export const buildUnitRegisterAggregation = ({ sessions, students, records }: Re
       source: bucket.source,
       competencyName: bucket.competencyName,
       capacityName: bucket.capacityName,
-      code: inactiveCode || getAverageLevelFromZeroBasedScale(bucket.codes)
+      ...aggregateResults(bucket.values, inactiveCode, 'average')
     }));
 
     const competencies = buildCompetenciesFromCapacities(capacities, inactiveCode);
 
-    const primaryCompetencyCodes = competencies
-      .filter((item) => item.source === 'primary')
-      .map((item) => item.code);
-    const overallCode = inactiveCode || getAverageLevelFromZeroBasedScale(primaryCompetencyCodes);
+    const overallResult = aggregateResults(
+      competencies.filter((item) => item.source === 'primary'),
+      inactiveCode,
+      'average'
+    );
 
     return {
       studentId: String(student.id),
       studentName: String(student.name || '').trim(),
       estado: student.estado,
-      overallCode,
+      overallCode: overallResult.code,
+      overallNumericScore: overallResult.numericScore,
+      pending: overallResult.pending,
       competencies: competencies.sort((left, right) => left.competencyName.localeCompare(right.competencyName, 'es')),
       capacities: capacities.sort((left, right) => left.capacityName.localeCompare(right.capacityName, 'es'))
     };
@@ -490,22 +516,37 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
   const aggregatedStudents: AggregatedStudentRegister[] = students.map((student) => {
     const inactiveCode = getStudentInactiveCode(student);
 
-    const capacityKeyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; capacityName: string; codes: RegisterLevelCode[] }>();
+    // El bimestre consolida primero cada unidad y reciÃ©n despuÃ©s combina las
+    // unidades con el mismo peso. AsÃ­ una unidad con mÃ¡s sesiones no domina a
+    // otra por tener mÃ¡s registros.
+    const capacityKeyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; capacityName: string; values: RegisterCapacityResult[] }>();
+    const competencyKeyMap = new Map<string, { source: 'primary' | 'transversal'; competencyName: string; values: RegisterCompetencyResult[] }>();
 
-    sessionSnapshots.forEach((sessionSnapshot) => {
-      const sessionStudent = sessionSnapshot.students.find((entry) => entry.studentId === String(student.id));
-      if (!sessionStudent) return;
+    unitAggregations.forEach((unitAggregation) => {
+      const unitStudent = unitAggregation.students.find((entry) => entry.studentId === String(student.id));
+      if (!unitStudent) return;
 
-      sessionStudent.capacities.forEach((capacity) => {
+      unitStudent.capacities.forEach((capacity) => {
         if (!capacityKeyMap.has(capacity.key)) {
           capacityKeyMap.set(capacity.key, {
             source: capacity.source,
             competencyName: capacity.competencyName,
             capacityName: capacity.capacityName,
-            codes: []
+            values: []
           });
         }
-        capacityKeyMap.get(capacity.key)!.codes.push(capacity.code);
+        capacityKeyMap.get(capacity.key)!.values.push(capacity);
+      });
+
+      unitStudent.competencies.forEach((competency) => {
+        if (!competencyKeyMap.has(competency.key)) {
+          competencyKeyMap.set(competency.key, {
+            source: competency.source,
+            competencyName: competency.competencyName,
+            values: []
+          });
+        }
+        competencyKeyMap.get(competency.key)!.values.push(competency);
       });
     });
 
@@ -514,21 +555,29 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
       source: bucket.source,
       competencyName: bucket.competencyName,
       capacityName: bucket.capacityName,
-      code: inactiveCode || getAverageLevelFromZeroBasedScale(bucket.codes)
+      ...aggregateResults(bucket.values, inactiveCode, 'average')
     }));
 
-    const competencies = buildCompetenciesFromCapacities(capacities, inactiveCode);
+    const competencies = Array.from(competencyKeyMap.entries()).map(([key, bucket]) => ({
+      key,
+      source: bucket.source,
+      competencyName: bucket.competencyName,
+      ...aggregateResults(bucket.values, inactiveCode, 'average')
+    }));
 
-    const primaryCompetencyCodes = competencies
-      .filter((item) => item.source === 'primary')
-      .map((item) => item.code);
-    const overallCode = inactiveCode || getAverageLevelFromZeroBasedScale(primaryCompetencyCodes);
+    const overallResult = aggregateResults(
+      competencies.filter((item) => item.source === 'primary'),
+      inactiveCode,
+      'average'
+    );
 
     return {
       studentId: String(student.id),
       studentName: String(student.name || '').trim(),
       estado: student.estado,
-      overallCode,
+      overallCode: overallResult.code,
+      overallNumericScore: overallResult.numericScore,
+      pending: overallResult.pending,
       competencies: competencies.sort((left, right) => left.competencyName.localeCompare(right.competencyName, 'es')),
       capacities: capacities.sort((left, right) => left.capacityName.localeCompare(right.capacityName, 'es'))
     };
