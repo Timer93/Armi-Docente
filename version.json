@@ -1,6 +1,6 @@
 {
-  "version": "11.2.2",
-  "releaseName": "Armi Docente 11.2.2",
+  "version": "11.2.5",
+  "releaseName": "Armi Docente 11.2.5",
   "publishedAt": "2026-08-28",
   "assetName": "ARMI_DOCENTE_Setup.exe",
   "downloadUrl": "https://github.com/Timer93/Armi-Docente/releases/download/Armi_Docente_2026/ARMI_DOCENTE_Setup.exe",
@@ -14,8 +14,8 @@
   ],
   "history": [
     {
-      "version": "11.2.2",
-      "releaseName": "Armi Docente 11.2.2",
+      "version": "11.2.5",
+      "releaseName": "Armi Docente 11.2.5",
       "publishedAt": "2026-08-28",
       "changelog": [
         "Subida de evidencias por streaming temporal y compresión WebP eficiente.",
