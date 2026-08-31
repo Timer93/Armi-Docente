@@ -1,7 +1,6 @@
 <div align="center">
   <img
-    width="1200"
-    height="475"
+    width="600"
     alt="GHBanner"
     src="https://drive.google.com/uc?export=view&id=1gIUL2sunSAjwzAhh54hzYAkT3T6TRw-p"
   />
