@@ -6,11 +6,10 @@
   />
 </div>
 
-# Ejecuta e implementa tu aplicación de AI Studio
+# ARMI DOCENTE
 
 Esto contiene todo lo necesario para ejecutar tu aplicación localmente.
-
-Visualiza tu app en AI Studio: https://ai.studio/apps/drive/1AEweDx5ZnJrswEH3srppr8gY6tsPc9Ai
+Para usarlo usar Visual Studio code e inatalar todas las dependecias necesarias.
 
 ## Ejecutar localmente
 
