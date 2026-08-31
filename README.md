@@ -1,5 +1,10 @@
 <div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://drive.google.com/file/d/1gIUL2sunSAjwzAhh54hzYAkT3T6TRw-p/view?usp=drive_link" />
+  <img
+    width="1200"
+    height="475"
+    alt="GHBanner"
+    src="https://drive.google.com/uc?export=view&id=1gIUL2sunSAjwzAhh54hzYAkT3T6TRw-p"
+  />
 </div>
 
 # Ejecuta e implementa tu aplicación de AI Studio
