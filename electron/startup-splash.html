@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ARMI Docente</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+      body {
+        display: grid;
+        place-items: center;
+        color: #f8fafc;
+        font-family: "Segoe UI", Arial, sans-serif;
+        user-select: none;
+      }
+      .shell { width: 100%; padding: 34px; text-align: center; }
+      .media-wrap {
+        width: 210px;
+        height: 210px;
+        margin: 0 auto 16px;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+      }
+      .media {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        filter: drop-shadow(0 5px 8px rgba(0,0,0,.72));
+      }
+      img.media { animation: float 3.2s ease-in-out infinite; }
+      .fallback-logo {
+        width: 126px;
+        height: 126px;
+        display: none;
+        place-items: center;
+        border-radius: 38px;
+        color: white;
+        font-size: 74px;
+        font-weight: 900;
+        background: linear-gradient(145deg, #22d3ee, #7c3aed);
+        box-shadow: 0 20px 55px rgba(34,211,238,.25);
+        animation: float 3.2s ease-in-out infinite;
+      }
+      .brand {
+        color: #67e8f9;
+        font-size: 13px;
+        font-weight: 900;
+        letter-spacing: .32em;
+        text-transform: uppercase;
+        text-shadow: 0 2px 3px #000, 0 0 9px rgba(0,0,0,.95);
+        -webkit-text-stroke: .25px rgba(0,0,0,.72);
+      }
+      h1 {
+        margin: 10px 0 7px;
+        color: #fff;
+        font-size: 25px;
+        letter-spacing: -.02em;
+        text-shadow: 0 2px 3px #000, 0 0 12px rgba(0,0,0,.98);
+        -webkit-text-stroke: .35px rgba(0,0,0,.8);
+      }
+      p {
+        margin: 0;
+        color: #f1f5f9;
+        font-size: 13px;
+        font-weight: 700;
+        text-shadow: 0 2px 3px #000, 0 0 10px rgba(0,0,0,.98);
+        -webkit-text-stroke: .2px rgba(0,0,0,.72);
+      }
+      .progress {
+        width: 238px;
+        height: 5px;
+        margin: 22px auto 0;
+        border-radius: 99px;
+        overflow: hidden;
+        background: rgba(15,23,42,.68);
+        box-shadow: 0 0 0 1px rgba(255,255,255,.42), 0 2px 7px rgba(0,0,0,.72);
+      }
+      .progress::after {
+        content: "";
+        display: block;
+        width: 42%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #22d3ee, #8b5cf6, #fff);
+        animation: loading 1.25s ease-in-out infinite;
+      }
+      @keyframes loading { from { transform: translateX(-120%); } to { transform: translateX(340%); } }
+      @keyframes float { 0%,100% { transform: translateY(0) scale(.98); } 50% { transform: translateY(-7px) scale(1); } }
+      @media (prefers-reduced-motion: reduce) {
+        img.media, .fallback-logo, .progress::after { animation: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <div class="media-wrap">
+        <img id="startup-image" class="media" alt="ARMI Docente" hidden />
+        <video id="startup-video" class="media" autoplay muted playsinline preload="auto" hidden></video>
+        <div id="fallback-logo" class="fallback-logo" aria-label="ARMI Docente">A</div>
+      </div>
+      <div class="brand">ARMI Docente</div>
+      <h1>Preparando tu espacio de trabajo</h1>
+      <p>Un momento, estamos dejando todo listo.</p>
+      <div class="progress" aria-hidden="true"></div>
+    </main>
+    <script>
+      (() => {
+        const params = new URLSearchParams(window.location.search);
+        const media = params.get('media') || '';
+        const mediaType = params.get('mediaType') || 'fallback';
+        const maxSeconds = Math.max(1, Math.min(12, Number(params.get('maxSeconds')) || 12));
+        const image = document.getElementById('startup-image');
+        const video = document.getElementById('startup-video');
+        const fallback = document.getElementById('fallback-logo');
+
+        const showFallback = () => {
+          image.hidden = true;
+          video.hidden = true;
+          fallback.style.display = 'grid';
+        };
+
+        if (!media) {
+          showFallback();
+          return;
+        }
+
+        if (mediaType === 'video') {
+          video.hidden = false;
+          video.src = media;
+          video.addEventListener('error', showFallback, { once: true });
+          video.addEventListener('timeupdate', () => {
+            if (video.currentTime >= maxSeconds) {
+              video.currentTime = 0;
+              video.play().catch(() => {});
+            }
+          });
+          video.addEventListener('ended', () => {
+            video.currentTime = 0;
+            video.play().catch(() => {});
+          });
+          video.play().catch(() => {});
+          return;
+        }
+
+        image.hidden = false;
+        image.addEventListener('error', showFallback, { once: true });
+        image.src = media;
+      })();
+    </script>
+  </body>
+</html>

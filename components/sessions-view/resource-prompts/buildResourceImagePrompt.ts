@@ -25,31 +25,24 @@ CABECERA SUPERIOR — aproximadamente 15 % del espacio:
 
 CUERPO PRINCIPAL — aproximadamente 75 % del espacio:
 Debe estar dedicado principalmente a ENSEÑAR EL CAMPO TEMÁTICO de la sesión.
-
 NO conviertas esta zona en información administrativa.
-
 Explica el aprendizaje siguiendo una progresión pedagógica:
 
 1. CONCEPTO CENTRAL
-   Explica qué es el contenido principal que se aprenderá.
-
+   Explica a detalle el/los concepto/s del contenido principal que se aprenderá.
 2. ¿PARA QUÉ SIRVE?
-   Explica brevemente su utilidad dentro del proyecto de emprendimiento.
-
+   Explica brevemente su utilidad.
 3. PROCEDIMIENTO O TÉCNICA
-   Muestra visualmente los pasos necesarios para aplicarlo.
-
+   Muestra visualmente los pasos necesarios para aplicarlo/s.
 4. TÉCNICAS, ELEMENTOS O RECURSOS
    Presenta aquello que el estudiante realmente debe conocer y utilizar.
-
 5. EJEMPLO SIMPLE Y CONTEXTUALIZADO
-   Incluye un ejemplo breve relacionado con una idea de negocio o producto de bajo costo.
-
+   Incluye un ejemplo breve relacionado a los productos de la sesión.
 6. RECOMENDACIONES O ERRORES FRECUENTES
    Incluye solo aquellos que ayuden al estudiante a aplicar correctamente el aprendizaje.
 
 Adapta automáticamente esta estructura al campo temático real.
-Por ejemplo, si corresponde a Design Thinking y Prototipar:
+Nota:Si el area es Educación Para el Trabajo, por ejemplo, si corresponde a Design Thinking, fase Prototipar:
 - qué es prototipar;
 - para qué sirve;
 - tipos o técnicas de prototipado pertinentes;
@@ -57,12 +50,7 @@ Por ejemplo, si corresponde a Design Thinking y Prototipar:
 - pasos para elaborar el prototipo;
 - ejemplo sencillo;
 - recomendaciones.
-
-Si también corresponde Idear:
-- explica brevemente qué es Idear;
-- generación de alternativas;
-- selección de idea mediante el instrumento indicado;
-- conexión visual Idear → Prototipar.
+Lo mismo con otra fase. Esto segun el area, grado y contenido de la sesión pues cada area tiene sus propias características y contenidos.
 
 CIERRE — aproximadamente 10 %:
 Incluye una síntesis, idea clave, resultado esperado o recordatorio útil.
@@ -84,7 +72,7 @@ CABECERA SUPERIOR — aproximadamente 15 %:
 - En la esquina superior izquierda o cinta destacada escribe exactamente:
   "ANEXO N.° 1"
 - Al lado coloca "Sesión X/X".
-- Incluye de manera compacta área, grado y título relacionado con la sesión.
+- Incluye de manera compacta área, grado, sección y título relacionado con la sesión.
 - NO presentes una gran cantidad de datos curriculares.
 
 CUERPO PRINCIPAL — aproximadamente 75 %:
@@ -99,13 +87,13 @@ Si el tipo es YOUTUBE o VIDEO:
   "ANTES DE VER",
   "DURANTE EL VIDEO",
   "DESPUÉS DE VER";
-- finaliza con una "PREGUNTA PUENTE" que conduzca al aprendizaje central.
+- finaliza con una "PREGUNTA PUENTE" que conduzca al aprendizaje central de la sesión.
 
 IMPORTANTE:
-NO inventes URL.
+NO inventes URL, la URL debe ser real.
 NO inventes código QR.
-NO inventes nombre de canal.
-NO inventes datos técnicos del video.
+NO inventes nombre de canal, el canal debe ser real y existir.
+NO inventes datos técnicos del video, estos deben ser reales.
 
 Si existe metadata.searchQuery, puede aparecer al pie como:
 "Búsqueda sugerida:"
@@ -131,34 +119,29 @@ CABECERA SUPERIOR — aproximadamente 15 %:
 - Al lado coloca "Sesión X/X".
 - Incluye título breve, área, grado y sección.
 - Agrega campos pequeños como:
-  Nombre/Equipo: __________
-  Fecha: __________
+  Nombre: _________________________ Equipo: ____  Fecha: __/__/____
 cuando sean útiles.
 
 CUERPO PRINCIPAL — aproximadamente 80 %:
-Debe estar destinado principalmente al TRABAJO DEL ESTUDIANTE.
+Debe estar destinado principalmente al TRABAJO DEL ESTUDIANTE o mejor dicho las EVIDENCIAS A PRESENTAR para la presente sesión.
 
 Organiza el recurso como una secuencia de producción:
 
 1. RETO O SITUACIÓN
    Explica en pocas líneas qué debe resolver o producir.
-
 2. CONSIGNA
-   Indica exactamente qué debe hacer.
-
+   Indica exactamente qué debe hacer el estudiante.
 3. PROCESO DE TRABAJO
    Presenta pasos numerados y concretos.
-
 4. ESPACIOS PARA PRODUCIR LA EVIDENCIA
-   Según la sesión incluye tablas, cuadros, líneas, casillas,
+   Según las evidencias que deben presentar en esta sesión incluye tablas, cuadros, líneas, casillas,
    organizadores o zonas de dibujo reales y suficientemente grandes.
-
+   Debe ser claro lo que el estudiante debe hacer y producir en cada espacio.
+   Cada evidencia debe estar numerada y tener su propio espacio de trabajo, no mezcles evidencias en un mismo cuadro.
 5. PRODUCTO ENTREGABLE
-   Indica claramente qué debe presentar.
-
+   Indica claramente qué debe presentar en pocas lineas de texto viñetado según lo que se indica en la evidenciade esta sesión.
 6. CRITERIOS CLAVE
-   Incluye criterios breves que permitan verificar el trabajo.
-
+   Incluye criterios breves que permitan al estudiante evaluar su trabajo.
 7. AUTOEVALUACIÓN
    Incluye una sección pequeña de comprobación o reflexión.
 
@@ -167,12 +150,12 @@ NO rellenes las respuestas que corresponden al estudiante.
 Los cuadros deben tener espacio real para completar.
 No conviertas esta ficha en una infografía expositiva.
 
-Si la evidencia incluye:
+Solo la evidencia incluye:
 - cuadro de recursos;
 - cronograma o Gantt;
 - plan de contingencia;
-
 deben existir espacios o tablas concretas para que el estudiante los complete.
+No debes agregar contenido adicional que no corresponda a las evidencias de la sesión.
 `;
 };
 
@@ -238,7 +221,7 @@ El texto "${resourceName}" DEBE aparecer dentro de la imagen,
 preferentemente en la esquina superior izquierda,
 con tamaño grande y alta jerarquía visual.
 
-Debe poder reconocerse qué recurso es con solo mirar la cabecera.
+Debe poder reconocerse qué recurso es, el grado y sección con solo mirar la cabecera.
 
 IDIOMA:
 Español.
@@ -260,6 +243,7 @@ DISTRIBUCIÓN:
 - Utiliza la mayor parte de la imagen para el aprendizaje o trabajo del estudiante.
 - No desperdicies espacio con ilustraciones decorativas gigantes.
 - Las ilustraciones deben apoyar directamente la comprensión.
+- Incluye un texto muy pequeño al final de la parte inferior de la pagina que diga: "Generado por Armi Docente - ARMAR 369 EIRL Todos los derechos reservados." y nada más.
 
 DISEÑO:
 - Material pedagógico editorial moderno para secundaria.
@@ -303,7 +287,6 @@ Verifica mentalmente:
 3. ¿La mayor parte del espacio corresponde al aprendizaje o actividad?
 4. ¿Solo existe un recurso dentro del lienzo?
 5. ¿La salida contiene exactamente una imagen?
-
 Si cualquiera de las respuestas es NO, corrige la composición antes de generar.
 
 GENERA AHORA ÚNICAMENTE "${resourceName}".

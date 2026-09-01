@@ -1029,10 +1029,10 @@ const buildSessionAssessmentRowsFromData = (data: any): SessionAssessmentCriteri
             const competencyName = String(item?.comp || '').trim();
             const capacityText = String(item?.cap || '').trim();
             const capacities = extractCapacidades(capacityText);
-            const criteriaFromEvidence = extractRichTextItems(String(item?.evidence || ''));
-            const criteria = criteriaFromEvidence.length > 0
-                ? criteriaFromEvidence
-                : extractRichTextItems(String(item?.des || ''));
+            // En competencias transversales `des` contiene los criterios de evaluación
+            // y `evidence` contiene las evidencias de aprendizaje. Nunca deben
+            // intercambiarse: la evidencia describe el producto, no lo que se evalúa.
+            const criteria = extractRichTextItems(String(item?.des || ''));
 
             if (!competencyName && capacities.length === 0 && criteria.length === 0) return [];
 
@@ -1082,9 +1082,44 @@ const buildSessionAssessmentModel = (data: any, meta: any = {}): SessionAssessme
 
 const ensureSessionAssessmentModel = (data: any, meta: any = {}) => {
     const base = data && typeof data === 'object' ? data : {};
+    const sessionAssessmentModel = buildSessionAssessmentModel(base, meta);
+    const instrumentRows = Array.isArray(base?.instrumento) ? base.instrumento : [];
+    const canonicalRows = Array.isArray(sessionAssessmentModel?.rows) ? sessionAssessmentModel.rows : [];
+    const canonicalTransversalRows = canonicalRows.filter(
+        (row: any) => String(row?.source || '').trim() === 'transversal'
+    );
+    const evaluatesByCapacity = String(base?.rubricaRowMode || '').trim() === 'capacity';
+    let transversalIndex = 0;
+
+    // Repara sesiones creadas antes de corregir el mapeo. Solo sustituye la etiqueta
+    // transversal equivocada; conserva IDs y descriptores C/B/A/AD ya generados.
+    const repairedInstrumentRows = evaluatesByCapacity
+        ? instrumentRows
+        : instrumentRows.map((row: any, index: number) => {
+            const indexedCanonical = canonicalRows[index];
+            const rowIsTransversal = String(row?.source || '').trim() === 'transversal'
+                || String(indexedCanonical?.source || '').trim() === 'transversal';
+            if (!rowIsTransversal) return row;
+            const canonical = String(indexedCanonical?.source || '').trim() === 'transversal'
+                ? indexedCanonical
+                : canonicalTransversalRows[transversalIndex];
+            transversalIndex += 1;
+            const criterionText = String(canonical?.criterionText || '').trim();
+            if (!criterionText) return row;
+            return {
+                ...row,
+                competencia: String(canonical?.competencyName || row?.competencia || '').trim(),
+                capacidad: String(canonical?.capacityName || row?.capacidad || '').trim(),
+                criterio: criterionText,
+                source: 'transversal',
+                rowColor: String(row?.rowColor || canonical?.rowColor || '').trim()
+            };
+        });
+
     return {
         ...base,
-        sessionAssessmentModel: buildSessionAssessmentModel(base, meta)
+        instrumento: repairedInstrumentRows,
+        sessionAssessmentModel
     };
 };
 

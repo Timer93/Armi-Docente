@@ -12,6 +12,7 @@ declare global {
       installDownloadedUpdate?: () => Promise<any>;
     };
     armiApp?: {
+      notifyStartupReady?: () => void;
       onBeforeQuitAttempt?: (callback: () => void | Promise<void>) => (() => void) | void;
       continueQuit?: () => Promise<any>;
       cancelQuit?: () => Promise<any>;

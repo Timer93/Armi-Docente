@@ -15,6 +15,7 @@ const requiresSymlinkPrivilege = process.platform === 'win32' && packageJson?.bu
 const stages = [
   { label: 'Cerrando procesos de desarrollo ARMI', command: npmCmd, args: ['run', 'dev:stop'] },
   { label: 'Preparando icono Windows', command: npmCmd, args: ['run', 'prepare:win-icon'] },
+  { label: 'Preparando Cloudflare Quick Tunnel', command: npmCmd, args: ['run', 'prepare:cloudflared'] },
   {
     label: 'Recompilando better-sqlite3 para Electron',
     command: npmCmd,

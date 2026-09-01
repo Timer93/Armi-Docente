@@ -124,14 +124,49 @@ const formatSyncDate = (value?: string | null) => {
 const formatSyncEntitySummary = (manifest?: SyncManifestLike) => {
   const entities = manifest?.summary?.entities;
   if (!entities) return 'Sin resumen';
-  return [
+  const summary = [
     `${entities.programaciones || 0} prog.`,
     `${entities.unidades || 0} unid.`,
     `${entities.sesiones || 0} ses.`,
     `${entities.estudiantes || 0} est.`,
     `${entities.asistencias || 0} asist.`,
     `${entities.rostros || 0} rostros`,
-  ].join(' · ');
+  ];
+  if (entities.evidencias !== undefined) summary.push(`${entities.evidencias || 0} evid.`);
+  return summary.join(' · ');
+};
+
+const getDivergedCopyRecommendation = (localManifest?: SyncManifestLike, mirrorManifest?: SyncManifestLike) => {
+  const local = localManifest?.summary?.entities;
+  const mirror = mirrorManifest?.summary?.entities;
+  if (!local || !mirror) return { direction: 'unknown' as const, advantages: [] as string[] };
+
+  const fields = [
+    ['programaciones', 'programaciones'],
+    ['unidades', 'unidades'],
+    ['sesiones', 'sesiones'],
+    ['estudiantes', 'estudiantes'],
+    ['asistencias', 'asistencias'],
+    ['evaluaciones', 'evaluaciones'],
+    ['evidencias', 'evidencias'],
+    ['rostros', 'rostros'],
+  ] as const;
+  const localAdvantages: string[] = [];
+  const mirrorAdvantages: string[] = [];
+  fields.forEach(([key, label]) => {
+    const localValue = Number(local[key] || 0);
+    const mirrorValue = Number(mirror[key] || 0);
+    if (localValue > mirrorValue) localAdvantages.push(`${localValue - mirrorValue} ${label} más`);
+    if (mirrorValue > localValue) mirrorAdvantages.push(`${mirrorValue - localValue} ${label} más`);
+  });
+
+  if (localAdvantages.length && !mirrorAdvantages.length) {
+    return { direction: 'local' as const, advantages: localAdvantages };
+  }
+  if (mirrorAdvantages.length && !localAdvantages.length) {
+    return { direction: 'mirror' as const, advantages: mirrorAdvantages };
+  }
+  return { direction: 'mixed' as const, advantages: [...localAdvantages, ...mirrorAdvantages] };
 };
 
 const formatPendingCountSummary = (counts?: Record<string, number> | null) => {
@@ -263,6 +298,13 @@ export const SyncLifecycleManager: React.FC = () => {
     () => hasOnlyFrontendStateDifference(status?.localManifest, status?.mirrorManifest),
     [status]
   );
+  const divergedRecommendation = useMemo(
+    () => getDivergedCopyRecommendation(status?.localManifest, status?.mirrorManifest),
+    [status]
+  );
+  const pendingNeedsProtectedLocalRecovery = restorePromptReason === 'pending-local'
+    && status?.pendingLocal?.reason === 'mirror-changed-on-another-pc'
+    && divergedRecommendation.direction === 'local';
 
   useEffect(() => {
     if (status?.config.mode !== 'drive_mirror') {
@@ -529,7 +571,7 @@ export const SyncLifecycleManager: React.FC = () => {
     setCloseError(null);
     setNotice({
       title: 'Esta PC tiene cambios mas recientes que Drive',
-      message: 'Antes de subir nada, puedes decidir si prefieres conservar esta PC o cargar primero la copia actual de Drive.',
+      message: 'Puedes subir los cambios de esta PC a Drive o cargar primero la copia actual de Drive. ARMI no reemplazara ninguna copia sin pedirte confirmacion.',
       tone: 'warning',
     });
   };
@@ -978,7 +1020,7 @@ export const SyncLifecycleManager: React.FC = () => {
         </div>
       ) : null}
 
-      {notice ? (
+      {notice && !showRestorePrompt ? (
         <div className="fixed left-4 right-4 top-4 z-[90] mx-auto w-full max-w-xl print:hidden">
           <div className={`flex items-start justify-between gap-3 rounded-3xl border px-4 py-3 text-sm shadow-sm ${toneStyles[notice.tone]}`}>
             <div>
@@ -1007,7 +1049,9 @@ export const SyncLifecycleManager: React.FC = () => {
                 : restorePromptReason === 'pending-local'
                 ? 'Hay una copia local pendiente'
                 : restorePromptReason === 'diverged'
-                ? 'Hay dos copias distintas'
+                ? divergedRecommendation.direction === 'local'
+                  ? 'Esta PC contiene más información'
+                  : 'Hay dos copias distintas'
                 : restorePromptReason === 'conflicts'
                   ? 'Hay conflictos pendientes en Drive'
                   : restorePromptReason === 'conflicts-missing-current'
@@ -1016,17 +1060,35 @@ export const SyncLifecycleManager: React.FC = () => {
             </h2>
             <p className="mt-4 text-sm leading-relaxed text-slate-600">
               {restorePromptReason === 'local-newer'
-                ? 'Esta PC detecto cambios mas nuevos que los de Drive. Abajo puedes revisar fecha, huella corta y archivos que no coinciden para entender por que salio este aviso. Si prefieres conservar esta PC, subela primero. Si prefieres respetar la nube, carga Drive antes de editar.'
+                ? 'Esta PC detecto cambios mas nuevos que los de Drive. Abajo puedes revisar fecha, huella corta y archivos que no coinciden para entender por que salio este aviso. Puedes subir esta PC a Drive o cargar Drive antes de editar.'
                 : restorePromptReason === 'pending-local'
                 ? 'La ultima vez que esta PC intento sincronizar, quedo una copia local pendiente de confirmarse en Drive. Para simplificar: puedes seguir con esa copia local, subirla ahora o descartarla para usar la copia oficial de Drive.'
                 : restorePromptReason === 'diverged'
-                ? 'Esta PC y Drive tienen cambios distintos. Puedes cargar Drive o conservar esta PC e intentar subirla antes de empezar a editar.'
+                ? divergedRecommendation.direction === 'local'
+                  ? 'No se borró nada. Esta PC conserva más registros que Drive. La opción recomendada respaldará primero la copia actual de Drive y después conservará esta PC como principal.'
+                  : 'No se borró nada. Esta PC y Drive contienen cambios distintos; puedes decidir después mientras revisamos cuál debe conservarse.'
                 : restorePromptReason === 'conflicts'
                   ? 'Drive tiene una copia actual utilizable, pero ademas hay conflictos protegidos de otra PC. Si esperabas ver datos faltantes, conviene cargar primero la copia actual de Drive y luego revisar esos conflictos.'
                   : restorePromptReason === 'conflicts-missing-current'
                     ? buildDriveDiagnosticMessage(status)
                   : 'Encontramos una copia del usuario mas nueva en Drive. Si la cargas ahora, esta PC trabajara con esa version. Si prefieres continuar con lo local, no borraremos nada y podras traer la copia despues.'}
             </p>
+
+            {restorePromptReason === 'diverged' && divergedRecommendation.direction === 'local' ? (
+              <div className="mt-4 rounded-2xl border-2 border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-950">
+                <p className="font-black">Recomendación: subir esta PC a Drive</p>
+                <p className="mt-1 leading-relaxed">
+                  Tiene {divergedRecommendation.advantages.slice(0, 3).join(', ')}. ARMI guardará la versión actual de Drive en el historial protegido antes de actualizarla.
+                </p>
+              </div>
+            ) : null}
+
+            {restorePromptReason === 'diverged' && divergedRecommendation.direction === 'mixed' ? (
+              <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                <p className="font-black">Recomendación: decidir después</p>
+                <p className="mt-1 leading-relaxed">Ambas copias tienen información exclusiva. Continúa sin sincronizar mientras ARMI conserva las dos.</p>
+              </div>
+            ) : null}
 
             {status ? (
               <div className="mt-5 grid gap-3 md:grid-cols-2">
@@ -1095,7 +1157,7 @@ export const SyncLifecycleManager: React.FC = () => {
               >
                 <ActionIcon kind="local" />
                 {restorePromptReason === 'diverged'
-                  ? 'Trabajar temporalmente sin sincronizar'
+                  ? 'Decidir después (no sincronizar)'
                   : restorePromptReason === 'pending-local'
                     ? 'Usar copia local pendiente'
                     : 'Seguir con esta PC'}
@@ -1104,32 +1166,46 @@ export const SyncLifecycleManager: React.FC = () => {
                 <button
                   type="button"
                   onClick={async () => {
-                    if (restorePromptReason === 'diverged') {
+                    const requiresProtectedOverride = restorePromptReason === 'diverged' || pendingNeedsProtectedLocalRecovery;
+                    if (requiresProtectedOverride) {
+                      const localAdvantage = divergedRecommendation.direction === 'local'
+                        ? ` Esta PC tiene ${divergedRecommendation.advantages.slice(0, 3).join(', ')}.`
+                        : '';
                       const confirmed = window.confirm(
-                        'Esta accion convertira los datos de esta PC en la copia principal. Antes de reemplazar Drive, ARMI guardara una copia completa de la version actual de Drive. ¿Deseas continuar?'
+                        `Esta acción convertirá los datos de esta PC en la copia principal.${localAdvantage} Antes de reemplazar Drive, ARMI guardará una copia completa de su versión actual. ¿Deseas continuar?`
                       );
                       if (!confirmed) return;
                     }
                     setShowRestorePrompt(false);
-                    await pushLocalSnapshotToDrive({ force: restorePromptReason === 'diverged' });
+                    await pushLocalSnapshotToDrive({ force: requiresProtectedOverride });
                   }}
-                  title={restorePromptReason === 'diverged'
+                  title={restorePromptReason === 'diverged' || pendingNeedsProtectedLocalRecovery
                     ? 'Guardar primero una copia completa de Drive y despues convertir esta PC en la version principal.'
                     : 'Subir esta copia local a Drive y tomarla como la version principal antes de trabajar.'}
                   className="inline-flex items-center gap-2 rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm font-bold text-emerald-800 transition hover:border-emerald-400"
                 >
                   <ActionIcon kind="push" />
                   {restorePromptReason === 'diverged'
-                    ? 'Respaldar Drive y usar esta PC'
+                    ? divergedRecommendation.direction === 'local'
+                      ? 'Subir esta PC a Drive (recomendado)'
+                      : 'Subir esta PC a Drive'
                     : restorePromptReason === 'pending-local'
-                      ? 'Reintentar copia pendiente'
-                      : 'Conservar esta PC y subirla'}
+                      ? pendingNeedsProtectedLocalRecovery
+                        ? 'Subir esta PC a Drive'
+                        : 'Reintentar copia pendiente'
+                      : 'Subir esta PC a Drive'}
                 </button>
               ) : null}
               {restorePromptReason === 'pending-local' ? (
                 <button
                   type="button"
                   onClick={async () => {
+                    if (pendingNeedsProtectedLocalRecovery) {
+                      const confirmed = window.confirm(
+                        `Drive tiene menos información y esta PC tiene ${divergedRecommendation.advantages.slice(0, 3).join(', ')}. Esta acción reemplazará la vista local con Drive. ARMI creará un punto de recuperación, pero no es la opción recomendada. ¿Deseas continuar?`
+                      );
+                      if (!confirmed) return;
+                    }
                     await discardPendingCloudSync();
                     setShowRestorePrompt(false);
                     await restoreFromCloud(status || undefined, { startup: true, force: true });
@@ -1143,14 +1219,29 @@ export const SyncLifecycleManager: React.FC = () => {
               <button
                 type="button"
                 onClick={async () => {
+                  if (restorePromptReason === 'diverged' || restorePromptReason === 'local-newer') {
+                    const localAdvantage = divergedRecommendation.direction === 'local'
+                      ? ` Esta PC tiene ${divergedRecommendation.advantages.slice(0, 3).join(', ')}.`
+                      : '';
+                    const confirmed = window.confirm(
+                      `Cargar Drive reemplazará los datos visibles de esta PC con la copia de Drive.${localAdvantage} ARMI creará un punto de recuperación local, pero esta opción no es la recomendada en este momento. ¿Deseas continuar?`
+                    );
+                    if (!confirmed) return;
+                  }
                   setShowRestorePrompt(false);
                   await restoreFromCloud(status || undefined, { startup: true, force: true });
                 }}
                 title="Descargar la copia actual de Drive y reemplazar esta copia local con esa version."
-                className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-800"
+                className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-bold transition ${
+                  restorePromptReason === 'diverged' && divergedRecommendation.direction === 'local'
+                    ? 'border border-rose-300 bg-white text-rose-700 hover:bg-rose-50'
+                    : 'bg-slate-900 text-white hover:bg-slate-800'
+                }`}
               >
                 <ActionIcon kind="pull" />
-                Cargar copia de Drive
+                {restorePromptReason === 'diverged' && divergedRecommendation.direction === 'local'
+                  ? 'Reemplazar esta PC con Drive'
+                  : 'Cargar copia de Drive'}
               </button>
             </div>
           </div>

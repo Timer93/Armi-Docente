@@ -84,7 +84,14 @@ export const useSessionLearningResourceActions = ({
             userKey: `${currentSessionId}-${key}`
         });
         if (!result.success || !result.data?.fileUrl) throw new Error(result.message || 'No se pudo guardar la imagen.');
-        return `${result.data.fileUrl}?v=${Date.now()}`;
+        const version = Date.now();
+        return {
+            imageUrl: `${result.data.fileUrl}?v=${version}`,
+            wordImageUrl: result.data.wordFileUrl
+                ? `${result.data.wordFileUrl}?v=${version}`
+                : '',
+            imageStorage: result.data.storage
+        };
     }, [currentSessionId]);
     
        const buildResourceAiContext = useCallback((): SessionResourceAiContext => ({
@@ -460,6 +467,8 @@ export const useSessionLearningResourceActions = ({
          */
         const {
             imageUrl,
+            wordImageUrl,
+            imageStorage,
             imageModel,
             imageUsage
         } = await generateSessionResourceImage({
@@ -524,6 +533,8 @@ export const useSessionLearningResourceActions = ({
                 ...next[key],
     
                 imageUrl,
+                wordImageUrl,
+                imageStorage,
     
                 /*
                  * Guardamos exactamente el contenido
@@ -722,12 +733,12 @@ export const useSessionLearningResourceActions = ({
         }
         try {
             const imageData = await readSessionResourceImageFile(file);
-            const imageUrl = await persistSessionResourceImage(key, imageData);
+            const storedImage = await persistSessionResourceImage(key, imageData);
             setSessionData((prev: any) => {
                 const learningResources = applyManualSessionResourceUpload(
                     prev?.learningResources,
                     key,
-                    imageUrl,
+                    storedImage,
                     currentSessionId
                 );
                 return { ...prev, learningResources };

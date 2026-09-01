@@ -7,8 +7,9 @@ import ImageModule from 'docxtemplater-image-module-free';
 import { exec, execFile } from 'child_process';
 import db from '../db.js';
 import { resolveTemplatePath, tempRoot, uploadsRoot } from '../paths.js';
-import { sanitizeDocxDrawingIds } from './wordDocxUtils.js';
+import { normalizeDocxEmbeddedImageTypes, sanitizeDocxDrawingIds } from './wordDocxUtils.js';
 import { INSTRUMENT_BLOCK_TOKEN, getInstrumentTitleText, replaceInstrumentToken } from './sessionWordBlocks.js';
+import { ensureSessionResourceVariantLinks } from '../sessionResourceStorage.js';
 
 const router = express.Router();
 
@@ -938,7 +939,17 @@ router.post('/sesion-word/generate', async (req, res) => {
         if (!fs.existsSync(templatePath)) throw new Error('Plantilla de sesión no encontrada.');
 
         for (const row of rows) {
-            const sessionData = JSON.parse(row.session_data || '{}');
+            let sessionData = JSON.parse(row.session_data || '{}');
+            const repairedResources = await ensureSessionResourceVariantLinks({
+                sessionData,
+                sessionId: row.id_sesion,
+                uploadsRoot,
+            });
+            sessionData = repairedResources.sessionData;
+            if (repairedResources.changed) {
+                db.prepare('UPDATE sesiones SET session_data = ?, updated_at = CURRENT_TIMESTAMP WHERE id_sesion = ?')
+                    .run(JSON.stringify(sessionData), row.id_sesion);
+            }
             const unitSessions = JSON.parse(row.unit_sessions || '[]');
             const totalSesionesUnidad = Array.isArray(unitSessions) ? unitSessions.length : 0;
             const areaName = String(row.area_name || '').trim();
@@ -953,9 +964,9 @@ router.post('/sesion-word/generate', async (req, res) => {
             const annex1Resource = learningResources?.annex1 || {};
             const annex2Resource = learningResources?.annex2 || {};
             const [instructiveImage, annex1Image, annex2Image] = await Promise.all([
-                safeLoadWordImage(instructiveResource?.imageUrl),
-                safeLoadWordImage(annex1Resource?.imageUrl),
-                safeLoadWordImage(annex2Resource?.imageUrl)
+                safeLoadWordImage(instructiveResource?.wordImageUrl || instructiveResource?.imageUrl),
+                safeLoadWordImage(annex1Resource?.wordImageUrl || annex1Resource?.imageUrl),
+                safeLoadWordImage(annex2Resource?.wordImageUrl || annex2Resource?.imageUrl)
             ]);
             const sessionStudents = getActiveStudentsForSession(row);
             const annualResourceDefaults = {
@@ -1165,6 +1176,7 @@ router.post('/sesion-word/generate', async (req, res) => {
             const finalPath = path.join(outputPath, fileName);
             const tempPath = `${finalPath}.tmp`;
             sanitizeDocxDrawingIds(doc);
+            normalizeDocxEmbeddedImageTypes(doc);
             const buffer = doc.getZip().generate({ type: 'nodebuffer' });
             fs.writeFileSync(tempPath, buffer);
             fs.renameSync(tempPath, finalPath);

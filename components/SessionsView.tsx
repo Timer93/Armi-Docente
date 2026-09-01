@@ -92,7 +92,10 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
     const [unitNumber, setUnitNumber] = useState(initialSelection.unitNumber || '1');
     const [sessionNumber, setSessionNumber] = useState(initialSelection.sessionNumber || '1');
-    const [maxSessionsInUnit, setMaxSessionsInUnit] = useState(15);
+    const [maxSessionsInUnit, setMaxSessionsInUnit] = useState(() => Math.max(
+        Number.parseInt(String(initialSelection.sessionNumber || '1'), 10) || 1,
+        1
+    ));
     const [sessionDate, setSessionDate] = useState('');
     const [dateOptions, setDateOptions] = useState<{value: string, label: string}[]>([]);
     const [year, setYear] = useState(initialSelection.year || new Date().getFullYear().toString());
@@ -1378,6 +1381,12 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                             onCopyAllPrompts={() => { void copyResourcePrompts(['instructive', 'annex1', 'annex2']); }}
                             onCopyPrompt={(key) => { void copyResourcePrompts([key]); }}
                             onUpload={(key, file) => { void handleUploadResource(key, file); }}
+                            downloadContext={{
+                                grade: selGrade,
+                                section: selSection,
+                                sessionNumber,
+                                totalSessions: maxSessionsInUnit
+                            }}
                             onUseSuggestion={() => {
                                 if (!resourceSuggestion) return;
                                 const reused = prepareReusedSessionResources(

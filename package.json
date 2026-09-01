@@ -1,7 +1,7 @@
 {
   "name": "armi-docente-web",
   "private": true,
-  "version": "11.2.2",
+  "version": "11.2.9",
   "description": "ARMI Docente",
   "author": "ARMI",
   "type": "module",
@@ -13,6 +13,7 @@
     "dev:stop": "powershell -ExecutionPolicy Bypass -File scripts/dev-stop.ps1",
     "dev:clean": "powershell -ExecutionPolicy Bypass -Command \"npm run dev:stop; Start-Sleep -Seconds 2; npm run dev\"",
     "prepare:win-icon": "node scripts/prepare-windows-icon.mjs",
+    "prepare:cloudflared": "node scripts/prepare-cloudflared.mjs",
     "rebuild:native:node": "node scripts/rebuild-better-sqlite3.mjs node",
     "rebuild:native:electron": "node scripts/rebuild-better-sqlite3.mjs electron",
     "build": "vite build",
@@ -20,7 +21,17 @@
     "electron": "electron .",
     "dist:win": "node scripts/build-installer.mjs",
     "release:github": "node scripts/publish-github-release.mjs",
-    "push:github": "node scripts/push-github.mjs"
+    "push:github": "node scripts/push-github.mjs",
+    "test:evidence-grade": "node scripts/test-evidence-grade-link.mjs",
+    "test:sync-incremental": "node scripts/test-incremental-mirror-sync.mjs",
+    "test:upload-resumable": "node scripts/test-resumable-upload.mjs",
+    "test:remote-presence": "node scripts/test-remote-presence.mjs",
+    "test:student-deliveries": "node scripts/test-student-portal-deliveries.mjs",
+    "test:session-transversal": "node scripts/test-session-transversal-criteria.mjs",
+    "test:session-resource-storage": "node scripts/test-session-resource-dual-storage.mjs",
+    "test:continuous-resource-mirror": "node scripts/test-continuous-resource-mirror.mjs",
+    "test:resumable-upload": "node scripts/test-resumable-upload.mjs",
+    "migrate:u5-session-images": "node scripts/migrate-u5-session-resource-images.mjs --apply"
   },
   "dependencies": {
     "@google/genai": "^1.35.0",
@@ -122,6 +133,14 @@
       {
         "from": "build/icon.ico",
         "to": "icon.ico"
+      },
+      {
+        "from": "electron/backend-process.cjs",
+        "to": "backend-process.cjs"
+      },
+      {
+        "from": "build/cloudflared/cloudflared.exe",
+        "to": "cloudflared/cloudflared.exe"
       }
     ],
     "win": {

@@ -140,6 +140,7 @@ export interface Student {
   estado?: string;
   sexo?: string; // Nuevo
   edad?: string | number; // Nuevo
+  portalPasswordConfigured?: boolean;
   evaluations?: Record<string, { level: EvaluationLevel, description: string }>;
   competencyValue?: EvaluationLevel;
   description?: string;

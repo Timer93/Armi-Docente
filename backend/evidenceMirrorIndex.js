@@ -194,6 +194,7 @@ const reconcileEvidenceMirrorIndex = ({ db, root }) => {
   let invalidRecords = 0;
 
   const updateKey = db.prepare(`UPDATE evaluacion_evidencias SET evidence_key = ? WHERE id = ?`);
+  const findKeyOwner = db.prepare('SELECT id FROM evaluacion_evidencias WHERE evidence_key = ? LIMIT 1');
   const findStudent = db.prepare('SELECT id, dni, grado, secc, estudiantes FROM db_estudiantes WHERE id = ?');
   const findStudentByDni = db.prepare('SELECT id, dni, grado, secc, estudiantes FROM db_estudiantes WHERE dni = ? LIMIT 1');
   const normalizeStudentScope = db.prepare(`
@@ -219,6 +220,8 @@ const reconcileEvidenceMirrorIndex = ({ db, root }) => {
     const relativePath = normalizeRelativePath(row.relative_path);
     const evidenceKey = String(row.evidence_key || portableEvidenceKey(relativePath));
     if (!relativePath || !evidenceKey) return;
+    const keyOwner = findKeyOwner.get(evidenceKey);
+    if (keyOwner && Number(keyOwner.id) !== Number(row.id)) return;
     if (!row.evidence_key) updateKey.run(evidenceKey, row.id);
     const evidencePath = resolveSafeEvidencePath(root, relativePath);
     if (!evidencePath || !fs.existsSync(evidencePath)) return;

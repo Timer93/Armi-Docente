@@ -15,7 +15,11 @@ export const readSessionResourceImageFile = (file: File) =>
 export const applyManualSessionResourceUpload = (
     resources: Partial<SessionLearningResourcesData> | null | undefined,
     key: SessionResourceKey,
-    imageUrl: string,
+    storedImage: {
+        imageUrl: string;
+        wordImageUrl?: string;
+        imageStorage?: SessionLearningResourcesData[SessionResourceKey]['imageStorage'];
+    },
     currentSessionId: string | undefined,
     generatedAt = new Date().toISOString()
 ): SessionLearningResourcesData => {
@@ -27,7 +31,9 @@ export const applyManualSessionResourceUpload = (
 
     next[key] = {
         ...next[key],
-        imageUrl,
+        imageUrl: storedImage.imageUrl,
+        wordImageUrl: storedImage.wordImageUrl || '',
+        imageStorage: storedImage.imageStorage,
         aiContent: undefined,
         metadata: preservedManualVideoUrl
             ? { url: preservedManualVideoUrl }

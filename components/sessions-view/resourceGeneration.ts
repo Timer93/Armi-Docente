@@ -201,7 +201,18 @@ type GenerateSessionResourceImageOptions = {
     capabilityTimeoutMs: number;
     imageTimeoutMs: number;
     buildImagePrompt: () => string;
-    persistImage: (imageData: string) => Promise<string>;
+    persistImage: (imageData: string) => Promise<{
+        imageUrl: string;
+        wordImageUrl?: string;
+        imageStorage?: {
+            fingerprint?: string;
+            width?: number;
+            height?: number;
+            originalBytes?: number;
+            webpBytes?: number;
+            wordBytes?: number;
+        };
+    }>;
     withTimeout: <T>(
         promise: Promise<T>,
         timeoutMs: number,
@@ -214,6 +225,15 @@ type GenerateSessionResourceImageOptions = {
 
 export type GeneratedSessionResourceImage = {
     imageUrl: string;
+    wordImageUrl?: string;
+    imageStorage?: {
+        fingerprint?: string;
+        width?: number;
+        height?: number;
+        originalBytes?: number;
+        webpBytes?: number;
+        wordBytes?: number;
+    };
     imageModel: string;
     imageUsage: number;
 };
@@ -306,10 +326,10 @@ export const generateSessionResourceImage = async (
             };base64,${imagePart.inlineData.data}`;
 
             options.onStageChange('guardado de la imagen');
-            const imageUrl = await options.persistImage(imageData);
+            const storedImage = await options.persistImage(imageData);
 
             return {
-                imageUrl,
+                ...storedImage,
                 imageModel: candidate.id,
                 imageUsage: Number(
                     response?.usageMetadata?.totalTokenCount || 0

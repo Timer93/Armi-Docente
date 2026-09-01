@@ -38,9 +38,7 @@ export const buildSessionResourcePlanPrompt = (
             ? `
 INSTRUCTIVO INFORMATIVO:
 Crea un recurso AUTÓNOMO PARA ENSEÑAR el contenido central de la sesión.
-
 Debe contener toda la información necesaria para comprender y aplicar el aprendizaje, no un resumen de la planificación.
-
 Analiza primero qué tipo de contenido predomina: concepto, comparación, clasificación, proceso, técnica, metodología, análisis, problema, sistema, producción o combinación.
 
 Organiza libremente la información según esa naturaleza:
@@ -52,7 +50,6 @@ Organiza libremente la información según esa naturaleza:
 - producción: materiales o recursos, procedimiento, control y resultado.
 
 Incluye cuando correspondan: conceptos esenciales, definiciones, procedimiento, fórmulas, ejemplos resueltos, recomendaciones, errores frecuentes, relaciones y aplicación contextualizada.
-
 Debe parecer una infografía educativa rica en contenido, útil para que el docente explique y el estudiante estudie.
 No conviertas la sesión en una lista de actividades ni copies literalmente la planificación.
 `
@@ -76,7 +73,7 @@ Las imágenes deben contener información que permita responder.
                             ? `
 ANEXO 1 · PREGUNTAS DESAFIANTES:
 Genera una situación problemática breve y preguntas interesantes, capciosas o de conflicto cognitivo apropiadas al grado.
-No incluyas las respuestas.
+Incluye respuestas pero sin revelarlas completamente.
 Las preguntas deben conducir directamente al contenido central de la sesión.
 `
                             : `
@@ -88,15 +85,18 @@ Debe poder ejecutarse realmente en aula.
                 : resource.kind === 'form'
                     ? `
 ANEXO 2 · FORMULARIO TIC:
-Crea una actividad digital utilizable que produzca la evidencia de la sesión.
+Crea una actividad tipo encuesta digital o formulario de recolección de información que se pueda usar en google forms.
 Incluye instrucciones, datos necesarios, preguntas o campos variados, espacios de respuesta, producto final, forma de entrega y criterios de revisión.
 metadata.tools y metadata.deliverable son obligatorios.
 `
                     : resource.kind === 'gamification'
                         ? `
 ANEXO 2 · GAMIFICACIÓN:
-Crea una actividad gamificada realmente jugable y relacionada con el aprendizaje.
+Crea una actividad gamificada realmente jugable y relacionada con el aprendizaje en alguna plataforma real o programa.
 Incluye misión, reglas, niveles o retos, decisiones, puntuación o progreso, evidencia final y cierre.
+Cuando sea necesario, indica qué herramientas digitales se deben usar y cómo.
+Tener en cuenta que debe ser calificable de 0 a 20 y que la evidencia final debe ser verificable.
+Cuando sea el caso puedes entregarme un documento o el codigo que genere la actividad en la plataforma o programa indicado.
 metadata.tools y metadata.deliverable son obligatorios.
 `
                         : resource.kind === 'project'
@@ -109,17 +109,15 @@ metadata.tools y metadata.deliverable son obligatorios.
                             : `
 ANEXO 2 · FICHA DE TRABAJO:
 Crea una ficha COMPLETA Y RESOLUBLE por el estudiante durante la sesión.
-
 Debe conducir progresivamente hacia la evidencia indicada.
 Incluye instrucciones breves, actividades numeradas, ejemplos cuando sean necesarios, tablas/matrices/organizadores/operaciones según el tema, espacios reales para responder, consolidación del producto o evidencia, reflexión y autoevaluación.
-
+Que el recurso permita ser usado en clase y que el estudiante pueda completarlo en el tiempo de la sesión.
 Las actividades deben corresponder a lo que realmente se desarrolla en la sesión.
 No conviertas la ficha en teoría expositiva: debe contener tareas para completar, analizar, calcular, decidir, producir o justificar.
 `;
 
     return `
 Eres especialista en diseño instruccional para educación secundaria del Perú.
-
 Genera el contenido de UN recurso educativo a partir de la sesión completa proporcionada.
 
 TIPO DE RECURSO:

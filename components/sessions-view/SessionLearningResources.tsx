@@ -5,6 +5,7 @@ import {
     ClipboardList,
     Copy,
     Dices,
+    Download,
     FilePenLine,
     Gamepad2,
     Eye,
@@ -85,6 +86,15 @@ export type SessionResourceGeneration = {
 export type SessionLearningResource = {
     title: string;
     imageUrl: string;
+    wordImageUrl?: string;
+    imageStorage?: {
+        fingerprint?: string;
+        width?: number;
+        height?: number;
+        originalBytes?: number;
+        webpBytes?: number;
+        wordBytes?: number;
+    };
     aspectRatio: '16:9' | '9:16' | '1:1' | '3:4';
     kind: string;
     pinned: boolean;
@@ -190,6 +200,12 @@ type Props = {
     onCopyPrompt: (key: SessionResourceKey) => void;
     onUpload: (key: SessionResourceKey, file: File) => void;
     onUseSuggestion: () => void;
+    downloadContext?: {
+        grade: string;
+        section: string;
+        sessionNumber: string;
+        totalSessions: number;
+    };
 };
 
 export const SessionLearningResources: React.FC<Props> = ({
@@ -204,10 +220,13 @@ export const SessionLearningResources: React.FC<Props> = ({
     onCopyAllPrompts,
     onCopyPrompt,
     onUpload,
-    onUseSuggestion
+    onUseSuggestion,
+    downloadContext
 }) => {
     const inputs = useRef<Partial<Record<SessionResourceKey, HTMLInputElement | null>>>({});
     const [preview, setPreview] = useState<{ src: string; title: string } | null>(null);
+    const [downloadingResources, setDownloadingResources] = useState(false);
+    const [downloadSummary, setDownloadSummary] = useState('');
 
     const update = (key: SessionResourceKey, patch: Partial<SessionLearningResource>, remember = false) => {
         const next = { ...value, [key]: { ...value[key], ...patch } };
@@ -223,6 +242,60 @@ export const SessionLearningResources: React.FC<Props> = ({
         }
     };
 
+    const downloadAllResources = async () => {
+        const availableResources = RESOURCE_DEFINITIONS
+            .map((definition) => ({ definition, resource: value[definition.key] }))
+            .filter(({ resource }) => Boolean(resource?.imageUrl));
+        if (!availableResources.length || downloadingResources) return;
+
+        const cleanName = (raw: string) => String(raw || '')
+            .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 150) || 'Recurso';
+        const extensionFor = (blob: Blob, source: string) => {
+            const byMime: Record<string, string> = {
+                'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
+                'image/gif': 'gif', 'image/svg+xml': 'svg', 'image/bmp': 'bmp'
+            };
+            if (byMime[blob.type]) return byMime[blob.type];
+            const match = String(source).split(/[?#]/)[0].match(/\.([a-z0-9]{2,5})$/i);
+            return match?.[1]?.toLowerCase() || 'png';
+        };
+
+        setDownloadingResources(true);
+        setDownloadSummary('');
+        let completed = 0;
+        try {
+            for (const { definition, resource } of availableResources) {
+                const response = await fetch(resource.imageUrl);
+                if (!response.ok) throw new Error(`No se pudo descargar ${definition.title}`);
+                const blob = await response.blob();
+                const extension = extensionFor(blob, resource.imageUrl);
+                const context = downloadContext || { grade: '', section: '', sessionNumber: '1', totalSessions: 1 };
+                const fileName = cleanName(
+                    `${resource.title || definition.title} - ${context.grade} - Sección ${context.section} - Sesión ${context.sessionNumber} de ${Math.max(context.totalSessions || 1, 1)}`
+                );
+                const objectUrl = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = objectUrl;
+                link.download = `${fileName}.${extension}`;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+                completed += 1;
+            }
+            setDownloadSummary(`${completed} recurso${completed === 1 ? '' : 's'} descargado${completed === 1 ? '' : 's'}.`);
+        } catch (error) {
+            setDownloadSummary(completed
+                ? `Se descargaron ${completed} recursos; uno no estaba disponible.`
+                : 'No fue posible descargar los recursos todavía.');
+        } finally {
+            setDownloadingResources(false);
+        }
+    };
+
     return (
         <>
         <div className="bg-slate-50/60 p-5 md:p-7">
@@ -232,6 +305,16 @@ export const SessionLearningResources: React.FC<Props> = ({
                     <p className="mt-1 text-[10px] font-bold text-slate-500">Opcionales · Modo estricto: solo imagen IA, sin sustitución local.</p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={() => { void downloadAllResources(); }}
+                        disabled={downloadingResources || !RESOURCE_DEFINITIONS.some(({ key }) => Boolean(value[key]?.imageUrl))}
+                        className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-white px-4 py-3 text-[10px] font-black uppercase tracking-widest text-emerald-700 shadow-sm transition hover:border-emerald-400 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-45"
+                        title="Descargar los recursos disponibles con nombres identificables"
+                    >
+                        <Download className="h-4 w-4" strokeWidth={2.4} />
+                        {downloadingResources ? 'Descargando…' : 'Descargar recursos'}
+                    </button>
                     <button
                         type="button"
                         onClick={onGenerateAll}
@@ -251,6 +334,12 @@ export const SessionLearningResources: React.FC<Props> = ({
                     </button>
                 </div>
             </div>
+
+            {downloadSummary ? (
+                <div className="mb-4 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[9px] font-bold text-slate-600">
+                    {downloadSummary}
+                </div>
+            ) : null}
 
             {suggestion && (
                 <div className="mb-5 flex flex-col gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 md:flex-row md:items-center md:justify-between">
@@ -313,10 +402,18 @@ export const SessionLearningResources: React.FC<Props> = ({
                                 <div className="group/resource relative flex min-h-[210px] items-center justify-center overflow-hidden rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50">
                                     {resource.imageUrl ? (
                                         <img
+                                            key={resource.imageUrl}
                                             src={resource.imageUrl}
                                             alt={definition.title}
                                             className="h-full max-h-[330px] w-full object-contain"
-                                            onError={() => update(definition.key, { imageUrl: '', sourceSessionId: '', aiContent: undefined, metadata: undefined, generation: undefined })}
+                                            onLoad={(event) => {
+                                                event.currentTarget.classList.remove('opacity-40');
+                                                event.currentTarget.removeAttribute('data-resource-unavailable');
+                                            }}
+                                            onError={(event) => {
+                                                event.currentTarget.classList.add('opacity-40');
+                                                event.currentTarget.setAttribute('data-resource-unavailable', 'true');
+                                            }}
                                         />
                                     ) : (
                                         <div className="px-6 text-center text-slate-400">

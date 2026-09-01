@@ -17,6 +17,23 @@ import { writeEvidenceTombstone } from '../evidenceMirrorIndex.js';
 
 const router = express.Router();
 
+const getAutomaticEvidenceWindow = (sessionData) => {
+  const raw = String(sessionData?.date || sessionData?.selectedSessionDate || '').trim();
+  const dateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const sessionDate = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 0, 0, 0, 0)
+    : new Date(raw);
+  if (!raw || Number.isNaN(sessionDate.getTime())) return null;
+  const openAt = new Date(sessionDate);
+  openAt.setHours(0, 0, 0, 0);
+  const onTimeCloseAt = new Date(openAt);
+  onTimeCloseAt.setDate(onTimeCloseAt.getDate() + 1);
+  onTimeCloseAt.setHours(23, 59, 59, 999);
+  const closeAt = new Date(onTimeCloseAt);
+  closeAt.setDate(closeAt.getDate() + 3);
+  return { openAt, onTimeCloseAt, closeAt };
+};
+
 const requireStudentEvidenceFileAccess = (req, res, next) => {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || req.query.token;
   if (token) {
@@ -38,22 +55,43 @@ const requireStudentEvidenceFileAccess = (req, res, next) => {
 };
 
 router.get('/evaluacion/evidencias', requireLocalTeacherRequest, (req, res) => {
-  const { year, areaId, grade, section, bimester, unitNumber, sessionNumber, studentId, criteriaId } = req.query;
+  const { sessionId, year, areaId, grade, section, bimester, unitNumber, sessionNumber, studentId, criteriaId } = req.query;
   try {
     let sql = 'SELECT * FROM evaluacion_evidencias WHERE 1=1';
     const params = [];
-    if (year) { sql += ' AND year = ?'; params.push(year); }
-    if (areaId) { sql += ' AND area_id = ?'; params.push(areaId); }
-    if (grade) { sql += ' AND grade = ?'; params.push(grade); }
-    if (section) { sql += ' AND section = ?'; params.push(section); }
-    if (bimester) { sql += ' AND bimester = ?'; params.push(bimester); }
-    if (unitNumber) { sql += ' AND unit_number = ?'; params.push(unitNumber); }
-    if (sessionNumber) { sql += ' AND session_number = ?'; params.push(sessionNumber); }
+    if (sessionId) {
+      // A combined class can have session section "A y B", while each student
+      // evidence correctly keeps its real section (for example, "B"). The
+      // portable session id is therefore the authoritative relationship.
+      sql += ' AND session_id = ?';
+      params.push(String(sessionId));
+    } else {
+      // Compatibility with the Evidence Bank and legacy callers.
+      if (year) { sql += ' AND year = ?'; params.push(year); }
+      if (areaId) { sql += ' AND area_id = ?'; params.push(areaId); }
+      if (grade) { sql += ' AND grade = ?'; params.push(grade); }
+      if (section) { sql += ' AND section = ?'; params.push(section); }
+      if (bimester) { sql += ' AND bimester = ?'; params.push(bimester); }
+      if (unitNumber) { sql += ' AND unit_number = ?'; params.push(unitNumber); }
+      if (sessionNumber) { sql += ' AND session_number = ?'; params.push(sessionNumber); }
+    }
     if (studentId) { sql += ' AND student_id = ?'; params.push(String(studentId)); }
-    if (criteriaId) { sql += ' AND criteria_id = ?'; params.push(String(criteriaId)); }
+    if (criteriaId) {
+      if (sessionId) {
+        // Student submissions belong to the whole session. Older portal
+        // versions normalized competency ids differently, so they must remain
+        // visible from the NL cell even when that legacy id does not match.
+        sql += " AND (criteria_id = ? OR source = 'student_portal')";
+        params.push(String(criteriaId));
+      } else {
+        sql += ' AND criteria_id = ?';
+        params.push(String(criteriaId));
+      }
+    }
     sql += ' ORDER BY updated_at DESC';
 
-    const rows = db.prepare(sql).all(...params).map(mapEvidenceRow);
+    const storageContext = getEvidenceStorageContext();
+    const rows = db.prepare(sql).all(...params).map((row) => mapEvidenceRow(row, storageContext));
     res.json({ success: true, data: rows });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
@@ -71,6 +109,7 @@ router.post('/evaluacion/evidencias', requireLocalTeacherRequest, uploadEvidence
     bimester,
     unitNumber,
     sessionNumber,
+    sessionId: requestedSessionId,
     criteriaId,
     observation,
   } = body;
@@ -120,7 +159,8 @@ router.post('/evaluacion/evidencias', requireLocalTeacherRequest, uploadEvidence
 
     const absoluteFilePath = savedFile.absolutePath;
     const firstStudentId = Array.isArray(studentIds) && studentIds.length > 0 ? String(studentIds[0]) : '';
-    const sessionId = `${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`;
+    const sessionId = String(requestedSessionId || '').trim()
+      || `${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`;
 
     let previous = null;
     if (id) previous = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = ?').get(id);
@@ -272,7 +312,21 @@ router.get('/evaluacion/ventana-entrega/:sessionId', requireLocalTeacherRequest,
     if (!sessionRow) return res.status(404).json({ success: false, message: 'Sesión no encontrada.' });
     const sessionData = JSON.parse(sessionRow.session_data || '{}');
     const explicit = db.prepare('SELECT * FROM evaluacion_ventanas_entrega WHERE session_id = ?').get(sessionRow.id_sesion);
-    return res.json({ success: true, data: { explicit: explicit || null } });
+    const automatic = getAutomaticEvidenceWindow(sessionData);
+    const configuredClose = explicit?.close_at ? new Date(explicit.close_at) : null;
+    const effectiveClose = configuredClose && !Number.isNaN(configuredClose.getTime()) && automatic && configuredClose > automatic.closeAt
+      ? configuredClose
+      : automatic?.closeAt;
+    return res.json({
+      success: true,
+      data: {
+        explicit: explicit || null,
+        openAt: automatic?.openAt?.toISOString() || '',
+        onTimeCloseAt: automatic?.onTimeCloseAt?.toISOString() || '',
+        defaultCloseAt: automatic?.closeAt?.toISOString() || '',
+        closeAt: effectiveClose?.toISOString() || explicit?.close_at || ''
+      }
+    });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -283,12 +337,19 @@ router.post('/evaluacion/ventana-entrega/:sessionId', requireLocalTeacherRequest
     const sessionId = String(req.params.sessionId || '');
     const sessionRow = db.prepare('SELECT * FROM sesiones WHERE id_sesion = ?').get(sessionId);
     if (!sessionRow) return res.status(404).json({ success: false, message: 'Sesión no encontrada.' });
+    const sessionData = JSON.parse(sessionRow.session_data || '{}');
+    const automatic = getAutomaticEvidenceWindow(sessionData);
     const enabled = req.body?.enabled === false ? 0 : 1;
     const exceptional = req.body?.exceptional === false ? 0 : 1;
     const openFrom = String(req.body?.openFrom || '').trim() || null;
     const closeAt = String(req.body?.closeAt || '').trim() || null;
+    const requestedClose = closeAt ? new Date(closeAt) : null;
+    if (requestedClose && !Number.isNaN(requestedClose.getTime())) requestedClose.setSeconds(59, 999);
     if (openFrom && closeAt && new Date(openFrom) > new Date(closeAt)) {
       return res.status(400).json({ success: false, message: 'La fecha de apertura no puede ser posterior al cierre.' });
+    }
+    if (enabled && automatic && (!requestedClose || Number.isNaN(requestedClose.getTime()) || requestedClose < automatic.closeAt)) {
+      return res.status(400).json({ success: false, message: 'La ampliación manual no puede reducir el plazo automático de tres días tardíos.' });
     }
     db.prepare(`
       INSERT INTO evaluacion_ventanas_entrega (session_id, enabled, open_from, close_at, exceptional, updated_at)
@@ -299,7 +360,7 @@ router.post('/evaluacion/ventana-entrega/:sessionId', requireLocalTeacherRequest
         close_at = excluded.close_at,
         exceptional = excluded.exceptional,
         updated_at = CURRENT_TIMESTAMP
-    `).run(sessionId, enabled, openFrom, closeAt, exceptional);
+    `).run(sessionId, enabled, automatic?.openAt?.toISOString() || openFrom, requestedClose?.toISOString() || closeAt, exceptional);
     return res.json({ success: true });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });

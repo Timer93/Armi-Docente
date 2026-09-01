@@ -293,6 +293,8 @@ REGLAS:
 11) Debes completar TODOS los índices listados en "FILAS DEL INSTRUMENTO A COMPLETAR", incluyendo criterios del área y competencias transversales.
 12) No omitas ninguna fila aunque sea la 5, 6 o posterior.
 13) Usa el mismo criterio base de cada índice y devuelve descriptores para todos los niveles de logro.
+13.1) En "competenciasTrans", el campo "des" contiene CRITERIOS DE EVALUACIÓN y el campo "evidence" contiene EVIDENCIAS DE APRENDIZAJE. Nunca intercambies esos campos.
+13.2) Para toda fila transversal de "instrumentRows", copia como "criterio" exclusivamente el criterio de evaluación correspondiente de "competenciasTrans.des". Está prohibido usar "competenciasTrans.evidence" como criterio de la rúbrica.
 14) Los cuatro niveles deben ser coherentes entre sí y describir la misma habilidad con distinta calidad de logro.
 15) Toma el nivel A como referencia central del criterio esperado; luego adapta C, B y AD manteniendo la misma acción observable, variando principalmente precisión, coherencia, autonomía, profundidad o sustento.
 16) Evita que cada nivel parezca un criterio distinto; deben sentirse como una progresión del mismo desempeño.

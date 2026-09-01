@@ -13,6 +13,8 @@ type SessionEvidenceItem = {
     fileType: string;
     fileUrl: string;
     uploadedAt: string;
+    source: string;
+    available: boolean;
     previewKind: 'image' | 'video' | 'pdf' | 'doc' | 'sheet' | 'slides' | 'custom' | 'generic';
 };
 
@@ -48,13 +50,6 @@ const formatFileSize = (bytes: number) => {
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} KB`;
     return `${Math.round(bytes / 104857.6) / 10} MB`;
 };
-
-const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
-    reader.readAsDataURL(file);
-});
 
 const canOpenInline = (previewKind: SessionEvidenceItem['previewKind']) => (
     previewKind === 'image' || previewKind === 'video' || previewKind === 'pdf'
@@ -108,6 +103,17 @@ const TooltipHiddenIcon = () => (
         <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
     </svg>
 );
+
+const STUDENT_GROUP_PALETTE = [
+    { surface: '#dbeafe', dot: '#2563eb', text: '#1e3a8a' },
+    { surface: '#dcfce7', dot: '#16a34a', text: '#14532d' },
+    { surface: '#fef3c7', dot: '#d97706', text: '#78350f' },
+    { surface: '#fce7f3', dot: '#db2777', text: '#831843' },
+    { surface: '#ede9fe', dot: '#7c3aed', text: '#4c1d95' },
+    { surface: '#cffafe', dot: '#0891b2', text: '#164e63' },
+    { surface: '#ffedd5', dot: '#ea580c', text: '#7c2d12' },
+    { surface: '#e2e8f0', dot: '#475569', text: '#1e293b' }
+];
 
 const ToggleConclusionIcon = ({ expanded }: { expanded: boolean }) => (
     <svg
@@ -204,6 +210,7 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
         }
         setEvidenceBusy(true);
         const res = await getEvaluacionEvidencias({
+            sessionId: currentSessionId,
             year: currentYear,
             areaId: currentAreaId,
             grade: selGrade,
@@ -229,12 +236,14 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
                 fileType: item.fileType || '',
                 fileUrl: item.fileUrl || '',
                 uploadedAt: item.updatedAt || '',
+                source: item.source || 'teacher',
+                available: item.available === true,
                 previewKind: getPreviewKind(extension)
             };
         }));
         setEvidenceMessage('');
         setEvidenceBusy(false);
-    }, [bimesterLabel, currentAreaId, currentYear, evidenceModal, selGrade, selSection, sessionNumber, unitNumber]);
+    }, [bimesterLabel, currentAreaId, currentSessionId, currentYear, evidenceModal, selGrade, selSection, sessionNumber, unitNumber]);
 
     const uploadEvidenceFiles = React.useCallback(async (files: File[]) => {
         if (!evidenceModal || files.length === 0) return;
@@ -246,8 +255,8 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
         setEvidenceBusy(true);
         setEvidenceMessage('');
         for (const file of accepted) {
-            const dataUrl = await readFileAsDataUrl(file);
             const res = await saveEvaluacionEvidencia({
+                sessionId: currentSessionId,
                 year: currentYear,
                 areaId: currentAreaId,
                 grade: selGrade,
@@ -261,9 +270,8 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
                 observation: `Evidencia asociada al nivel de logro ${evidenceModal.summaryLabel}`,
                 fileName: file.name,
                 fileType: file.type || getFileExtension(file.name) || 'application/octet-stream',
-                fileSize: file.size,
-                dataUrl
-            });
+                fileSize: file.size
+            }, file);
             if (!res.success) {
                 setEvidenceBusy(false);
                 setEvidenceMessage(res.message || 'No se pudo guardar la evidencia.');
@@ -273,7 +281,7 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
         await loadSessionEvidences(evidenceModal);
         setEvidenceBusy(false);
         setEvidenceMessage('Evidencia guardada correctamente.');
-    }, [bimesterLabel, currentAreaId, currentYear, evidenceModal, loadSessionEvidences, selGrade, selSection, sessionNumber, unitNumber]);
+    }, [bimesterLabel, currentAreaId, currentSessionId, currentYear, evidenceModal, loadSessionEvidences, selGrade, selSection, sessionNumber, unitNumber]);
 
     React.useEffect(() => {
         if (!evidenceModal) return;
@@ -334,6 +342,10 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
     };
 
     const handleOpenEvidence = (item: SessionEvidenceItem) => {
+        if (!item.available) {
+            setEvidenceMessage('La entrega está registrada, pero el archivo todavía no terminó de sincronizarse en esta PC. Mantén Google Drive abierto y pulsa Actualizar.');
+            return;
+        }
         if (!item.fileUrl) return;
         if (canOpenInline(item.previewKind)) {
             window.open(item.fileUrl, '_blank', 'noopener,noreferrer');
@@ -357,6 +369,33 @@ export const SessionRegisterPanel: React.FC<SessionRegisterPanelProps> = ({
 
     const groupedCompetencies = gradingSessionGroups.groups;
     const criterionBlocks = gradingSessionGroups.criterionBlocks;
+    const competencyCacheKey = (competency: any) =>
+        `${normalizeLoose(String(competency?.name || competency?.competencia || ''))}::${String(competency?.source || 'primary')}`;
+    const studentsById = new Map(filteredStudents.map((student) => [String(student.id), student]));
+    const groupVisuals = new Map<string, typeof STUDENT_GROUP_PALETTE[number]>();
+    Array.from(new Set(
+        filteredStudents
+            .map((student) => String(student.group || student.grupo || '').trim())
+            .filter(Boolean)
+    )).sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' }))
+        .forEach((groupName, index) => {
+            groupVisuals.set(groupName, STUDENT_GROUP_PALETTE[index % STUDENT_GROUP_PALETTE.length]);
+        });
+    const criteriaByCompetency = new Map<string, any[]>();
+    gradingCriteriaRows.forEach((row: any) => {
+        const key = competencyCacheKey(row);
+        const rows = criteriaByCompetency.get(key) || [];
+        rows.push(row);
+        criteriaByCompetency.set(key, rows);
+    });
+    const blocksByCompetency = new Map<string, any[]>();
+    criterionBlocks.forEach((block: any) => {
+        const key = competencyCacheKey(block);
+        const blocks = blocksByCompetency.get(key) || [];
+        blocks.push(block);
+        blocksByCompetency.set(key, blocks);
+    });
+    const competencySummaryCache = new Map<string, { label: string; code: string; score: number | null }>();
     const getCompetencySummaryId = (competency: any) =>
         `summary::${String(competency?.source || 'primary')}::${normalizeLoose(String(competency?.name || ''))}`;
     const isObservationExpanded = (competency: any) => !!expandedSessionRegisterObservations[getCompetencySummaryId(competency)];
@@ -680,20 +719,27 @@ const getRegisterDynamicWidth = (units: number) =>
     };
 
     const getStudentCompetencySummary = (studentId: string | number, competency: any) => {
-        const student = filteredStudents.find((item) => String(item.id) === String(studentId));
+        const competencyKey = competencyCacheKey(competency);
+        const cacheKey = `${String(studentId)}::${competencyKey}`;
+        const cached = competencySummaryCache.get(cacheKey);
+        if (cached) return cached;
+        const student = studentsById.get(String(studentId));
         const normalizedEstado = normalizeLoose(String(student?.estado || ''));
         if (
             normalizedEstado === 'r' || normalizedEstado.includes('retir')
             || normalizedEstado === 't' || normalizedEstado.includes('traslad')
             || normalizedEstado === 'na' || normalizedEstado.includes('no asiste')
         ) {
-            return { label: 'NE', code: 'ne', score: null };
+            const result = { label: 'NE', code: 'ne', score: null };
+            competencySummaryCache.set(cacheKey, result);
+            return result;
         }
-        const competencyCriteria = gradingCriteriaRows.filter((row: any) =>
-            normalizeLoose(row.competencia) === normalizeLoose(competency.name)
-            && String(row.source || '') === String(competency.source || '')
-        );
-        if (!competencyCriteria.length) return { label: '-', code: '', score: null };
+        const competencyCriteria = criteriaByCompetency.get(competencyKey) || [];
+        if (!competencyCriteria.length) {
+            const result = { label: '-', code: '', score: null };
+            competencySummaryCache.set(cacheKey, result);
+            return result;
+        }
 
         const selectedCodes = competencyCriteria.map((row: any) =>
             normalizeGradingLevelToCode(gradingRecords[getGradingKey(studentId, row.id)]?.level)
@@ -701,7 +747,9 @@ const getRegisterDynamicWidth = (units: number) =>
         const filledCodes = selectedCodes.filter(Boolean);
 
         if (!filledCodes.length) {
-            return { label: '...', code: '', score: null };
+            const result = { label: '...', code: '', score: null };
+            competencySummaryCache.set(cacheKey, result);
+            return result;
         }
 
         const numericScores = selectedCodes
@@ -719,11 +767,13 @@ const getRegisterDynamicWidth = (units: number) =>
         else if (median > 1.5) code = 'a';
         else if (median >= 0.5) code = 'b';
         const level = gradingCanonicalLevels.find((item: any) => item.id === code);
-        return {
+        const result = {
             label: level?.short || code.toUpperCase(),
             code,
             score: ['c', 'b', 'a', 'ad'].indexOf(code)
         };
+        competencySummaryCache.set(cacheKey, result);
+        return result;
     };
 
     const getStudentObservationSummary = (studentId: string | number, competency: any) => {
@@ -1048,22 +1098,46 @@ const getRegisterDynamicWidth = (units: number) =>
                                         ? (studentIdx % 2 === 0 ? 'bg-white' : 'bg-slate-50')
                                         : rowState.row;
                                     const hasPendingReview = pendingReviewStudentIds.has(String(student.id));
+                                    const groupName = String(student.group || student.grupo || '').trim();
+                                    const groupVisual = groupName ? groupVisuals.get(groupName) : undefined;
+                                    const groupCellStyle = !inactiveStudent && groupVisual
+                                        ? { backgroundColor: groupVisual.surface, color: groupVisual.text, WebkitPrintColorAdjust: 'exact' as const }
+                                        : undefined;
+                                    const studentTooltip = [
+                                        groupName ? `Grupo: ${groupName}` : '',
+                                        hasPendingReview ? 'Tiene una evidencia nueva pendiente de revisión' : ''
+                                    ].filter(Boolean).join(' · ') || undefined;
                                     return (
                                         <tr key={`session-register-row-${student.id}`} className={rowBaseClass}>
-                                            <td className={`border border-slate-200 px-2 py-1.5 print:px-0.5 print:py-0.5 print:w-[44px] print:min-w-[44px] text-center font-medium ${rowState.numberCell}`}><span className="print:inline-block print:w-full print:whitespace-nowrap">{studentIdx + 1}</span></td>
-                                            <td className={`border border-slate-200 px-2 py-1.5 print:px-0.5 print:py-0.5 print:w-[280px] print:min-w-[280px] align-middle ${rowState.studentCell}`}>
+                                            <td
+                                                className={`border border-slate-200 px-2 py-1.5 print:px-0.5 print:py-0.5 print:w-[44px] print:min-w-[44px] text-center font-medium ${rowState.numberCell}`}
+                                                style={groupCellStyle}
+                                                title={groupName ? `Grupo: ${groupName}` : undefined}
+                                            >
+                                                <span className="inline-flex items-center justify-center gap-1 print:w-full print:whitespace-nowrap">
+                                                    {groupVisual && !inactiveStudent ? (
+                                                        <span
+                                                            className="h-2.5 w-2.5 shrink-0 rounded-full border border-white/80 shadow-sm print:h-2 print:w-2"
+                                                            style={{ backgroundColor: groupVisual.dot }}
+                                                            aria-label={`Grupo ${groupName}`}
+                                                        />
+                                                    ) : null}
+                                                    {studentIdx + 1}
+                                                </span>
+                                            </td>
+                                            <td
+                                                className={`border border-slate-200 px-2 py-1.5 print:px-0.5 print:py-0.5 print:w-[280px] print:min-w-[280px] align-middle ${rowState.studentCell}`}
+                                                style={groupCellStyle}
+                                                title={studentTooltip}
+                                            >
                                                 <div
                                                     className={`block w-full overflow-hidden text-ellipsis font-black print:font-normal text-[10px] print:text-[14px] leading-tight whitespace-nowrap ${hasPendingReview ? 'armi-evidence-review-pending' : ''}`}
-                                                    title={hasPendingReview ? 'Tiene una evidencia nueva pendiente de revisión' : undefined}
                                                 >
                                                     {student.name}
                                                 </div>
                                             </td>
                                             {groupedCompetencies.flatMap((competency: any, compIdx: number) => {
-                                                const competencyBlocks = criterionBlocks.filter((block: any) =>
-                                                    normalizeLoose(block.competencia) === normalizeLoose(competency.name)
-                                                    && String(block.source || '') === String(competency.source || '')
-                                                );
+                                                const competencyBlocks = blocksByCompetency.get(competencyCacheKey(competency)) || [];
                                                 const competencySummary = getStudentCompetencySummary(student.id, competency);
                                                 const expanded = isObservationExpanded(competency);
                                                 const summaryId = getCompetencySummaryId(competency);
@@ -1262,6 +1336,14 @@ const getRegisterDynamicWidth = (units: number) =>
                                 >
                                     Subir evidencia
                                 </button>
+                                <button
+                                    type="button"
+                                    onClick={() => loadSessionEvidences(evidenceModal)}
+                                    disabled={evidenceBusy}
+                                    className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-black text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+                                >
+                                    Actualizar
+                                </button>
                                 <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-bold text-emerald-700">
                                     Tambien puedes pegar una captura con `Ctrl + V` desde el recortador de Windows.
                                 </div>
@@ -1296,14 +1378,19 @@ const getRegisterDynamicWidth = (units: number) =>
                                                     <div className="mt-1 text-xs font-bold text-slate-500">
                                                         {formatFileSize(item.fileSize)} · {item.uploadedAt || 'Sin fecha'}
                                                     </div>
+                                                    <div className={`mt-1 text-[10px] font-black uppercase tracking-wide ${item.available ? 'text-emerald-600' : 'text-amber-600'}`}>
+                                                        {item.available
+                                                            ? (item.source === 'student_portal' ? 'Entrega del estudiante · Disponible' : 'Adjunta por el docente · Disponible')
+                                                            : 'Entrega registrada · Archivo sincronizándose'}
+                                                    </div>
                                                 </div>
                                                 <div className="flex items-center gap-2">
                                                     <button
                                                         type="button"
                                                         onClick={() => handleOpenEvidence(item)}
-                                                        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-700 hover:bg-slate-100"
+                                                        className={`rounded-xl border px-3 py-2 text-xs font-black ${item.available ? 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100' : 'border-amber-200 bg-amber-50 text-amber-700'}`}
                                                     >
-                                                        Ver
+                                                        {item.available ? 'Ver' : 'Esperando archivo'}
                                                     </button>
                                                     <button
                                                         type="button"

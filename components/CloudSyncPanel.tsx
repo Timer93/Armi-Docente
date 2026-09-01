@@ -74,7 +74,28 @@ const syncEntityLabels: Record<string, string> = {
   estudiantes: 'Estudiantes',
   egresados: 'Egresados',
   asistencias: 'Asistencias',
+  evaluaciones: 'Evaluaciones',
+  evidencias: 'Evidencias',
   rostros: 'Rostros',
+};
+
+const compareCopyEntityCounts = (status?: CloudSyncStatusData | null) => {
+  const local = status?.localManifest?.summary?.entities;
+  const mirror = status?.mirrorManifest?.summary?.entities;
+  if (!local || !mirror) return { direction: 'unknown' as const, advantages: [] as string[] };
+  const localEntities = local as Record<string, number | undefined>;
+  const mirrorEntities = mirror as Record<string, number | undefined>;
+  const localAdvantages: string[] = [];
+  const mirrorAdvantages: string[] = [];
+  Object.entries(syncEntityLabels).forEach(([key, label]) => {
+    const localValue = Number(localEntities[key] || 0);
+    const mirrorValue = Number(mirrorEntities[key] || 0);
+    if (localValue > mirrorValue) localAdvantages.push(`${localValue - mirrorValue} ${label.toLowerCase()} más`);
+    if (mirrorValue > localValue) mirrorAdvantages.push(`${mirrorValue - localValue} ${label.toLowerCase()} más`);
+  });
+  if (localAdvantages.length && !mirrorAdvantages.length) return { direction: 'local' as const, advantages: localAdvantages };
+  if (mirrorAdvantages.length && !localAdvantages.length) return { direction: 'mirror' as const, advantages: mirrorAdvantages };
+  return { direction: 'mixed' as const, advantages: [...localAdvantages, ...mirrorAdvantages] };
 };
 
 const formatEntitySummary = (summary?: { entities?: Record<string, number> } | null) => {
@@ -247,6 +268,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   const [syncUserKey, setSyncUserKey] = useState('default-user');
   const [syncUserLabel, setSyncUserLabel] = useState('Usuario local');
   const [mirrorPath, setMirrorPath] = useState('');
+  const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine);
   const autoBoundIdentityRef = useRef('');
   const rootRef = useRef<HTMLDivElement | null>(null);
   const detailsBodyRef = useRef<HTMLDivElement | null>(null);
@@ -342,6 +364,21 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
 
   useEffect(() => {
     void refreshStatus();
+  }, []);
+
+  useEffect(() => {
+    const updateOnlineState = () => setBrowserOnline(navigator.onLine);
+    window.addEventListener('online', updateOnlineState);
+    window.addEventListener('offline', updateOnlineState);
+    const timer = window.setInterval(async () => {
+      const response = await getCloudSyncStatus();
+      if (response.success && response.data) setStatus(response.data);
+    }, 15000);
+    return () => {
+      window.removeEventListener('online', updateOnlineState);
+      window.removeEventListener('offline', updateOnlineState);
+      window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -466,7 +503,11 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     return response.success;
   };
 
-  const executeSyncAction = async (action: SyncAction, actionStatus: CloudSyncStatusData | null = status) => {
+  const executeSyncAction = async (
+    action: SyncAction,
+    actionStatus: CloudSyncStatusData | null = status,
+    options?: { force?: boolean },
+  ) => {
     if (!action) return;
     if (action === 'pull' && !actionStatus?.mirrorManifest) {
       const nextMessage = buildDriveDiagnosticMessage(
@@ -490,17 +531,22 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     );
 
     await saveCloudFrontendState(collectArmiLocalState());
-    const response = action === 'push' ? await pushCloudSync() : await pullCloudSync();
+    const response = action === 'push'
+      ? await pushCloudSync({
+          force: options?.force === true,
+          reason: options?.force ? 'user-confirmed-protected-local-recovery' : 'manual-retry',
+        })
+      : await pullCloudSync();
 
     if (!response.success) {
       const nextMessage = action === 'pull'
         ? buildDriveDiagnosticMessage(actionStatus, response.message || 'La sincronizacion no termino correctamente.')
         : response.message || 'La sincronizacion no termino correctamente.';
-      setErrorMessage(nextMessage);
-      setToast({ type: 'error', text: nextMessage });
-      setModalMessage('La operacion no pudo completarse.');
       setActiveAction(null);
       await refreshStatus();
+      setErrorMessage(nextMessage);
+      setToast({ type: 'error', text: nextMessage });
+      setModalMessage(nextMessage);
       return;
     }
 
@@ -527,16 +573,21 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     }
 
     markRecentManualPush();
+    const protectedPreviousDriveCopy = String(response.data?.protectedMirrorBackup || '').trim();
     const deliveryPending = response.data?.cloudDeliveryPending === true;
     setToast({
       type: deliveryPending ? 'warning' : 'success',
-      text: deliveryPending
+      text: protectedPreviousDriveCopy
+        ? 'Drive fue respaldado y esta PC quedó como copia principal.'
+        : deliveryPending
         ? response.data?.driveDesktop?.message || 'La copia quedo preparada, pero Google Drive sigue pendiente.'
         : 'Carpeta espejo actualizada correctamente.',
     });
-    setModalMessage(deliveryPending
-      ? 'ARMI guardo la copia en la carpeta espejo, pero Google Drive debe reanudar la sincronizacion para enviarla a la nube.'
-      : 'La carpeta espejo quedo actualizada. Google Drive para escritorio continuara la entrega en segundo plano.');
+    setModalMessage(protectedPreviousDriveCopy
+      ? 'ARMI guardó primero la versión anterior de Drive en el historial protegido. Los datos de esta PC son ahora la copia principal.'
+      : deliveryPending
+        ? 'ARMI guardo la copia en la carpeta espejo, pero Google Drive debe reanudar la sincronizacion para enviarla a la nube.'
+        : 'La carpeta espejo quedo actualizada. Google Drive para escritorio continuara la entrega en segundo plano.');
     setActiveAction(null);
     await refreshStatus();
     emitCloudSyncUpdated();
@@ -666,6 +717,11 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     || status.comparison === 'local-newer'
     || !!status.pendingLocal
   );
+  const copyRecommendation = compareCopyEntityCounts(status);
+  const pendingNeedsProtectedLocalRecovery = status?.pendingLocal?.reason === 'mirror-changed-on-another-pc';
+  const canProtectDriveAndKeepLocal = pendingNeedsProtectedLocalRecovery
+    && copyRecommendation.direction === 'local'
+    && !!status?.mirrorManifest;
   const remoteLookupMessage = String(status?.config.remoteLookupMessage || '').trim();
   const localDate = status?.localManifest?.generatedAt
     ? new Date(status.localManifest.generatedAt).toLocaleString()
@@ -673,6 +729,25 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   const mirrorDate = status?.mirrorManifest?.generatedAt
     ? new Date(status.mirrorManifest.generatedAt).toLocaleString()
     : 'Sin copia en Drive';
+  const incrementalState = status?.incrementalSync?.state || status?.continuousSync?.state || 'inactive';
+  const synchronizationTone = !isDriveMode
+    ? 'local'
+    : !browserOnline
+      || status?.driveDesktop?.state !== 'ready'
+      || ['error', 'unavailable', 'pending', 'waiting-for-drive', 'waiting-for-folder', 'protected-conflict'].includes(incrementalState)
+      ? 'error'
+      : loadingStatus || activeAction !== null || ['starting', 'syncing', 'waiting-for-quiet', 'needs-review'].includes(incrementalState)
+        ? 'syncing'
+        : 'ready';
+  const synchronizationTitle = synchronizationTone === 'ready'
+    ? 'Sincronizado: los cambios visibles estan en la carpeta espejo y Google Drive esta activo.'
+    : synchronizationTone === 'syncing'
+      ? incrementalState === 'needs-review'
+        ? 'Sincronizado con un cambio concurrente registrado para revision.'
+        : 'Sincronizando cambios en segundo plano.'
+      : synchronizationTone === 'error'
+        ? (!browserOnline ? 'No sincronizado: esta PC no tiene internet.' : status?.driveDesktop?.message || status?.incrementalSync?.message || 'No sincronizado; los datos locales siguen seguros.')
+        : 'Modo local: Google Drive no esta activo.';
   const toggleButtonClass = `
     relative group ${compact ? '-mr-[12rem] origin-left scale-[0.34]' : ''} flex h-[4.4rem] w-[18.5rem] items-center overflow-hidden rounded-full border
     bg-white/25 px-2 backdrop-blur-xl transition-all duration-500
@@ -796,6 +871,23 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
           ) : null}
         </button>
 
+        {compact ? (
+          <span
+            role="status"
+            aria-label={synchronizationTitle}
+            title={synchronizationTitle}
+            className={`absolute -right-0.5 -top-1 z-30 h-2.5 w-2.5 rounded-full border-2 border-white shadow-sm ${
+              synchronizationTone === 'ready'
+                ? 'bg-emerald-500'
+                : synchronizationTone === 'syncing'
+                  ? 'animate-pulse bg-amber-400'
+                  : synchronizationTone === 'error'
+                    ? 'bg-rose-500'
+                    : 'bg-slate-400'
+            }`}
+          />
+        ) : null}
+
         <button
           type="button"
           onClick={() => setDetailsOpen((current) => !current)}
@@ -910,14 +1002,16 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                       <p className="mt-2 leading-relaxed text-slate-500">
                         ARMI comprueba la instalacion, abre Google Drive automaticamente cuando es posible y revisa la conexion a internet. Si Drive se pausa, los cambios permanecen seguros y se reintentan al reanudarlo.
                       </p>
-                      {status?.continuousSync ? (
+                      {status?.incrementalSync || status?.continuousSync ? (
                         <div className={`mt-2 rounded-xl border px-3 py-2 ${
-                          ['in-sync', 'watching'].includes(status.continuousSync.state)
+                          synchronizationTone === 'ready'
                             ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                            : 'border-sky-200 bg-sky-50 text-sky-800'
+                            : synchronizationTone === 'syncing'
+                              ? 'border-amber-200 bg-amber-50 text-amber-800'
+                              : 'border-rose-200 bg-rose-50 text-rose-800'
                         }`}>
-                          <p className="font-black uppercase tracking-[0.12em]">Sincronizacion continua</p>
-                          <p className="mt-1 leading-relaxed">{status.continuousSync.message}</p>
+                          <p className="font-black uppercase tracking-[0.12em]">Sincronizacion incremental</p>
+                          <p className="mt-1 leading-relaxed">{status.incrementalSync?.message || status.continuousSync?.message}</p>
                           <p className="mt-1 font-semibold">
                             Internet: {status.driveDesktop?.internetOnline === false ? 'sin conexion; trabajando localmente' : 'disponible'}
                           </p>
@@ -1288,6 +1382,8 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                         ? 'Drive contiene cambios de otra PC que no llegaron automaticamente. Puedes recuperarlos ahora.'
                         : status?.comparison === 'mirror-missing'
                           ? 'La carpeta espejo todavia no contiene una copia completa. Puedes reintentar su creacion.'
+                          : canProtectDriveAndKeepLocal
+                            ? `Drive cambió desde otra PC, pero esta PC conserva más información (${copyRecommendation.advantages.slice(0, 3).join(', ')}). Puedes subir esta PC a Drive; ARMI guardará antes la copia anterior de Drive en el historial protegido.`
                           : status?.pendingLocal
                             ? 'Hay cambios locales pendientes de entregar a Google Drive.'
                             : status?.driveDesktop?.message || 'La sincronizacion necesita atencion.'}
@@ -1302,7 +1398,23 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                         Abrir asistente de solucion
                       </button>
                     ) : null}
-                    {canRetryManualPush && status?.comparison !== 'diverged' ? (
+                    {canProtectDriveAndKeepLocal ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const confirmed = window.confirm(
+                            `Esta PC tiene ${copyRecommendation.advantages.slice(0, 3).join(', ')}. ARMI respaldará primero la copia actual de Drive y luego conservará esta PC como principal. ¿Deseas continuar?`
+                          );
+                          if (!confirmed) return;
+                          await executeSyncAction('push', status, { force: true });
+                        }}
+                        disabled={loadingStatus || activeAction !== null}
+                        className="rounded-xl bg-emerald-700 px-3 py-2 font-bold text-white disabled:opacity-50"
+                      >
+                        Subir esta PC a Drive
+                      </button>
+                    ) : null}
+                    {canRetryManualPush && status?.comparison !== 'diverged' && !pendingNeedsProtectedLocalRecovery ? (
                       <button
                         type="button"
                         onClick={() => executeSyncAction('push')}
@@ -1335,7 +1447,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
           <div className="w-full max-w-lg rounded-[2rem] bg-white p-7 shadow-[0_24px_60px_rgba(15,23,42,0.28)]">
             <p className="text-[11px] font-black uppercase tracking-[0.25em] text-sky-500">Estado de sincronizacion</p>
             <h2 className="mt-2 text-2xl font-black text-slate-900">
-              {activeAction === 'push' ? 'Actualizando Drive' : activeAction === 'pull' ? 'Cargando desde Drive' : errorMessage ? 'Operacion no disponible' : 'Sincronizacion protegida'}
+              {activeAction === 'push' ? 'Actualizando Drive' : activeAction === 'pull' ? 'Cargando desde Drive' : errorMessage && canProtectDriveAndKeepLocal ? 'Drive protegió tus datos' : errorMessage ? 'Operacion no disponible' : 'Sincronizacion protegida'}
             </h2>
             <p className="mt-4 text-sm leading-relaxed text-slate-600">{modalMessage}</p>
 
@@ -1356,6 +1468,21 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
             ) : null}
 
             <div className="mt-6 flex justify-end gap-2">
+              {errorMessage && canProtectDriveAndKeepLocal && activeAction === null ? (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const confirmed = window.confirm(
+                      `Esta PC tiene ${copyRecommendation.advantages.slice(0, 3).join(', ')}. ARMI respaldará primero la copia actual de Drive y luego conservará esta PC como principal. ¿Deseas continuar?`
+                    );
+                    if (!confirmed) return;
+                    await executeSyncAction('push', status, { force: true });
+                  }}
+                  className="rounded-2xl bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-800"
+                >
+                  Subir esta PC a Drive
+                </button>
+              ) : null}
               {status?.comparison === 'mirror-newer' && activeAction === null ? (
                 <button
                   type="button"

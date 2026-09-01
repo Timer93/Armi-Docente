@@ -94,7 +94,72 @@ const SYNC_EXCLUDED_TABLES = new Set([
     'student_chat_members',
     'student_chat_messages',
     'portal_sesiones_estudiantes',
+    'portal_evidence_uploads',
+    'sync_change_clock',
 ]);
+
+let syncTrackingSchemaSignature = '';
+
+const quoteIdentifier = (value) => `"${String(value).replace(/"/g, '""')}"`;
+
+const ensureSyncChangeTracking = () => {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS sync_change_clock (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            revision INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT
+        );
+        INSERT OR IGNORE INTO sync_change_clock (id, revision, updated_at)
+        VALUES (1, 0, CURRENT_TIMESTAMP);
+    `);
+
+    const trackedTables = db
+        .prepare("SELECT name, COALESCE(sql, '') AS sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .all()
+        .filter((row) => row?.name && !SYNC_EXCLUDED_TABLES.has(row.name));
+    const schemaSignature = crypto
+        .createHash('sha256')
+        .update(trackedTables.map((row) => `${row.name}:${row.sql}`).join('|'))
+        .digest('hex')
+        .slice(0, 16);
+
+    if (schemaSignature !== syncTrackingSchemaSignature) {
+        const expectedTriggers = new Set();
+        trackedTables.forEach(({ name }) => {
+            ['insert', 'update', 'delete'].forEach((operation) => {
+                const triggerName = `armi_sync_${operation}_${crypto.createHash('sha1').update(name).digest('hex').slice(0, 12)}`;
+                expectedTriggers.add(triggerName);
+                db.exec(`
+                    CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(triggerName)}
+                    AFTER ${operation.toUpperCase()} ON ${quoteIdentifier(name)}
+                    BEGIN
+                        UPDATE sync_change_clock
+                        SET revision = revision + 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = 1;
+                    END;
+                `);
+            });
+        });
+
+        db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'armi_sync_%'")
+            .all()
+            .map((row) => row.name)
+            .filter((name) => !expectedTriggers.has(name))
+            .forEach((name) => db.exec(`DROP TRIGGER IF EXISTS ${quoteIdentifier(name)}`));
+        syncTrackingSchemaSignature = schemaSignature;
+    }
+
+    const clock = db.prepare('SELECT revision FROM sync_change_clock WHERE id = 1').get();
+    return {
+        revision: Number(clock?.revision || 0),
+        schemaSignature,
+    };
+};
+
+const getSyncChangeSignature = () => {
+    const { revision, schemaSignature } = ensureSyncChangeTracking();
+    return `sync-clock:${revision}:${schemaSignature}`;
+};
 
 const syncReferenceTablesFromBundledDatabase = () => {
     if (!fs.existsSync(bundledDbPath) || path.resolve(bundledDbPath) === path.resolve(dbPath)) return;
@@ -562,6 +627,28 @@ const initDb = () => {
 
             CREATE INDEX IF NOT EXISTS idx_portal_sesiones_student_id ON portal_sesiones_estudiantes(student_id);
             CREATE INDEX IF NOT EXISTS idx_portal_sesiones_expires_at ON portal_sesiones_estudiantes(expires_at);
+
+            CREATE TABLE IF NOT EXISTS portal_evidence_uploads (
+                upload_id TEXT PRIMARY KEY,
+                student_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                replace_evidence_id INTEGER DEFAULT 0,
+                original_file_name TEXT NOT NULL,
+                file_type TEXT DEFAULT '',
+                total_size INTEGER NOT NULL,
+                chunk_size INTEGER NOT NULL,
+                total_chunks INTEGER NOT NULL,
+                received_chunks TEXT DEFAULT '[]',
+                client_sha256 TEXT DEFAULT '',
+                observation TEXT DEFAULT '',
+                status TEXT NOT NULL,
+                last_error TEXT DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_portal_uploads_student_status ON portal_evidence_uploads(student_id, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_portal_uploads_expires ON portal_evidence_uploads(expires_at);
         `);
 
         const checkAndAdd = (table, col, type) => {
@@ -617,6 +704,12 @@ const initDb = () => {
             CREATE INDEX IF NOT EXISTS idx_evaluacion_evidencias_versions
             ON evaluacion_evidencias(student_id, session_id, version_group_id, version_number);
 
+            CREATE INDEX IF NOT EXISTS idx_evaluacion_evidencias_session_student
+            ON evaluacion_evidencias(session_id, student_id, is_latest, criteria_id);
+
+            CREATE INDEX IF NOT EXISTS idx_evaluacion_evidencias_curricular_scope
+            ON evaluacion_evidencias(year, area_id, grade, section, bimester, unit_number, session_number);
+
             CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluacion_evidencias_portable_key
             ON evaluacion_evidencias(evidence_key)
             WHERE evidence_key IS NOT NULL AND TRIM(evidence_key) <> '';
@@ -648,6 +741,7 @@ initDb();
 syncReferenceTablesFromBundledDatabase();
 ensureGeneralDataIntegrity();
 ensureInitialModuleStatusRow();
+ensureSyncChangeTracking();
 
 const listUserTables = () => db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
@@ -853,6 +947,8 @@ export {
     dumpDatabase,
     restoreDatabase,
     SYNC_EXCLUDED_TABLES,
+    ensureSyncChangeTracking,
+    getSyncChangeSignature,
     getPortalSessionToken,
     setPortalSessionToken,
     touchPortalSessionToken,

@@ -225,6 +225,18 @@ export interface CloudSyncStatusData {
         lastSuccessAt?: string;
         lastErrorAt?: string;
     };
+    incrementalSync?: {
+        enabled: boolean;
+        state: string;
+        message: string;
+        pendingOperations?: number;
+        publishedOperations?: number;
+        appliedOperations?: number;
+        conflicts?: number;
+        updatedAt?: string | null;
+        lastSuccessAt?: string;
+        lastErrorAt?: string;
+    };
     resourceDelivery?: ResourceDeliveryStatus;
     frontendState?: {
         exportedAt?: string | null;
@@ -288,6 +300,7 @@ export interface LocalCloudSyncStatusData {
         note?: string;
     } | null;
     continuousSync?: CloudSyncStatusData['continuousSync'];
+    incrementalSync?: CloudSyncStatusData['incrementalSync'];
     hasUnsyncedChanges: boolean;
     lastFrontendStateAt: string | null;
     frontendState?: {
@@ -418,7 +431,8 @@ export const deleteSesion = async (id: string): Promise<ApiResponse<any>> => {
 // --- UNIDADES DIDÃCTICAS ---
 export const getUnidadDidactica = async (year: string, areaId: string, grade: string, section: string, unitNumber: string): Promise<any> => {
     try {
-        const res = await safeFetch(`${BACKEND_URL}/unidades-didacticas?year=${year}&areaId=${areaId}&grade=${grade}&section=${section}&unitNumber=${unitNumber}`);
+        const params = new URLSearchParams({ year, areaId, grade, section, unitNumber });
+        const res = await safeFetch(`${BACKEND_URL}/unidades-didacticas?${params.toString()}`);
         const json = await res.json();
         return json.success ? json.data : null;
     } catch (e) { return null; }
@@ -523,7 +537,20 @@ export const saveImageAssetFile = async (data: {
     kind: 'general_insignia' | 'general_logo' | 'profile' | 'session_resource';
     userKey?: string;
     alreadyOptimized?: boolean;
-}): Promise<ApiResponse<{ fileUrl: string; relativePath: string }>> => {
+}): Promise<ApiResponse<{
+    fileUrl: string;
+    relativePath: string;
+    wordFileUrl?: string;
+    wordRelativePath?: string;
+    storage?: {
+        fingerprint: string;
+        width: number;
+        height: number;
+        originalBytes: number;
+        webpBytes: number;
+        wordBytes: number;
+    };
+}>> => {
     try {
         const shouldOptimize = !data.alreadyOptimized && data.kind !== 'profile';
         const imageData = shouldOptimize
@@ -806,6 +833,35 @@ export const saveEstudiante = async (s: Student): Promise<ApiResponse<any>> => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(s),
+        });
+        return await res.json();
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const resetStudentPortalPassword = async (id: string | number): Promise<ApiResponse<{
+    studentId: string | number;
+    initialPassword: string;
+    requiresPasswordChange: boolean;
+}>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/estudiantes/${encodeURIComponent(String(id))}/reset-portal-password`, {
+            method: 'POST',
+        });
+        return await res.json();
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const openStudentPortalTestSession = async (id: string | number): Promise<ApiResponse<{
+    url: string;
+    expiresInMinutes: number;
+}>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/estudiantes/${encodeURIComponent(String(id))}/open-test-portal`, {
+            method: 'POST',
         });
         return await res.json();
     } catch (e: any) {
@@ -1435,12 +1491,28 @@ export const getEvaluacionEvidencias = async (filters?: any): Promise<ApiRespons
     } catch (e: any) { return { success: false, message: e.message }; }
 };
 
-export const saveEvaluacionEvidencia = async (data: any): Promise<ApiResponse<any>> => {
+export const saveEvaluacionEvidencia = async (data: any, file?: File): Promise<ApiResponse<any>> => {
     try {
+        let body: BodyInit;
+        let headers: HeadersInit | undefined;
+        if (file) {
+            const formData = new FormData();
+            Object.entries(data || {}).forEach(([key, value]) => {
+                if (value === undefined || value === null) return;
+                formData.append(key, (Array.isArray(value) || typeof value === 'object')
+                    ? JSON.stringify(value)
+                    : String(value));
+            });
+            formData.append('file', file, file.name);
+            body = formData;
+        } else {
+            headers = { 'Content-Type': 'application/json' };
+            body = JSON.stringify(data);
+        }
         const res = await safeFetch(`${BACKEND_URL}/evaluacion/evidencias`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data),
+            headers,
+            body,
         }, 60000);
         return await res.json();
     } catch (e: any) { return { success: false, message: e.message }; }
@@ -1467,6 +1539,54 @@ export const getEvidenceStorageConfig = async (): Promise<ApiResponse<any>> => {
         clearTimeout(timeout);
     }
 };
+
+export const getRemoteAccessStatus = async (): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/remote-access/status`, undefined, 15000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const getRemoteAccessStudents = async (): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/remote-access/students`, undefined, 10000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const configureRemoteAccess = async (config: any): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/remote-access/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config || {}),
+        }, 15000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+const changeRemoteAccessState = async (action: 'start' | 'stop' | 'restart'): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/remote-access/${action}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+        }, action === 'stop' ? 15000 : 20000);
+        return await readJsonResponse(res);
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const startRemoteAccess = () => changeRemoteAccessState('start');
+export const stopRemoteAccess = () => changeRemoteAccessState('stop');
+export const restartRemoteAccess = () => changeRemoteAccessState('restart');
 
 export const saveEvidenceStorageConfig = async (path: string): Promise<ApiResponse<any>> => {
     try {

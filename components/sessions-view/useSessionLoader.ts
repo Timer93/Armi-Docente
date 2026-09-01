@@ -71,6 +71,7 @@ export const useSessionLoader = ({
             const requestId = ++sessionLoadRequestRef.current;
             const isStaleRequest = () => sessionLoadRequestRef.current !== requestId;
             const selectionKey = `${year}-${selArea}-${selGrade}-${selSection}-U${unitNumber}-S${sessionNumber}`;
+            const unitRequest = getUnidadDidactica(year, areaId, selGrade, selSection, unitNumber);
     
             if (lastSelectionKeyRef.current !== selectionKey) {
                 lastSelectionKeyRef.current = selectionKey;
@@ -91,11 +92,11 @@ export const useSessionLoader = ({
                 if (isStaleRequest()) return;
                 setCompetenciasBase(comps);
     
-                const unit = await getUnidadDidactica(year, areaId, selGrade, selSection, unitNumber);
+                const unit = await unitRequest;
                 if (isStaleRequest()) return;
                 if (unit) {
                     const unitSessions = Array.isArray(unit.sesiones) ? unit.sesiones : [];
-                    const sessionCount = unitSessions.length || 15;
+                    const sessionCount = Math.max(unitSessions.length, 1);
                     setMaxSessionsInUnit(sessionCount);
     
                     const targetSessionId = parseInt(sessionNumber, 10);
@@ -425,12 +426,12 @@ export const useSessionLoader = ({
                     setToast({ msg: `⚠️ No se halló la Unidad U${unitNumber} para estos filtros en SQL.`, type: 'warning' });
                     setSessionDate('');
                     setDateOptions([]);
-                    setMaxSessionsInUnit(15);
+                    setMaxSessionsInUnit(Math.max(Number.parseInt(sessionNumber, 10) || 1, 1));
                 }
             };
     
             const loadSessionDateFromUnit = async () => {
-                const unit = await getUnidadDidactica(year, areaId, selGrade, selSection, unitNumber);
+                const unit = await unitRequest;
                 if (isStaleRequest()) return;
     
                 if (!unit) {
@@ -471,8 +472,36 @@ export const useSessionLoader = ({
                     setDateOptions([]);
                 }
             };
+
+            const loadPlannedSessionCount = async () => {
+                const unit = await unitRequest;
+                if (isStaleRequest()) return;
+                if (!unit) {
+                    setMaxSessionsInUnit(Math.max(Number.parseInt(sessionNumber, 10) || 1, 1));
+                    return;
+                }
+                const unitSessions = Array.isArray(unit.sesiones) ? unit.sesiones : [];
+                const explicitCount = Number(
+                    unit.sessionCount
+                    ?? unit.cantidadSesiones
+                    ?? unit.cantidad_sesiones
+                    ?? 0
+                );
+                const highestPlannedNumber = unitSessions.reduce((highest: number, plannedSession: any, index: number) => {
+                    const plannedNumber = Number(plannedSession?.sessionNumber ?? plannedSession?.id ?? index + 1);
+                    return Number.isFinite(plannedNumber) ? Math.max(highest, plannedNumber) : highest;
+                }, 0);
+                setMaxSessionsInUnit(Math.max(
+                    Number.isFinite(explicitCount) ? explicitCount : 0,
+                    unitSessions.length,
+                    highestPlannedNumber,
+                    1
+                ));
+            };
     
             const checkSavedSession = async () => {
+                await loadPlannedSessionCount();
+                if (isStaleRequest()) return;
                 const saved = await getSesion(year, areaId, selGrade, selSection, unitNumber, sessionNumber);
                 if (isStaleRequest()) return;
                 if (saved) {
@@ -575,7 +604,7 @@ export const useSessionLoader = ({
             }));
             setSessionDate('');
             setDateOptions([]);
-            setMaxSessionsInUnit(15);
+            setMaxSessionsInUnit(Math.max(Number.parseInt(sessionNumber, 10) || 1, 1));
         }
     }, [selArea, selGrade, selSection, unitNumber, sessionNumber, year, assignments, allSavedPrograms]);
 };

@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('armiUpdater', {
 });
 
 contextBridge.exposeInMainWorld('armiApp', {
+  notifyStartupReady: () => ipcRenderer.send('app:startup-ready'),
   onBeforeQuitAttempt: (callback) => {
     if (typeof callback !== 'function') return () => {};
     const listener = () => callback();

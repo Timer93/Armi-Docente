@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import QRCode from 'qrcode';
 import {
   deleteEvaluacionEvidencia,
   getAllSesiones,
@@ -7,11 +8,16 @@ import {
   getEvaluacionEvidencias,
   getEstudiantes,
   getProgramacionesAnuales,
+  getRemoteAccessStatus,
+  getRemoteAccessStudents,
   getUnidadDidactica,
   pickEvidenceStorageFolder,
   recoverEvidenceStorageToMirror,
+  restartRemoteAccess,
   saveEvidenceStorageConfig,
-  saveEvaluacionEvidencia
+  saveEvaluacionEvidencia,
+  startRemoteAccess,
+  stopRemoteAccess
 } from '../../services/apiService';
 import { Student, TeachingAssignment } from '../../types';
 import { StudentChatMonitor } from './StudentChatMonitor';
@@ -46,6 +52,56 @@ type EvidenceFileItem = {
   available: boolean;
   availabilitySource: string;
 };
+
+type RemoteAccessState = {
+  enabledByTeacher: boolean;
+  tunnelStatus: 'DISABLED' | 'STARTING' | 'CONNECTED' | 'RECONNECTING' | 'STOPPING' | 'DISCONNECTED' | 'ERROR';
+  publicUrl: string;
+  configured: boolean;
+  cloudflaredInstalled: boolean;
+  connectedStudents: number;
+  activeUploads: number;
+  queuedUploads: number;
+  activeTransfers: number;
+  lastError?: string | null;
+  configuration?: {
+    mode?: 'quick' | 'named' | 'remote';
+    cloudflaredPath?: string;
+    configPath?: string;
+    tunnelName?: string;
+    tokenFileConfigured?: boolean;
+    publicUrl?: string;
+  };
+};
+
+type RemoteStudentPresence = {
+  sessionId: string;
+  userId: string;
+  names: string;
+  grade: string;
+  section: string;
+  online: boolean;
+  currentActivity: string;
+  uploadStatus: 'IDLE' | 'UPLOADING' | 'QUEUED' | 'VERIFYING';
+  connectedAt: string;
+  lastHeartbeatAt: string;
+  source: 'lan' | 'remote';
+};
+
+const EMPTY_REMOTE_STATE: RemoteAccessState = {
+  enabledByTeacher: false,
+  tunnelStatus: 'DISABLED',
+  publicUrl: '',
+  configured: false,
+  cloudflaredInstalled: false,
+  connectedStudents: 0,
+  activeUploads: 0,
+  queuedUploads: 0,
+  activeTransfers: 0,
+  lastError: null,
+};
+
+const EVIDENCE_RENDER_BATCH_SIZE = 24;
 
 const BIMESTER_OPTIONS = [
   { value: 'I', label: 'I Bimestre' },
@@ -133,13 +189,6 @@ const getFileAccent = (previewKind: EvidenceFileItem['previewKind']) => {
   return { bg: 'bg-slate-600', soft: 'bg-slate-100', text: 'text-slate-700', border: 'border-slate-300', label: 'FILE' };
 };
 
-const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
-  const reader = new FileReader();
-  reader.onload = () => resolve(String(reader.result || ''));
-  reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
-  reader.readAsDataURL(file);
-});
-
 export const EvidenceBank: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
@@ -157,6 +206,12 @@ export const EvidenceBank: React.FC = () => {
   const [storageBusy, setStorageBusy] = useState(false);
   const [automaticMirrorStorage, setAutomaticMirrorStorage] = useState(false);
   const [storageRecovery, setStorageRecovery] = useState<any>(null);
+  const [remoteAccess, setRemoteAccess] = useState<RemoteAccessState>(EMPTY_REMOTE_STATE);
+  const [remoteStudents, setRemoteStudents] = useState<RemoteStudentPresence[]>([]);
+  const [remoteBusy, setRemoteBusy] = useState(false);
+  const [remoteMessage, setRemoteMessage] = useState('');
+  const [remoteQr, setRemoteQr] = useState('');
+  const [visibleEvidenceLimit, setVisibleEvidenceLimit] = useState(EVIDENCE_RENDER_BATCH_SIZE);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const replaceInputRef = useRef<HTMLInputElement | null>(null);
   const [replaceEvidenceId, setReplaceEvidenceId] = useState<string | number | null>(null);
@@ -228,6 +283,36 @@ export const EvidenceBank: React.FC = () => {
     loadSecondaryData();
     return () => { active = false; };
   }, []);
+
+  const applyRemoteState = (next: any) => {
+    if (!next) return;
+    setRemoteAccess({ ...EMPTY_REMOTE_STATE, ...next });
+  };
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      const [result, presenceResult] = await Promise.all([getRemoteAccessStatus(), getRemoteAccessStudents()]);
+      if (!active) return;
+      if (result.data) applyRemoteState(result.data);
+      if (presenceResult.data?.students) setRemoteStudents(presenceResult.data.students);
+    };
+    void refresh();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh();
+    }, remoteAccess.enabledByTeacher ? 5000 : 15000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [remoteAccess.enabledByTeacher]);
+
+  const remoteStudentGroups = useMemo(() => {
+    const groups = new Map<string, RemoteStudentPresence[]>();
+    remoteStudents.filter((student) => student.online).forEach((student) => {
+      const key = `${student.grade} · ${student.section}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)?.push(student);
+    });
+    return [...groups.entries()];
+  }, [remoteStudents]);
 
   const loadSavedEvidences = async () => {
     const res = await getEvaluacionEvidencias();
@@ -527,9 +612,9 @@ export const EvidenceBank: React.FC = () => {
     for (const file of filesToSave) {
       const draft = buildEvidenceItem(file);
       if (!draft) continue;
-      const dataUrl = await readFileAsDataUrl(file);
       const res = await saveEvaluacionEvidencia({
         id: replaceId || undefined,
+        sessionId: `${draft.filters.year}-${draft.filters.areaId}-${draft.filters.grade}-${draft.filters.section}-U${draft.filters.unit}-S${draft.filters.session}`,
         year: draft.filters.year,
         areaId: draft.filters.areaId,
         grade: draft.filters.grade,
@@ -541,9 +626,8 @@ export const EvidenceBank: React.FC = () => {
         studentNames: draft.studentNames,
         fileName: draft.fileName,
         fileType: draft.fileType,
-        fileSize: draft.fileSize,
-        dataUrl
-      });
+        fileSize: draft.fileSize
+      }, file);
       if (!res.success) {
         setUploadMessage(res.message || 'No se pudo guardar la evidencia.');
         return;
@@ -617,6 +701,15 @@ export const EvidenceBank: React.FC = () => {
     ));
   }, [evidences, filters, selectedStudentIds]);
 
+  const renderedCards = useMemo(
+    () => visibleCards.slice(0, visibleEvidenceLimit),
+    [visibleCards, visibleEvidenceLimit]
+  );
+
+  useEffect(() => {
+    setVisibleEvidenceLimit(EVIDENCE_RENDER_BATCH_SIZE);
+  }, [filters.year, filters.areaId, filters.bimester, filters.unit, filters.session, filters.grade, filters.section, selectedStudentIds]);
+
   const chooseStorageFolder = async () => {
     setStorageBusy(true);
     setStorageMessage('');
@@ -664,6 +757,59 @@ export const EvidenceBank: React.FC = () => {
     }
     await navigator.clipboard.writeText(url);
     setStorageMessage('Dirección del portal copiada.');
+  };
+
+  const remotePortalUrl = remoteAccess.publicUrl
+    ? `${remoteAccess.publicUrl.replace(/\/+$/, '')}/estudiante`
+    : '';
+  const remoteIsConnected = remoteAccess.tunnelStatus === 'CONNECTED' && Boolean(remotePortalUrl);
+  const remoteIsStarting = ['STARTING', 'RECONNECTING'].includes(remoteAccess.tunnelStatus);
+  const remoteNeedsRetry = remoteAccess.enabledByTeacher && ['DISCONNECTED', 'ERROR'].includes(remoteAccess.tunnelStatus);
+
+  const remoteStatusView = {
+    DISABLED: { dot: 'bg-slate-300', label: 'Desactivado', text: 'text-slate-200' },
+    STARTING: { dot: 'bg-amber-300 animate-pulse', label: 'Iniciando', text: 'text-amber-200' },
+    CONNECTED: { dot: 'bg-emerald-400', label: 'Conectado', text: 'text-emerald-200' },
+    RECONNECTING: { dot: 'bg-orange-300 animate-pulse', label: 'Reconectando', text: 'text-orange-200' },
+    STOPPING: { dot: 'bg-amber-300 animate-pulse', label: 'Desactivando', text: 'text-amber-200' },
+    DISCONNECTED: { dot: 'bg-orange-400', label: 'Sin conexión', text: 'text-orange-200' },
+    ERROR: { dot: 'bg-red-400', label: 'Error', text: 'text-red-200' },
+  }[remoteAccess.tunnelStatus] || { dot: 'bg-slate-300', label: 'Desactivado', text: 'text-slate-200' };
+
+  const toggleRemoteAccess = async () => {
+    setRemoteBusy(true);
+    const shouldStop = remoteIsConnected || remoteIsStarting;
+    setRemoteMessage(shouldStop ? 'Desactivando acceso remoto...' : remoteNeedsRetry ? 'Creando un nuevo enlace por Internet...' : 'Comprobando servidor, Internet y túnel seguro...');
+    const result = shouldStop
+      ? await stopRemoteAccess()
+      : remoteNeedsRetry
+        ? await restartRemoteAccess()
+        : await startRemoteAccess();
+    if (result.data) applyRemoteState(result.data);
+    const nextStatus = result.data?.tunnelStatus;
+    setRemoteMessage(!result.success
+      ? result.message || result.data?.lastError || 'No se pudo cambiar el acceso remoto.'
+      : nextStatus === 'CONNECTED'
+        ? 'Acceso remoto conectado y verificado.'
+        : nextStatus === 'DISABLED'
+          ? 'Acceso remoto desactivado.'
+          : result.message || 'Creando y verificando el enlace por Internet...');
+    setRemoteBusy(false);
+  };
+
+  const copyRemotePortalUrl = async () => {
+    if (!remotePortalUrl) return;
+    await navigator.clipboard.writeText(remotePortalUrl);
+    setRemoteMessage('Enlace remoto copiado.');
+  };
+
+  const showRemoteQrCode = async () => {
+    if (!remotePortalUrl) return;
+    try {
+      setRemoteQr(await QRCode.toDataURL(remotePortalUrl, { width: 360, margin: 2 }));
+    } catch {
+      setRemoteMessage('No se pudo generar el código QR.');
+    }
   };
 
   const FilterSelect = ({
@@ -755,18 +901,126 @@ export const EvidenceBank: React.FC = () => {
             ) : null}
             {storageMessage ? <div className="mt-3 text-[11px] font-bold text-amber-200">{storageMessage}</div> : null}
           </div>
-          <div className="rounded-3xl border border-white/10 bg-white/10 p-5 backdrop-blur-sm">
-            <div className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-200">Acceso para estudiantes</div>
-            <div className="mt-3 break-all rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-sm font-black text-white">
-              {portalUrls[0] || 'Conecta este equipo a una red para detectar su IP.'}
+          <div className="space-y-3">
+            <div className="rounded-3xl border border-white/10 bg-white/10 p-5 backdrop-blur-sm">
+              <div className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-200">Acceso local · LAN / Wi-Fi</div>
+              <div className="mt-3 break-all rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-sm font-black text-white">
+                {portalUrls[0] || 'Conecta este equipo a una red para detectar su IP.'}
+              </div>
+              <button type="button" onClick={copyPortalUrl} disabled={!portalUrls.length} className="mt-3 w-full rounded-2xl bg-white px-4 py-3 text-[10px] font-black uppercase tracking-widest text-violet-800 hover:bg-violet-50 disabled:opacity-50">
+                Copiar enlace local
+              </button>
+              <p className="mt-3 text-[10px] font-semibold leading-relaxed text-slate-300">Funciona dentro de la misma red y permanece disponible aunque el acceso remoto esté apagado.</p>
             </div>
-            <button type="button" onClick={copyPortalUrl} disabled={!portalUrls.length} className="mt-3 w-full rounded-2xl bg-white px-4 py-3 text-[10px] font-black uppercase tracking-widest text-violet-800 hover:bg-violet-50 disabled:opacity-50">
-              Copiar dirección para el celular
-            </button>
-            <p className="mt-3 text-[10px] font-semibold leading-relaxed text-slate-300">ARMI Docente debe permanecer abierto y ambos dispositivos deben estar en la misma red Wi-Fi o LAN.</p>
+
+            <div className="rounded-3xl border border-cyan-300/20 bg-slate-950/35 p-5 backdrop-blur-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-200">Acceso remoto</div>
+                <div className={`flex items-center gap-2 text-[10px] font-black uppercase ${remoteStatusView.text}`}>
+                  <span className={`h-2.5 w-2.5 rounded-full ${remoteStatusView.dot}`} />
+                  {remoteStatusView.label}
+                </div>
+              </div>
+
+              {remotePortalUrl ? (
+                <div className="mt-3 rounded-2xl border border-emerald-300/30 bg-emerald-400/10 px-4 py-3">
+                  <div className="text-[8px] font-black uppercase tracking-[0.16em] text-emerald-300">Enlace por Internet para estudiantes</div>
+                  <div className="mt-1 break-all text-xs font-black text-white">{remotePortalUrl}</div>
+                </div>
+              ) : (
+                <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs font-bold text-slate-300">
+                  {!remoteAccess.cloudflaredInstalled
+                    ? 'Falta el componente de acceso remoto. Reinstala o actualiza ARMI.'
+                    : remoteIsStarting
+                      ? 'Creando y verificando el enlace por Internet… Todavía no lo compartas.'
+                      : remoteNeedsRetry
+                        ? 'No hay un enlace por Internet activo. El enlace local mostrado arriba solo funciona dentro de la misma red.'
+                        : 'Listo para crear un enlace por Internet. Se mostrará aquí cuando esté verificado.'}
+                </div>
+              )}
+
+              <div className="mt-3 grid grid-cols-2 gap-2 text-center text-[9px] font-black uppercase text-slate-300 sm:grid-cols-4">
+                <div className="rounded-xl bg-white/5 px-2 py-2"><b className="block text-sm text-white">{remoteAccess.connectedStudents}</b>Online</div>
+                <div className="rounded-xl bg-white/5 px-2 py-2"><b className="block text-sm text-white">{remoteAccess.activeUploads}</b>Subiendo</div>
+                <div className="rounded-xl bg-white/5 px-2 py-2"><b className="block text-sm text-white">{remoteAccess.queuedUploads}</b>En cola</div>
+                <div className="rounded-xl bg-white/5 px-2 py-2"><b className="block text-sm text-white">{remoteAccess.activeTransfers}</b>Transferencias</div>
+              </div>
+
+              {remoteStudentGroups.length > 0 ? (
+                <div className="mt-3 max-h-52 space-y-2 overflow-y-auto rounded-2xl border border-white/10 bg-slate-950/30 p-3">
+                  {remoteStudentGroups.map(([group, studentsInGroup]) => (
+                    <div key={group} className="rounded-xl bg-white/5 p-3">
+                      <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-wider text-cyan-100">
+                        <span>{group}</span><span>{studentsInGroup.length} en línea</span>
+                      </div>
+                      <div className="mt-2 space-y-1.5">
+                        {studentsInGroup.map((student) => (
+                          <div key={student.sessionId} className="flex items-center justify-between gap-3 text-[10px] font-semibold text-slate-200">
+                            <span className="min-w-0 truncate"><i className={`mr-2 inline-block h-2 w-2 rounded-full ${student.uploadStatus === 'UPLOADING' ? 'bg-blue-400' : student.uploadStatus === 'QUEUED' ? 'bg-amber-300' : 'bg-emerald-400'}`} />{student.names}</span>
+                            <span className="shrink-0 text-[8px] font-black uppercase text-slate-400">{student.uploadStatus === 'UPLOADING' ? 'Subiendo' : student.uploadStatus === 'QUEUED' ? 'En cola' : student.currentActivity || 'En línea'}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-center text-[9px] font-bold text-slate-400">Todavía no hay estudiantes en línea.</p>
+              )}
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" onClick={toggleRemoteAccess} disabled={remoteBusy} className={`flex-1 rounded-2xl px-4 py-3 text-[10px] font-black uppercase tracking-widest disabled:opacity-50 ${remoteIsConnected || remoteIsStarting ? 'bg-red-100 text-red-700 hover:bg-red-50' : remoteNeedsRetry ? 'bg-amber-300 text-amber-950 hover:bg-amber-200' : 'bg-emerald-400 text-emerald-950 hover:bg-emerald-300'}`}>
+                  {remoteBusy
+                    ? 'Procesando...'
+                    : remoteIsConnected
+                      ? 'Desactivar acceso remoto'
+                      : remoteIsStarting
+                        ? 'Cancelar activación'
+                        : remoteNeedsRetry
+                          ? 'Reintentar acceso remoto'
+                          : 'Activar acceso remoto'}
+                </button>
+              </div>
+
+              <p className="mt-3 text-[9px] font-semibold leading-relaxed text-slate-400">
+                No requiere cuenta, dominio ni token. El enlace cambia cada vez que lo activas y deja de funcionar al desactivarlo o cerrar ARMI.
+              </p>
+
+              {remoteNeedsRetry ? (
+                <button type="button" onClick={async () => {
+                  setRemoteBusy(true);
+                  setRemoteMessage('Cancelando los intentos de conexión...');
+                  const result = await stopRemoteAccess();
+                  if (result.data) applyRemoteState(result.data);
+                  setRemoteMessage(result.success ? 'Acceso remoto desactivado.' : result.message || 'No se pudo desactivar.');
+                  setRemoteBusy(false);
+                }} disabled={remoteBusy} className="mt-2 w-full rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-[9px] font-black uppercase tracking-widest text-slate-300 disabled:opacity-50">Cancelar y dejar desactivado</button>
+              ) : null}
+
+              {remotePortalUrl ? (
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button type="button" onClick={copyRemotePortalUrl} className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-[9px] font-black uppercase tracking-widest hover:bg-white/20">Copiar enlace</button>
+                  <button type="button" onClick={showRemoteQrCode} className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-[9px] font-black uppercase tracking-widest hover:bg-white/20">Mostrar QR</button>
+                </div>
+              ) : null}
+
+              {remoteMessage || remoteAccess.lastError ? (
+                <p className={`mt-3 text-[10px] font-bold leading-relaxed ${remoteAccess.tunnelStatus === 'ERROR' ? 'text-red-200' : 'text-amber-100'}`}>{remoteMessage || remoteAccess.lastError}</p>
+              ) : null}
+            </div>
           </div>
         </div>
       </div>
+      {remoteQr ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/70 p-6 backdrop-blur-sm" onClick={() => setRemoteQr('')}>
+          <div className="w-full max-w-sm rounded-[2rem] bg-white p-6 text-center shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <div className="text-[10px] font-black uppercase tracking-[0.18em] text-violet-600">Portal remoto de estudiantes</div>
+            <img src={remoteQr} alt="Código QR del portal remoto" className="mx-auto mt-4 h-64 w-64 rounded-2xl border border-slate-100" />
+            <p className="mt-3 break-all text-xs font-bold text-slate-600">{remotePortalUrl}</p>
+            <button type="button" onClick={() => setRemoteQr('')} className="mt-4 w-full rounded-xl bg-slate-900 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-white">Cerrar</button>
+          </div>
+        </div>
+      ) : null}
       <div className="rounded-[2rem] border border-slate-100 bg-white p-8 shadow-lg">
         <div className="mb-8 flex items-center justify-between gap-4">
           <div>
@@ -1004,8 +1258,12 @@ export const EvidenceBank: React.FC = () => {
                   </p>
                 </div>
               ) : (
-                visibleCards.map((card) => (
-                  <div key={card.id} className="group overflow-hidden rounded-3xl border border-slate-100 bg-white transition-all hover:shadow-xl">
+                renderedCards.map((card) => (
+                  <div
+                    key={card.id}
+                    className="group overflow-hidden rounded-3xl border border-slate-100 bg-white transition-all hover:shadow-xl"
+                    style={{ contentVisibility: 'auto', containIntrinsicSize: '360px' }}
+                  >
                     <div className="relative aspect-video overflow-hidden bg-gradient-to-br from-emerald-100 via-cyan-100 to-slate-100">
                       {(() => {
                         const accent = getFileAccent(card.previewKind);
@@ -1018,17 +1276,13 @@ export const EvidenceBank: React.FC = () => {
                           <p className="text-[9px] font-semibold leading-relaxed">El enlace, estudiante y sesion estan protegidos. No se eliminara mientras recuperas el original.</p>
                         </div>
                       ) : card.previewKind === 'image' ? (
-                        <img src={card.fileUrl} alt={card.fileName} className="h-full w-full object-cover" />
+                        <img src={card.fileUrl} alt={card.fileName} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                       ) : card.previewKind === 'video' ? (
-                        <video
-                          src={card.fileUrl}
-                          className="h-full w-full object-cover"
-                          preload="metadata"
-                          muted
-                          autoPlay
-                          loop
-                          playsInline
-                        />
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-indigo-100 via-violet-100 to-slate-100 px-4 text-center">
+                          <span className="rounded-2xl bg-indigo-600 px-4 py-3 text-2xl font-black uppercase text-white">VIDEO</span>
+                          <span className="line-clamp-2 rounded-xl border border-indigo-200 bg-white/80 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-indigo-700">{card.fileName}</span>
+                          <span className="text-[8px] font-bold uppercase tracking-widest text-indigo-500">Pulsa Ver para reproducir</span>
+                        </div>
                       ) : (
                         <div className={`absolute inset-0 flex flex-col items-center justify-center gap-2 px-4 text-center ${accent.soft}`}>
                           <span className={`rounded-2xl px-4 py-3 text-3xl font-black uppercase text-white ${accent.bg}`}>
@@ -1102,6 +1356,18 @@ export const EvidenceBank: React.FC = () => {
                 ))
               )}
             </div>
+            {renderedCards.length < visibleCards.length ? (
+              <div className="mt-6 flex flex-col items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setVisibleEvidenceLimit((current) => current + EVIDENCE_RENDER_BATCH_SIZE)}
+                  className="rounded-2xl border border-emerald-200 bg-emerald-50 px-6 py-3 text-[10px] font-black uppercase tracking-widest text-emerald-700 hover:bg-emerald-100"
+                >
+                  Mostrar {Math.min(EVIDENCE_RENDER_BATCH_SIZE, visibleCards.length - renderedCards.length)} evidencias más
+                </button>
+                <p className="text-[9px] font-bold text-slate-400">Mostrando {renderedCards.length} de {visibleCards.length}</p>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

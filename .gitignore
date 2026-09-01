@@ -30,9 +30,11 @@ release/
 sync-runtime/
 temp/
 tmp/
+artifacts/
 recovery-candidates/
 desktop.ini
 uploads/user-assets/profiles/
+uploads/session-resources/
 
 # .NET / C# helper
 .dotnet/

@@ -7,7 +7,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
-import db from './db.js';
+import db, { deleteStudentPortalSessions, setPortalSessionToken } from './db.js';
 import { appRoot, uploadsRoot, ensureDir } from './paths.js';
 import programacionRoutes from './routes/programacionAnual.routes.js';
 import programacionWordRoutes from './routes/programacionWord.routes.js';
@@ -15,15 +15,21 @@ import unidadWordRoutes from './routes/unidadWord.routes.js';
 import sesionWordRoutes from './routes/sesionWord.routes.js';
 import studentPortalRoutes from './routes/studentPortal.routes.js';
 import evidenciasRoutes from './routes/evidencias.routes.js';
+import remoteAccessRoutes from './routes/remoteAccess.routes.js';
 import remoteCameraRoutes, { remoteCameraPublicRoutes } from './routes/remoteCamera.routes.js';
+import { initializeRemoteAccess, shutdownRemoteAccess } from './remote-access/remoteAccessService.js';
+import { createSessionResourceVariants, ensureSessionResourceVariantLinks } from './sessionResourceStorage.js';
 import {
   getEvidenceStorageContext,
+  evidenceRelativePathFromRow,
+  resolveEvidenceCandidate,
+  evidenceFileMatchesRecord,
   resolveEvidenceFilePathDetailed,
   reconcilePortableEvidenceIndex,
   copyEvidenceToMirrorSafely,
 } from './evidenceStorage.js';
 import { checkPurchaseStatus, getAuthProviderInfo, getPurchaseConfig, loginUser, submitPurchase } from './auth.js';
-import { applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, ensureMirrorResourceAvailable, getDriveMirrorEvidenceStorage, getLocalSyncStatus, getResourceDeliveryStatus, getSyncStatus, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, resolveCloudConflict, saveFrontendStateSnapshot, startContinuousMirrorSync, updateSyncConfig } from './sync.js';
+import { applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, ensureMirrorResourceAvailable, getDriveMirrorEvidenceStorage, getLocalSyncStatus, getResourceDeliveryStatus, getSyncStatus, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, requestContinuousMirrorSync, resolveCloudConflict, saveFrontendStateSnapshot, startContinuousMirrorSync, updateSyncConfig } from './sync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,6 +37,11 @@ const rootFolder = appRoot;
 const uploadsFolder = uploadsRoot;
 const STUDENT_PORTAL_MAX_SESSIONS = Math.max(200, Number(process.env.ARMI_STUDENT_MAX_SESSIONS) || 500);
 const STUDENT_PORTAL_MAX_CONNECTIONS = Math.max(200, Number(process.env.ARMI_STUDENT_MAX_CONNECTIONS) || 500);
+let primaryHttpServer = null;
+let studentHttpServer = null;
+let evidenceReconciliationTimer = null;
+let stopContinuousSync = null;
+let serverShutdownPromise = null;
 
 const GENERAL_DATA_COLUMN_DEFINITIONS = {
   b1_start: 'TEXT',
@@ -352,6 +363,7 @@ const buildRemoteCameraHtml = (sessionId) => `<!DOCTYPE html>
 </html>`;
 
 async function startServer() {
+  await initializeRemoteAccess();
   const app = express();
   const PORT = Number(process.env.ARMI_BACKEND_PORT || 3000);
   const STUDENT_PORTAL_PORT = Number(process.env.ARMI_STUDENT_PORTAL_PORT || (PORT + 1));
@@ -363,9 +375,9 @@ async function startServer() {
   }
   // Las altas y cambios escriben su ficha portátil inmediatamente. Este barrido
   // es solo una red de seguridad y no necesita recorrer Drive cada 15 segundos.
-  const evidenceReconciliationTimer = setInterval(reconcilePortableEvidenceIndex, 60_000);
+  evidenceReconciliationTimer = setInterval(reconcilePortableEvidenceIndex, 60_000);
   evidenceReconciliationTimer.unref?.();
-  startContinuousMirrorSync();
+  stopContinuousSync = startContinuousMirrorSync();
 
 // Inicialización de tabla de plantillas si no existe
 db.prepare(`
@@ -466,6 +478,7 @@ app.use((req, res, next) => {
   const isRead = method === 'GET' || method === 'HEAD';
   const allowed = pathname.startsWith('/estudiante')
     || pathname.startsWith('/estudiante-assets/')
+    || pathname.startsWith('/estudiante-iconos/')
     || pathname.startsWith('/api/student-portal/')
     || (isRead && pathname.startsWith('/api/evaluacion/evidencias/') && pathname.endsWith('/file'))
     || (isRead && pathname === '/api/health');
@@ -525,6 +538,7 @@ app.use('/api', unidadWordRoutes);
 app.use('/api', sesionWordRoutes);
 app.use('/api', studentPortalRoutes);
 app.use('/api', evidenciasRoutes);
+app.use('/api', remoteAccessRoutes);
 app.use('/api', remoteCameraRoutes);
 app.use(remoteCameraPublicRoutes);
 
@@ -568,7 +582,7 @@ app.get('/api/auth/purchase/config', async (req, res) => {
   }
 });
 
-app.post('/api/assets/image-file', (req, res) => {
+app.post('/api/assets/image-file', async (req, res) => {
   try {
     const imageData = String(req.body?.imageData || '').trim();
     const kind = String(req.body?.kind || '').trim();
@@ -583,11 +597,36 @@ app.post('/api/assets/image-file', (req, res) => {
       return res.status(400).json({ success: false, message: 'El formato de imagen no es válido.' });
     }
 
-    const extension = imageExtensionFromMime(parsed.mimeType);
     const baseTarget = resolveImageAssetTarget({ kind, userKey });
+    const sourceBuffer = Buffer.from(parsed.base64, 'base64');
+
+    if (kind === 'session_resource') {
+      const variants = await createSessionResourceVariants({ sourceBuffer, baseTarget });
+      requestContinuousMirrorSync({ delayMs: 500 });
+      return res.json({
+        success: true,
+        data: {
+          fileUrl: fileUrlFromAbsolutePath(variants.webpPath),
+          relativePath: path.relative(uploadsFolder, variants.webpPath).split(path.sep).join('/'),
+          wordFileUrl: fileUrlFromAbsolutePath(variants.wordPath),
+          wordRelativePath: path.relative(uploadsFolder, variants.wordPath).split(path.sep).join('/'),
+          storage: {
+            fingerprint: variants.fingerprint,
+            width: variants.width,
+            height: variants.height,
+            originalBytes: variants.originalBytes,
+            webpBytes: variants.webpBytes,
+            wordBytes: variants.wordBytes,
+          },
+        },
+      });
+    }
+
+    const extension = imageExtensionFromMime(parsed.mimeType);
     const absolutePath = `${baseTarget}.${extension}`;
     ensureDir(path.dirname(absolutePath));
-    fs.writeFileSync(absolutePath, Buffer.from(parsed.base64, 'base64'));
+    fs.writeFileSync(absolutePath, sourceBuffer);
+    requestContinuousMirrorSync({ delayMs: 500 });
 
     return res.json({
       success: true,
@@ -670,13 +709,23 @@ app.post('/api/plantillas-area', (req, res) => {
    SESIONES DE APRENDIZAJE
 ===================================================== */
 
-app.get('/api/sesiones', (req, res) => {
+app.get('/api/sesiones', async (req, res) => {
   const { year, areaId, grade, section, unitNumber, sessionNumber } = req.query;
   try {
     if (year && areaId && grade && section && unitNumber && sessionNumber) {
         const id_sesion = `${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`;
         const row = db.prepare('SELECT * FROM sesiones WHERE id_sesion = ?').get(id_sesion);
-        return res.json({ success: true, data: row ? JSON.parse(row.session_data) : null });
+        if (!row) return res.json({ success: true, data: null });
+        const repaired = await ensureSessionResourceVariantLinks({
+          sessionData: JSON.parse(row.session_data || '{}'),
+          sessionId: row.id_sesion,
+          uploadsRoot: uploadsFolder,
+        });
+        if (repaired.changed) {
+          db.prepare('UPDATE sesiones SET session_data = ?, updated_at = CURRENT_TIMESTAMP WHERE id_sesion = ?')
+            .run(JSON.stringify(repaired.sessionData), row.id_sesion);
+        }
+        return res.json({ success: true, data: repaired.sessionData });
     }
     
     // Si no hay filtros específicos, devolver lista para el gestor
@@ -1184,6 +1233,25 @@ const getEvidenceRecoveryStatus = () => {
   };
 };
 
+const getEvidenceRecoveryStatusSafely = () => {
+  try {
+    return getEvidenceRecoveryStatus();
+  } catch (error) {
+    const context = getEvidenceStorageContext();
+    console.warn(`[evidencias] No se pudo calcular el estado de recuperacion: ${error?.message || error}`);
+    return {
+      automaticMirror: context.automaticMirror,
+      effectivePath: context.effectivePath,
+      totalRecords: 0,
+      sharedFiles: 0,
+      recoverableHere: 0,
+      missingFiles: 0,
+      statusUnavailable: true,
+      message: 'El portal sigue disponible, pero no se pudo calcular temporalmente el estado de los archivos.',
+    };
+  }
+};
+
 app.get('/api/evidence-storage/config', (req, res) => {
   try {
     ensureGeneralDataReady();
@@ -1199,7 +1267,7 @@ app.get('/api/evidence-storage/config', (req, res) => {
         automaticMirror: context.automaticMirror,
         exists: fs.existsSync(context.effectivePath),
         portalUrls: getStudentPortalUrls(),
-        recovery: getEvidenceRecoveryStatus(),
+        recovery: getEvidenceRecoveryStatusSafely(),
       }
     });
   } catch (error) {
@@ -1222,7 +1290,7 @@ app.post('/api/evidence-storage/config', (req, res) => {
           automaticMirror: true,
           exists: true,
           portalUrls: getStudentPortalUrls(),
-          recovery: getEvidenceRecoveryStatus(),
+          recovery: getEvidenceRecoveryStatusSafely(),
         },
       });
     }
@@ -1412,7 +1480,9 @@ app.get('/api/estudiantes', (req, res) => {
     res.json({ success: true, data: rows.map(r => ({
       id: r.id, nivel: r.nivel, dni: r.dni, name: r.estudiantes, grade: r.grado, section: r.secc,
       fechaNacimiento: r.fecha_nacimiento || '',
-      email: r.gmail, microsoft: r.outlook, estado: r.estado, group: r.grupo, sexo: r.sexo, edad: r.edad
+      email: r.gmail, microsoft: r.outlook, estado: r.estado, group: r.grupo, sexo: r.sexo,
+      edad: calculateAgeFromBirthDate(r.fecha_nacimiento) ?? r.edad,
+      portalPasswordConfigured: Boolean(String(r.password_hash || '').trim())
     })) });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -1448,6 +1518,60 @@ app.post('/api/estudiantes', (req, res) => {
     }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+app.post('/api/estudiantes/:id/reset-portal-password', (req, res) => {
+  try {
+    const student = db.prepare('SELECT id, dni FROM db_estudiantes WHERE id = ?').get(req.params.id);
+    if (!student) return res.status(404).json({ success: false, message: 'No se encontro el estudiante.' });
+    const dni = String(student.dni || '').replace(/\D+/g, '');
+    if (!dni) return res.status(400).json({ success: false, message: 'El estudiante necesita un DNI antes de restablecer su clave.' });
+    db.prepare(`
+      UPDATE db_estudiantes
+      SET password_hash = NULL, password_changed_at = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(student.id);
+    deleteStudentPortalSessions(student.id);
+    return res.json({
+      success: true,
+      data: {
+        studentId: student.id,
+        initialPassword: dni,
+        requiresPasswordChange: true,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post('/api/estudiantes/:id/open-test-portal', (req, res) => {
+  try {
+    const remoteAddress = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+    if (remoteAddress !== '127.0.0.1' && remoteAddress !== '::1') {
+      return res.status(403).json({ success: false, message: 'El acceso de prueba solo puede iniciarse desde la PC del docente.' });
+    }
+    const student = db.prepare('SELECT id FROM db_estudiantes WHERE id = ?').get(req.params.id);
+    if (!student) return res.status(404).json({ success: false, message: 'No se encontro el estudiante.' });
+    const now = Date.now();
+    const token = crypto.randomBytes(32).toString('hex');
+    setPortalSessionToken(token, {
+      studentId: String(student.id),
+      mustChangePassword: false,
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: now + 10 * 60 * 1000,
+    });
+    return res.json({
+      success: true,
+      data: {
+        url: `http://127.0.0.1:${STUDENT_PORTAL_PORT}/estudiante#teacherAccess=${encodeURIComponent(token)}`,
+        expiresInMinutes: 10,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
 });
 
 app.delete('/api/estudiantes/:id', (req, res) => {
@@ -2421,6 +2545,7 @@ app.use((error, req, res, next) => {
 });
 
 app.get('/estudiante-assets/Logo_bar.ico', (_req, res) => res.sendFile(path.join(appRoot, 'src', 'Logo_bar.ico')));
+app.use('/estudiante-iconos', express.static(path.join(appRoot, 'src', 'student-portal-icons'), { fallthrough: true, maxAge: 0 }));
 app.use('/estudiante-assets', express.static(path.join(__dirname, 'public'), { fallthrough: false, maxAge: 0 }));
 app.get(/^\/estudiante(?:\/.*)?$/, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'student-portal.html'));
@@ -2444,23 +2569,61 @@ if (!isProduction && useEmbeddedVite) {
   });
 }
 
-const server = app.listen(PORT, '0.0.0.0', () => {
+primaryHttpServer = app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ SERVIDOR ACTIVO EN http://0.0.0.0:${PORT}`);
   console.log(`Portal estudiantil protegido en http://0.0.0.0:${STUDENT_PORTAL_PORT}/estudiante para hasta ${STUDENT_PORTAL_MAX_SESSIONS} sesiones activas.`);
 });
-server.maxConnections = STUDENT_PORTAL_MAX_CONNECTIONS;
-server.keepAliveTimeout = 65_000;
-server.headersTimeout = 66_000;
+primaryHttpServer.maxConnections = STUDENT_PORTAL_MAX_CONNECTIONS;
+primaryHttpServer.keepAliveTimeout = 65_000;
+primaryHttpServer.headersTimeout = 66_000;
 if (STUDENT_PORTAL_PORT !== PORT) {
-  const studentServer = app.listen(STUDENT_PORTAL_PORT, '0.0.0.0');
-  studentServer.maxConnections = STUDENT_PORTAL_MAX_CONNECTIONS;
-  studentServer.keepAliveTimeout = 65_000;
-  studentServer.headersTimeout = 66_000;
-  studentServer.on('error', (error) => {
+  studentHttpServer = app.listen(STUDENT_PORTAL_PORT, '0.0.0.0');
+  studentHttpServer.maxConnections = STUDENT_PORTAL_MAX_CONNECTIONS;
+  studentHttpServer.keepAliveTimeout = 65_000;
+  studentHttpServer.headersTimeout = 66_000;
+  studentHttpServer.requestTimeout = 10 * 60_000;
+  studentHttpServer.on('error', (error) => {
     console.error(`No se pudo iniciar el portal estudiantil protegido en el puerto ${STUDENT_PORTAL_PORT}:`, error.message);
   });
 }
 }
 
+const closeHttpServer = (server) => new Promise((resolve) => {
+  if (!server?.listening) return resolve();
+  server.close(() => resolve());
+  server.closeIdleConnections?.();
+  setTimeout(() => {
+    server.closeAllConnections?.();
+    resolve();
+  }, 4_000).unref?.();
+});
+
+const shutdownServer = async () => {
+  if (serverShutdownPromise) return serverShutdownPromise;
+  serverShutdownPromise = (async () => {
+    if (evidenceReconciliationTimer) clearInterval(evidenceReconciliationTimer);
+    evidenceReconciliationTimer = null;
+    stopContinuousSync?.();
+    stopContinuousSync = null;
+    await shutdownRemoteAccess();
+    await Promise.all([
+      closeHttpServer(studentHttpServer),
+      closeHttpServer(primaryHttpServer),
+    ]);
+    studentHttpServer = null;
+    primaryHttpServer = null;
+  })();
+  return serverShutdownPromise;
+};
+
+const handleProcessShutdown = () => {
+  void shutdownServer().finally(() => process.exit(0));
+};
+
+process.once('SIGTERM', handleProcessShutdown);
+process.once('SIGINT', handleProcessShutdown);
+
 startServer();
+
+export { shutdownRemoteAccess, shutdownServer };
 

@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import { Student, GeneralData, TeachingAssignment } from '../types';
 import { Input } from './Input';
 import { Select } from './Select';
-import { getDatosGenerales, updateModuleStatus, getEstudiantes, saveEstudiante, deleteEstudiante, getEgresados, egresarEstudiantes } from '../services/apiService';
+import { getDatosGenerales, updateModuleStatus, getEstudiantes, saveEstudiante, deleteEstudiante, getEgresados, egresarEstudiantes, resetStudentPortalPassword, openStudentPortalTestSession } from '../services/apiService';
 import { INITIAL_GENERAL_DATA } from '../constants';
 import { AttendanceSection } from './students/AttendanceSection';
 
@@ -41,6 +41,24 @@ const NIVEL_OPTIONS = [
 
 const GRADE_ORDER = ['1ro', '2do', '3ro', '4to', '5to'];
 
+type StudentTableColumn = 'number' | 'nivel' | 'estado' | 'name' | 'sexo' | 'dni' | 'email' | 'microsoft' | 'birthDate' | 'group' | 'age' | 'password';
+const STUDENT_COLUMN_STORAGE_KEY = 'armi_students_hidden_columns_v1';
+const STUDENT_TABLE_COLUMNS: Array<{ key: StudentTableColumn; label: string }> = [
+    { key: 'number', label: 'N°' }, { key: 'nivel', label: 'Nivel' }, { key: 'estado', label: 'Estado' },
+    { key: 'name', label: 'Estudiante' }, { key: 'sexo', label: 'Sexo' }, { key: 'dni', label: 'DNI' },
+    { key: 'email', label: 'Gmail' }, { key: 'microsoft', label: 'Microsoft' }, { key: 'birthDate', label: 'F. nacimiento' },
+    { key: 'group', label: 'Grupo' }, { key: 'age', label: 'Edad' }, { key: 'password', label: 'Clave portal' },
+];
+
+const readHiddenStudentColumns = (): StudentTableColumn[] => {
+    try {
+        const parsed = JSON.parse(window.localStorage.getItem(STUDENT_COLUMN_STORAGE_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed.filter((key): key is StudentTableColumn => STUDENT_TABLE_COLUMNS.some((column) => column.key === key)) : [];
+    } catch {
+        return [];
+    }
+};
+
 const normalizeBirthDate = (value?: string | null) => {
     const raw = String(value || '').trim();
     return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
@@ -64,6 +82,10 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [graduates, setGraduates] = useState<Student[]>([]);
     const [originalStudents, setOriginalStudents] = useState<Student[]>([]); 
     const [savingStudentIds, setSavingStudentIds] = useState<Array<string | number>>([]);
+    const [resettingPasswordIds, setResettingPasswordIds] = useState<Array<string | number>>([]);
+    const [testingPortalIds, setTestingPortalIds] = useState<Array<string | number>>([]);
+    const [visiblePasswordIds, setVisiblePasswordIds] = useState<Array<string | number>>([]);
+    const [hiddenColumns, setHiddenColumns] = useState<StudentTableColumn[]>(readHiddenStudentColumns);
     const [generalData, setGeneralData] = useState<GeneralData>(INITIAL_GENERAL_DATA);
     const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
     
@@ -105,6 +127,25 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [graduateGrade, setGraduateGrade] = useState('');
     const [graduateSection, setGraduateSection] = useState('');
     const [isGraduateConfirmOpen, setIsGraduateConfirmOpen] = useState(false);
+
+    const setColumnHidden = (column: StudentTableColumn, hidden: boolean) => {
+        setHiddenColumns((current) => {
+            const next = hidden ? (current.includes(column) ? current : [...current, column]) : current.filter((item) => item !== column);
+            window.localStorage.setItem(STUDENT_COLUMN_STORAGE_KEY, JSON.stringify(next));
+            return next;
+        });
+    };
+    const columnClass = (column: StudentTableColumn) => hiddenColumns.includes(column) ? 'hidden' : '';
+    const visibleColumnCount = STUDENT_TABLE_COLUMNS.length - hiddenColumns.length;
+    const HideColumnButton = ({ column }: { column: StudentTableColumn }) => (
+        <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); setColumnHidden(column, true); }}
+            className="absolute right-0.5 top-0.5 grid h-3.5 w-3.5 place-items-center rounded-full text-[8px] leading-none text-slate-400 hover:bg-white/20 hover:text-white"
+            title={`Ocultar columna ${STUDENT_TABLE_COLUMNS.find((item) => item.key === column)?.label || ''}`}
+            aria-label={`Ocultar columna ${column}`}
+        >×</button>
+    );
 
     // Estados para Toast y Confirmación
     const [toast, setToast] = useState<{msg: string, type: 'error' | 'success'} | null>(null);
@@ -657,6 +698,50 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
     const handleDeleteRequest = (id: string | number) => {
         setConfirmDeleteStudentId(id);
+    };
+
+    const handleResetPortalPassword = async (student: Student) => {
+        const dni = String(student.dni || '').replace(/\D+/g, '');
+        if (!dni) {
+            showToast('Registra primero el DNI del estudiante', 'error');
+            return;
+        }
+        const accepted = window.confirm(
+            `La clave de ${student.name} volverá a ser su DNI (${dni}). También se cerrarán sus sesiones abiertas. ¿Continuar?`
+        );
+        if (!accepted) return;
+        setResettingPasswordIds((current) => current.includes(student.id) ? current : [...current, student.id]);
+        const result = await resetStudentPortalPassword(student.id);
+        setResettingPasswordIds((current) => current.filter((id) => id !== student.id));
+        if (!result.success) {
+            showToast(result.message || 'No se pudo restablecer la clave', 'error');
+            return;
+        }
+        setStudents((current) => current.map((item) => item.id === student.id
+            ? { ...item, portalPasswordConfigured: false }
+            : item));
+        setOriginalStudents((current) => current.map((item) => item.id === student.id
+            ? { ...item, portalPasswordConfigured: false }
+            : item));
+        setVisiblePasswordIds((current) => current.includes(student.id) ? current : [...current, student.id]);
+        showToast(`Clave restablecida: ${dni}. El estudiante deberá cambiarla al ingresar.`, 'success');
+    };
+
+    const handleOpenStudentPortalTest = async (student: Student) => {
+        const targetWindow = window.open('about:blank', '_blank');
+        setTestingPortalIds((current) => current.includes(student.id) ? current : [...current, student.id]);
+        const result = await openStudentPortalTestSession(student.id);
+        setTestingPortalIds((current) => current.filter((id) => id !== student.id));
+        if (!result.success || !result.data?.url) {
+            targetWindow?.close();
+            showToast(result.message || 'No se pudo abrir el portal de prueba', 'error');
+            return;
+        }
+        if (targetWindow) {
+            targetWindow.location.href = result.data.url;
+        } else {
+            window.location.href = result.data.url;
+        }
     };
 
     const confirmDelete = async () => {
@@ -1302,12 +1387,12 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                         </select>
                     </div>
 
-                    <div className="col-span-4">
+                    <div className="col-span-5">
                         <label className={commonLabelClass}>Apellidos y Nombres</label>
                         <input className={commonInputClass} placeholder="Nombre completo..." value={formName} onChange={e => setFormName(e.target.value)} />
                     </div>
 
-                    <div className="col-span-2">
+                    <div className="col-span-1">
                         <label className={commonLabelClass}>DNI</label>
                         <input className={`${commonInputClass} text-center font-mono`} placeholder="00000000" maxLength={8} value={formDni} onChange={e => setFormDni(e.target.value.replace(/\D/g, ''))} />
                     </div>
@@ -1320,16 +1405,16 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     </div>
                     <div className="col-span-1">
                         <label className={commonLabelClass}>Edad</label>
-                        <input className={`${commonInputClass} text-center font-mono`} placeholder="00" maxLength={2} value={formEdad} onChange={e => setFormEdad(e.target.value.replace(/\D/g, ''))} />
+                        <input className={`${commonInputClass} text-center font-mono ${formBirthDate ? 'bg-slate-100 text-slate-500' : ''}`} placeholder="00" maxLength={2} value={formEdad} readOnly={!!formBirthDate} title={formBirthDate ? 'Calculada automáticamente desde la fecha de nacimiento' : 'Editable porque no hay fecha de nacimiento'} onChange={e => setFormEdad(e.target.value.replace(/\D/g, ''))} />
                     </div>
                    </div>
 
                    <div className="grid grid-cols-12 gap-3 items-center">
-                    <div className="col-span-4">
+                    <div className="col-span-3">
                         <label className={commonLabelClass}>Cuenta Gmail</label>
                         <input className={commonInputClass} placeholder="correo@gmail.com" value={formEmail} onChange={e => setFormEmail(e.target.value)} />
                     </div>
-                    <div className="col-span-4">
+                    <div className="col-span-3">
                         <label className={commonLabelClass}>Cuenta Microsoft</label>
                         <input className={commonInputClass} placeholder="cuenta@microsoft.com" value={formMicrosoft} onChange={e => setFormMicrosoft(e.target.value)} />
                     </div>
@@ -1339,9 +1424,9 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     </div>
                     <div className="col-span-2">
                         <label className={commonLabelClass}>F. Nacimiento</label>
-                        <input className={commonInputClass} type="date" value={formBirthDate} onChange={e => setFormBirthDate(e.target.value)} />
+                        <input className={commonInputClass} type="date" value={formBirthDate} onChange={e => { const value = normalizeBirthDate(e.target.value); setFormBirthDate(value); setFormEdad(calculateAgeFromBirthDate(value)); }} />
                     </div>
-                    <div className="col-span-2 flex justify-end gap-2 border-l pl-4 border-slate-100">
+                    <div className="col-span-3 flex justify-end gap-2 border-l pl-4 border-slate-100">
                          <button onClick={handleAddStudent} title="Registrar Estudiante" className="btn-3d-orange scale-75">
                              <span>+</span>
                          </button>
@@ -1364,68 +1449,87 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
              </div>
 
              <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 overflow-hidden" ref={tableContainerRef}>
+                 {hiddenColumns.length > 0 ? (
+                     <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[8px] font-black uppercase tracking-wide text-slate-500">
+                         <span className="mr-1">Columnas ocultas:</span>
+                         {hiddenColumns.map((column) => (
+                             <button key={column} type="button" onClick={() => setColumnHidden(column, false)} className="rounded-full border border-slate-200 bg-white px-2 py-1 text-blue-600 hover:border-blue-300 hover:bg-blue-50">
+                                 + {STUDENT_TABLE_COLUMNS.find((item) => item.key === column)?.label}
+                             </button>
+                         ))}
+                         <button type="button" onClick={() => { setHiddenColumns([]); window.localStorage.setItem(STUDENT_COLUMN_STORAGE_KEY, '[]'); }} className="ml-auto rounded-full bg-slate-900 px-2.5 py-1 text-white">Mostrar todas</button>
+                     </div>
+                 ) : null}
                  <div className="overflow-x-auto">
                  <table className="w-full text-[11px] text-left border-collapse table-fixed">
                      <thead className="bg-slate-900 text-white text-[10px] uppercase font-black tracking-widest">
                          <tr className="divide-x divide-white">
-                             <th className="py-1 px-3 w-10 text-center relative">N°</th>
-                             <th className="py-1 px-3 w-20 text-center relative filter-trigger">
+                             <th className={`py-1 px-3 w-10 text-center relative ${columnClass('number')}`}>N°<HideColumnButton column="number" /></th>
+                             <th className={`py-1 px-3 w-20 text-center relative filter-trigger ${columnClass('nivel')}`}>
+                                 <HideColumnButton column="nivel" />
                                  <div className="flex items-center justify-center gap-1 cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'nivel' ? null : 'nivel'); }}>
                                      <span>NIVEL</span>
                                      <div className="relative"><span className={`text-[8px] ${filters.nivel ? 'text-blue-400' : 'opacity-40'}`}>🔍</span></div>
                                  </div>
                                  {activeFilterField === 'nivel' && <FilterInput field="nivel" placeholder="Prim/Sec..." />}
                              </th>
-                             <th className="py-1 px-3 w-14 text-center relative filter-trigger">
+                             <th className={`py-1 px-3 w-14 text-center relative filter-trigger ${columnClass('estado')}`}>
+                                 <HideColumnButton column="estado" />
                                  <div className="flex items-center justify-center gap-1 cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'estado' ? null : 'estado'); }}>
                                      <span>EST.</span>
                                      <div className="relative"><span className={`text-[8px] ${filters.estado ? 'text-blue-400' : 'opacity-40'}`}>🔍</span></div>
                                  </div>
                                  {activeFilterField === 'estado' && <FilterInput field="estado" placeholder="A, R, T..." />}
                              </th>
-                             <th className="py-1 px-3 w-64 relative filter-trigger">
+                             <th className={`py-1 px-3 w-64 relative filter-trigger ${columnClass('name')}`}>
+                                 <HideColumnButton column="name" />
                                  <div className="flex items-center justify-between cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'name' ? null : 'name'); }}>
                                      <span>ESTUDIANTE</span>
                                      <div className="relative"><span className={`text-[8px] ${filters.name ? 'text-blue-400' : 'opacity-40'}`}>🔍</span></div>
                                  </div>
                                  {activeFilterField === 'name' && <FilterInput field="name" placeholder="Nombre..." />}
                              </th>
-                             <th className="py-1 px-3 w-12 text-center relative filter-trigger">
+                             <th className={`py-1 px-3 w-12 text-center relative filter-trigger ${columnClass('sexo')}`}>
+                                 <HideColumnButton column="sexo" />
                                  <div className="flex items-center justify-center gap-1 cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'sexo' ? null : 'sexo'); }}>
                                      <span>S</span>
                                      <div className="relative"><span className={`text-[8px] ${filters.sexo ? 'text-blue-400' : 'opacity-40'}`}>🔍</span></div>
                                  </div>
                                  {activeFilterField === 'sexo' && <FilterInput field="sexo" placeholder="M/F..." />}
                              </th>
-                             <th className="py-1 px-3 w-20 text-center relative filter-trigger">
+                             <th className={`py-1 px-3 w-20 text-center relative filter-trigger ${columnClass('dni')}`}>
+                                 <HideColumnButton column="dni" />
                                  <div className="flex items-center justify-center gap-1 cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'dni' ? null : 'dni'); }}>
                                      <span>DNI</span>
                                      <div className="relative"><span className={`text-[8px] ${filters.dni ? 'text-blue-400' : 'opacity-40'}`}>🔍</span></div>
                                  </div>
                                  {activeFilterField === 'dni' && <FilterInput field="dni" placeholder="DNI..." />}
                              </th>
-                             <th className="py-1 px-3 w-45 relative filter-trigger">
+                             <th className={`py-1 px-3 w-45 relative filter-trigger ${columnClass('email')}`}>
+                                 <HideColumnButton column="email" />
                                  <div className="flex items-center justify-between cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'email' ? null : 'email'); }}>
                                      <span>GMAIL</span>
                                      <div className="relative"><span className={`text-[8px] ${filters.email ? 'text-blue-400' : 'opacity-40'}`}>🔍</span></div>
                                  </div>
                                  {activeFilterField === 'email' && <FilterInput field="email" placeholder="Gmail..." />}
                              </th>
-                             <th className="py-1 px-3 w-45 relative filter-trigger">
+                             <th className={`py-1 px-3 w-45 relative filter-trigger ${columnClass('microsoft')}`}>
+                                 <HideColumnButton column="microsoft" />
                                  <div className="flex items-center justify-between cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'microsoft' ? null : 'microsoft'); }}>
                                      <span>MICROSOFT</span>
                                      <div className="relative"><span className={`text-[8px] ${filters.microsoft ? 'text-blue-400' : 'opacity-40'}`}>🔍</span></div>
                                  </div>
                                  {activeFilterField === 'microsoft' && <FilterInput field="microsoft" placeholder="Outlook..." />}
                              </th>
-                             <th className="py-1 px-3 w-32 text-center">F. NAC.</th>
-                             <th className="py-1 px-3 w-16 text-center">GRUPO</th>
-                             <th className="py-1 px-3 w-16 text-center">EDAD</th>
+                             <th className={`py-1 px-3 w-32 text-center relative ${columnClass('birthDate')}`}>F. NAC.<HideColumnButton column="birthDate" /></th>
+                             <th className={`py-1 px-3 w-16 text-center relative ${columnClass('group')}`}>GRUPO<HideColumnButton column="group" /></th>
+                             <th className={`py-1 px-2 w-12 text-center relative ${columnClass('age')}`}>EDAD<HideColumnButton column="age" /></th>
+                             <th className={`py-1 px-2 w-32 text-center relative ${columnClass('password')}`}>CLAVE PORTAL<HideColumnButton column="password" /></th>
                          </tr>
                      </thead>
                      <tbody className="divide-y divide-slate-100">
                          {filteredStudents.length === 0 ? (
-                             <tr><td colSpan={11} className="p-20 text-center text-slate-400 font-bold bg-slate-50 italic uppercase tracking-widest text-[9px]">Sin registros encontrados</td></tr>
+                             <tr><td colSpan={visibleColumnCount} className="p-20 text-center text-slate-400 font-bold bg-slate-50 italic uppercase tracking-widest text-[9px]">Sin registros encontrados</td></tr>
                          ) : (
                              filteredStudents.map((student, index) => {
                                  const isSaving = savingStudentIds.includes(student.id);
@@ -1439,47 +1543,89 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                              3. 'h-full', 'leading-none' y 'appearance-none' en controles: Ajusta el contenido al espacio.
                                              -------------------------------------------------------------------------
                                          */}
-                                         <td className="py-0 px-2 text-center font-black opacity-30 border-r border-slate-100/10 select-none cursor-default h-[18px]">
+                                         <td className={`py-0 px-2 text-center font-black opacity-30 border-r border-slate-100/10 select-none cursor-default h-[18px] ${columnClass('number')}`}>
                                              <span className="leading-none block h-full flex items-center justify-center gap-1">
                                                  <span>{index + 1}</span>
                                                  {isSaving ? <span className="text-[8px] text-amber-500">●</span> : null}
                                              </span>
                                          </td>
-                                         <td className="py-0 px-2 border-r border-slate-100/10 h-[18px]">
+                                         <td className={`py-0 px-2 border-r border-slate-100/10 h-[18px] ${columnClass('nivel')}`}>
                                              <select className="w-full bg-transparent border-0 font-bold outline-none text-[9px] py-0 h-full leading-none m-0 appearance-none" value={student.nivel || 'Secundaria'} onChange={e => handleStudentUpdate(student.id, 'nivel', e.target.value)}>
                                                 {NIVEL_OPTIONS.map(n => <option key={n.value} value={n.value}>{n.label}</option>)}
                                              </select>
                                          </td>
-                                         <td className="py-0 px-2 text-center font-black border-r border-slate-100/10 h-[18px]">
+                                         <td className={`py-0 px-2 text-center font-black border-r border-slate-100/10 h-[18px] ${columnClass('estado')}`}>
                                              <span className={`px-1.5 py-0 rounded text-[8px] border border-white/20 leading-none inline-block ${student.estado === 'A' ? 'bg-emerald-500 text-white border-emerald-400' : (student.estado ? 'bg-white/20' : 'text-slate-300')}`}>
                                                  {student.estado || '-'}
                                              </span>
                                          </td>
-                                         <td className="py-0 px-3 border-r border-slate-100/10 h-[18px]">
+                                         <td className={`py-0 px-3 border-r border-slate-100/10 h-[18px] ${columnClass('name')}`}>
                                              <input className={`w-full bg-transparent border-0 font-bold outline-none focus:bg-white/60 rounded px-1 transition-all py-0 h-full leading-none m-0`} value={student.name || ''} onChange={e => handleStudentUpdate(student.id, 'name', e.target.value)} />
                                          </td>
-                                         <td className="py-0 px-1 border-r border-slate-100/10 text-center h-[18px]">
+                                         <td className={`py-0 px-1 border-r border-slate-100/10 text-center h-[18px] ${columnClass('sexo')}`}>
                                              <select className="w-full bg-transparent border-0 font-black outline-none text-center text-[10px] py-0 h-full leading-none m-0 appearance-none" value={student.sexo || 'M'} onChange={e => handleStudentUpdate(student.id, 'sexo', e.target.value)}>
                                                 {SEX_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                                              </select>
                                          </td>
-                                         <td className="py-0 px-2 text-center border-r border-slate-100/10 h-[18px]">
+                                         <td className={`py-0 px-2 text-center border-r border-slate-100/10 h-[18px] ${columnClass('dni')}`}>
                                              <input className={`w-full bg-transparent border-0 text-center font-mono outline-none focus:bg-white/60 rounded px-1 transition-all py-0 h-full leading-none m-0`} value={student.dni || ''} maxLength={8} onChange={e => handleStudentUpdate(student.id, 'dni', e.target.value)} placeholder="0000..." />
                                          </td>
-                                         <td className="py-0 px-3 border-r border-slate-100/10 h-[18px]">
+                                         <td className={`py-0 px-3 border-r border-slate-100/10 h-[18px] ${columnClass('email')}`}>
                                              <input className={`w-full bg-transparent border-0 font-medium outline-none focus:bg-white/60 rounded px-1 transition-all py-0 h-full leading-none m-0`} value={student.email || ''} onChange={e => handleStudentUpdate(student.id, 'email', e.target.value)} placeholder="gmail..." />
                                          </td>
-                                         <td className="py-0 px-3 border-r border-slate-100/10 h-[18px]">
+                                         <td className={`py-0 px-3 border-r border-slate-100/10 h-[18px] ${columnClass('microsoft')}`}>
                                              <input className={`w-full bg-transparent border-0 font-medium outline-none focus:bg-white/60 rounded px-1 transition-all py-0 h-full leading-none m-0`} value={student.microsoft || ''} onChange={e => handleStudentUpdate(student.id, 'microsoft', e.target.value)} placeholder="outlook..." />
                                          </td>
-                                         <td className="py-0 px-2 text-center border-r border-slate-100/10 h-[18px]">
+                                         <td className={`py-0 px-2 text-center border-r border-slate-100/10 h-[18px] ${columnClass('birthDate')}`}>
                                              <input className="w-full bg-transparent border-0 text-center font-bold outline-none py-0 h-full leading-none m-0" type="date" value={student.fechaNacimiento || ''} onChange={e => handleStudentUpdate(student.id, 'fechaNacimiento', e.target.value)} />
                                          </td>
-                                         <td className="py-0 px-2 text-center border-r border-slate-100/10 h-[18px]">
+                                         <td className={`py-0 px-2 text-center border-r border-slate-100/10 h-[18px] ${columnClass('group')}`}>
                                              <input className="w-full bg-transparent border-0 text-center font-black uppercase outline-none py-0 h-full leading-none m-0" value={student.group || ''} onChange={e => handleStudentUpdate(student.id, 'group', e.target.value.toUpperCase())} placeholder="-" />
                                          </td>
-                                         <td className="py-0 px-1 text-center border-r border-slate-100/10 h-[18px]">
-                                             <input className="w-full bg-transparent border-0 text-center font-black outline-none py-0 h-full leading-none m-0" value={String(student.edad || '')} maxLength={2} onChange={e => handleStudentUpdate(student.id, 'edad', e.target.value)} placeholder="-" />
+                                         <td className={`py-0 px-1 text-center border-r border-slate-100/10 h-[18px] ${columnClass('age')}`}>
+                                             <input className={`w-full bg-transparent border-0 text-center font-black outline-none py-0 h-full leading-none m-0 ${student.fechaNacimiento ? 'text-slate-500' : ''}`} value={String(student.edad || '')} maxLength={2} readOnly={!!student.fechaNacimiento} title={student.fechaNacimiento ? 'Edad calculada automáticamente' : 'Editable porque no hay fecha de nacimiento'} onChange={e => handleStudentUpdate(student.id, 'edad', e.target.value)} placeholder="-" />
+                                         </td>
+                                         <td className={`py-0 px-1 text-center h-[18px] ${columnClass('password')}`} onClick={(event) => event.stopPropagation()}>
+                                             <div className="flex items-center justify-center gap-1">
+                                                 {student.portalPasswordConfigured ? (
+                                                     <span className="text-[8px] font-black text-slate-500" title="La contraseña personal está protegida y no puede descifrarse.">Protegida</span>
+                                                 ) : (
+                                                     <code className="min-w-[58px] text-[9px] font-black tracking-wide">
+                                                         {visiblePasswordIds.includes(student.id) ? (student.dni || 'Sin DNI') : '••••••••'}
+                                                     </code>
+                                                 )}
+                                                 {!student.portalPasswordConfigured ? (
+                                                     <button
+                                                         type="button"
+                                                         onClick={() => setVisiblePasswordIds((current) => current.includes(student.id)
+                                                             ? current.filter((id) => id !== student.id)
+                                                             : [...current, student.id])}
+                                                         className="rounded border border-slate-200 bg-white/80 px-1.5 py-0.5 text-[7px] font-black uppercase text-slate-600 hover:bg-white"
+                                                         title={visiblePasswordIds.includes(student.id) ? 'Ocultar clave inicial' : 'Ver clave inicial'}
+                                                     >
+                                                         {visiblePasswordIds.includes(student.id) ? 'Ocultar' : 'Ver'}
+                                                     </button>
+                                                 ) : null}
+                                                 <button
+                                                     type="button"
+                                                     disabled={testingPortalIds.includes(student.id)}
+                                                     onClick={() => { void handleOpenStudentPortalTest(student); }}
+                                                     className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[7px] font-black uppercase text-blue-700 hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60"
+                                                     title="Abrir el portal como este estudiante durante diez minutos, sin cambiar su contraseña"
+                                                 >
+                                                     {testingPortalIds.includes(student.id) ? '…' : 'Probar'}
+                                                 </button>
+                                                 <button
+                                                     type="button"
+                                                     disabled={resettingPasswordIds.includes(student.id)}
+                                                     onClick={() => { void handleResetPortalPassword(student); }}
+                                                     className="grid h-4 w-4 shrink-0 place-items-center rounded-full border border-amber-200 bg-amber-50 text-[9px] font-black leading-none text-amber-700 hover:bg-amber-100 disabled:cursor-wait disabled:opacity-60"
+                                                     title="Restablecer la clave al DNI del estudiante"
+                                                     aria-label="Restablecer clave al DNI"
+                                                 >
+                                                     {resettingPasswordIds.includes(student.id) ? '…' : '↺'}
+                                                 </button>
+                                             </div>
                                          </td>
                                      </tr>
                                  );

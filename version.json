@@ -1,10 +1,18 @@
 {
-  "version": "11.2.5",
-  "releaseName": "Armi Docente 11.2.5",
-  "publishedAt": "2026-08-28",
+  "version": "11.2.9",
+  "releaseName": "Armi Docente 11.2.9",
+  "publishedAt": "2026-08-31",
   "assetName": "ARMI_DOCENTE_Setup.exe",
   "downloadUrl": "https://github.com/Timer93/Armi-Docente/releases/download/Armi_Docente_2026/ARMI_DOCENTE_Setup.exe",
   "changelog": [
+    "Presentación de inicio transparente, sin paneles ni contornos, legible sobre fondos claros y oscuros.",
+    "Inicio unificado con una sola presentación animada mientras ARMI prepara el servidor y la sesión.",
+    "Los recursos visuales nuevos viajan de forma incremental a la carpeta espejo y se recuperan bajo demanda en las demás PC.",
+    "Las imágenes cargadas en Sesiones aparecen inmediatamente sin salir y volver a entrar al módulo.",
+    "La entrega de evidencias funciona también desde direcciones LAN HTTP aunque el navegador no ofrezca Web Crypto.",
+    "Acceso remoto gratuito mediante Quick Tunnel, con enlace por Internet y QR generados automáticamente.",
+    "Estados de conexión claros y activación en segundo plano sin falsos errores por tiempo de espera.",
+    "Cloudflared incluido y verificado dentro del instalador, sin instalaciones ni cuentas adicionales.",
     "Subida binaria de evidencias mediante archivos temporales, sin cargar documentos completos en la memoria RAM.",
     "Compresión automática de fotografías a WebP y conservación exacta de documentos, audio y video.",
     "Portal estudiantil y evidencias organizados en módulos seguros, con sesiones persistentes después de reiniciar.",
@@ -14,8 +22,46 @@
   ],
   "history": [
     {
+      "version": "11.2.9",
+      "releaseName": "Armi Docente 11.2.9",
+      "publishedAt": "2026-08-31",
+      "changelog": [
+        "Logo y mensajes de inicio flotantes sobre el escritorio, sin tarjeta exterior.",
+        "Contraste reforzado para conservar la legibilidad con cualquier fondo de pantalla."
+      ]
+    },
+    {
+      "version": "11.2.7",
+      "releaseName": "Armi Docente 11.2.7",
+      "publishedAt": "2026-08-31",
+      "changelog": [
+        "Pantalla de inicio única y configurable con PNG, GIF, WebP, MP4 o WebM.",
+        "La interfaz principal permanece oculta hasta estar preparada, evitando cargadores duplicados."
+      ]
+    },
+    {
+      "version": "11.2.6",
+      "releaseName": "Armi Docente 11.2.6",
+      "publishedAt": "2026-08-31",
+      "changelog": [
+        "Sincronización incremental de recursos visuales entre múltiples PC.",
+        "Actualización inmediata de imágenes cargadas en Sesiones.",
+        "Corrección de subida de evidencias mediante LAN HTTP."
+      ]
+    },
+    {
       "version": "11.2.5",
       "releaseName": "Armi Docente 11.2.5",
+      "publishedAt": "2026-08-29",
+      "changelog": [
+        "Acceso remoto Quick Tunnel con URL pública y QR.",
+        "Separación visual inequívoca entre enlace LAN y enlace por Internet.",
+        "Inicio no bloqueante, reintento seguro y cierre automático del túnel."
+      ]
+    },
+    {
+      "version": "11.2.3",
+      "releaseName": "Armi Docente 11.2.3",
       "publishedAt": "2026-08-28",
       "changelog": [
         "Subida de evidencias por streaming temporal y compresión WebP eficiente.",

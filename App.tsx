@@ -17,7 +17,7 @@ import { GeneralNotesOverlay, GeneralNotesFloatingButton } from './components/Ge
 import { AppErrorBoundary } from './components/AppErrorBoundary';
 import { ModuleStatus, ModuleKey } from './types';
 import { INITIAL_MODULE_STATUS } from './constants';
-import { getCloudSyncStatus, getDatosGenerales, getEstudiantes, getModuleStatus, CloudSyncStatusData } from './services/apiService';
+import { getDatosGenerales, getEstudiantes, getModuleStatus } from './services/apiService';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { useAuth } from './components/auth/AuthContext';
 import { CLOUD_SYNC_EVENT } from './utils/cloudSyncState';
@@ -36,84 +36,61 @@ const toIsoDate = (value: Date) => {
   return `${year}-${month}-${day}`;
 };
 
-const toMonthDay = (isoDate: string) => String(isoDate || '').slice(5, 10);
+const normalizeBirthdayText = (value: unknown) => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .trim()
+  .toLowerCase();
 
-const isBirthdaySyncReady = (status: CloudSyncStatusData | null) => {
-  if (!status) return false;
-  if (status.config.mode === 'local') return true;
-  const conflictCount = status.config.remoteActivity?.conflicts?.count || 0;
-  return conflictCount === 0 && status.comparison === 'in-sync';
-};
-
-const readCalendarState = () => {
-  try {
-    return JSON.parse(window.localStorage.getItem('armi_calendar_state') || '{}') as Record<string, string>;
-  } catch {
-    return {};
-  }
-};
-
-const readHolidayList = () => {
-  try {
-    return JSON.parse(window.localStorage.getItem('armi_holidays_v7') || '[]') as Array<{ date?: string; mmdd?: string; type?: string }>;
-  } catch {
-    return [];
-  }
-};
-
-const isNonTeachingDay = (date: Date, calendarState: Record<string, string>, holidays: Array<{ date?: string; mmdd?: string; type?: string }>) => {
-  const iso = toIsoDate(date);
-  const mmdd = toMonthDay(iso);
-  const dayOfWeek = date.getDay();
-  if (dayOfWeek === 0 || dayOfWeek === 6) return true;
-  const holiday = holidays.find((item) => item.date === iso || (item.mmdd === mmdd && item.type !== 'I'));
-  if (holiday && holiday.type !== 'I') return true;
-  const code = String(calendarState[iso] || '').trim().toUpperCase();
-  return !!code && code !== 'A';
-};
-
-const collectBirthdayWindow = () => {
+const birthdayDaysAhead = (birthDate: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) return null;
+  const [, month, day] = birthDate.split('-').map(Number);
   const today = new Date();
-  const calendarState = readCalendarState();
-  const holidays = readHolidayList();
-  const dates: Date[] = [today];
-  const cursor = new Date(today);
-
-  for (let index = 0; index < 10; index += 1) {
-    cursor.setDate(cursor.getDate() - 1);
-    if (!isNonTeachingDay(cursor, calendarState, holidays)) break;
-    dates.unshift(new Date(cursor));
-  }
-
-  return dates.map((date) => ({
-    iso: toIsoDate(date),
-    mmdd: toMonthDay(toIsoDate(date)),
-    label: toIsoDate(date) === toIsoDate(today)
-      ? 'hoy'
-      : date.toLocaleDateString('es-PE', { weekday: 'long', day: '2-digit', month: '2-digit' }),
-  }));
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  let next = new Date(today.getFullYear(), month - 1, day);
+  if (next < start) next = new Date(today.getFullYear() + 1, month - 1, day);
+  return Math.round((next.getTime() - start.getTime()) / 86_400_000);
 };
 
 const buildBirthdayToastPayload = (students: Awaited<ReturnType<typeof getEstudiantes>>) => {
-  const birthdayWindow = collectBirthdayWindow();
-  const labelsByMonthDay = new Map(birthdayWindow.map((item) => [item.mmdd, item.label]));
+  let assignments: Array<{ areaName?: string; grade?: string; section?: string }> = [];
+  try {
+    assignments = JSON.parse(window.localStorage.getItem('armi_assignments') || '[]');
+  } catch {
+    assignments = [];
+  }
+  const tutorLoads = assignments.filter((assignment) => {
+    const area = normalizeBirthdayText(assignment.areaName);
+    return area.includes('tutoria') && area.includes('orientacion educativa');
+  });
+  const belongsToTutorLoad = (grade: unknown, section: unknown) => tutorLoads.some((assignment) => {
+    const sameGrade = normalizeBirthdayText(assignment.grade) === normalizeBirthdayText(grade);
+    const assignedSections = normalizeBirthdayText(assignment.section).split(/\s+y\s+|\s*,\s*/).filter(Boolean);
+    return sameGrade && assignedSections.includes(normalizeBirthdayText(section));
+  });
   const matches = students
     .filter((student) => String(student.estado || 'A').toUpperCase() === 'A')
     .map((student) => ({
       ...student,
       birthDate: String(student.fechaNacimiento || '').trim(),
+      daysAhead: birthdayDaysAhead(String(student.fechaNacimiento || '').trim()),
+      tutorPriority: belongsToTutorLoad(student.grade, student.section),
     }))
-    .filter((student) => /^\d{4}-\d{2}-\d{2}$/.test(student.birthDate) && labelsByMonthDay.has(toMonthDay(student.birthDate)))
-    .sort((left, right) => String(left.name || '').localeCompare(String(right.name || ''), 'es'))
+    .filter((student) => student.daysAhead !== null && student.daysAhead <= 2)
+    .sort((left, right) => Number(right.tutorPriority) - Number(left.tutorPriority)
+      || Number(left.daysAhead) - Number(right.daysAhead)
+      || String(left.name || '').localeCompare(String(right.name || ''), 'es'))
     .map((student) => ({
       name: String(student.name || '').trim(),
-      label: labelsByMonthDay.get(toMonthDay(student.birthDate)) || 'hoy',
+      label: student.daysAhead === 0 ? 'hoy' : student.daysAhead === 1 ? 'mañana' : 'en 2 días',
+      tutorPriority: student.tutorPriority,
     }));
 
   if (matches.length === 0) return null;
 
-  const title = matches.length === 1 ? 'Cumpleaños detectado' : `Cumpleaños detectados: ${matches.length}`;
-  const visibleNames = matches.slice(0, 4).map((item) => `${item.name} (${item.label})`);
+  const todayCount = matches.filter((item) => item.label === 'hoy').length;
+  const title = todayCount > 0 ? `🎉 Hoy hay ${todayCount === 1 ? 'un cumpleaños' : `${todayCount} cumpleaños`} en el aula` : '🎂 Cumpleaños próximos';
+  const visibleNames = matches.slice(0, 4).map((item) => `${item.tutorPriority ? '⭐ ' : ''}${item.name} (${item.label})`);
   const extra = matches.length > 4 ? ` y ${matches.length - 4} más` : '';
   const message = visibleNames.join(', ') + extra;
   const token = `${toIsoDate(new Date())}|${matches.map((item) => `${item.name}:${item.label}`).join('|')}`;
@@ -131,6 +108,10 @@ const App: React.FC = () => {
   const [generalNotesOpen, setGeneralNotesOpen] = useState(false);
   const [isUpdaterExpanded, setIsUpdaterExpanded] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    if (!loading) window.armiApp?.notifyStartupReady?.();
+  }, [loading]);
 
   const refreshData = async () => {
     try {
@@ -161,9 +142,6 @@ const App: React.FC = () => {
     let cancelled = false;
 
     const runBirthdayCheck = async () => {
-      const syncResponse = await getCloudSyncStatus();
-      if (!syncResponse.success || !syncResponse.data || !isBirthdaySyncReady(syncResponse.data) || cancelled) return;
-
       const students = await getEstudiantes();
       if (cancelled) return;
 
@@ -285,12 +263,7 @@ const App: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-white">
-        <div className="rounded-[2rem] border border-white/10 bg-white/5 px-8 py-6 text-center shadow-2xl">
-          <p className="text-[11px] font-black uppercase tracking-[0.28em] text-cyan-300">Armi Docente</p>
-          <p className="mt-3 text-sm font-semibold text-slate-200">Preparando sesión segura...</p>
-        </div>
-      </div>
+      <div className="min-h-screen bg-[#eaebef]" aria-label="Preparando ARMI Docente" />
     );
   }
 

@@ -319,14 +319,22 @@ export const resolveEvidenceCandidate = (root, relative) => {
 };
 
 export const evidenceFileMatchesRecord = (row, candidate) => {
-  if (!candidate || !fs.existsSync(candidate)) return false;
-  const expectedSize = Number(row?.file_size || 0);
-  return expectedSize <= 0 || Number(fs.statSync(candidate).size) === expectedSize;
+  if (!candidate) return false;
+  try {
+    const stats = fs.statSync(candidate);
+    if (!stats.isFile()) return false;
+    const expectedSize = Number(row?.file_size || 0);
+    return expectedSize <= 0 || Number(stats.size) === expectedSize;
+  } catch {
+    return false;
+  }
 };
 
-export const resolveEvidenceFilePathDetailed = (row) => {
+export const resolveEvidenceFilePathDetailed = (row, storageContext = null) => {
   const relative = evidenceRelativePathFromRow(row);
-  const context = getEvidenceStorageContext();
+  const context = storageContext && typeof storageContext === 'object' && storageContext.effectivePath
+    ? storageContext
+    : getEvidenceStorageContext();
   const canonicalPath = resolveEvidenceCandidate(context.effectivePath, relative);
   if (evidenceFileMatchesRecord(row, canonicalPath)) return { path: canonicalPath, source: context.automaticMirror ? 'drive-mirror' : 'configured' };
 
@@ -353,6 +361,8 @@ export const persistEvidencePortableMetadata = (row) => {
     const evidenceKey = String(row.evidence_key || portableEvidenceKey(relativePath));
     if (!evidenceKey || !relativePath) return null;
     if (!row.evidence_key) {
+      const existingOwner = db.prepare('SELECT id FROM evaluacion_evidencias WHERE evidence_key = ? LIMIT 1').get(evidenceKey);
+      if (existingOwner && Number(existingOwner.id) !== Number(row.id)) return null;
       db.prepare('UPDATE evaluacion_evidencias SET evidence_key = ? WHERE id = ?').run(evidenceKey, row.id);
     }
     const resolved = resolveEvidenceFilePathDetailed({ ...row, evidence_key: evidenceKey, relative_path: relativePath });
@@ -394,8 +404,13 @@ export const reconcilePortableEvidenceIndex = () => {
   }
 };
 
-export const mapEvidenceRow = (row) => {
-  const resolved = resolveEvidenceFilePathDetailed(row);
+export const mapEvidenceRow = (row, storageContext = null) => {
+  const resolved = resolveEvidenceFilePathDetailed(
+    row,
+    storageContext && typeof storageContext === 'object' && storageContext.effectivePath
+      ? storageContext
+      : null
+  );
   return {
     id: row.id,
     year: row.year || '',
@@ -405,6 +420,7 @@ export const mapEvidenceRow = (row) => {
     bimester: row.bimester || '',
     unitNumber: row.unit_number || '',
     sessionNumber: row.session_number || '',
+    sessionId: row.session_id || '',
     studentId: row.student_id || '',
     criteriaId: row.criteria_id || '',
     observation: row.observation || '',

@@ -61,6 +61,64 @@ const sanitizeDocxDrawingIds = (doc) => {
     });
 };
 
+const isJpegBuffer = (buffer) => Buffer.isBuffer(buffer)
+    && buffer.length >= 3
+    && buffer[0] === 0xff
+    && buffer[1] === 0xd8
+    && buffer[2] === 0xff;
+
+const normalizeDocxEmbeddedImageTypes = (doc) => {
+    const zip = doc?.getZip?.();
+    if (!zip?.files) return 0;
+
+    const renamed = [];
+    Object.keys(zip.files)
+        .filter((name) => /^word\/media\/[^/]+\.png$/i.test(name))
+        .forEach((name) => {
+            const file = zip.file(name);
+            if (!file) return;
+            const buffer = file.asNodeBuffer();
+            if (!isJpegBuffer(buffer)) return;
+            const nextName = name.replace(/\.png$/i, '.jpg');
+            zip.file(nextName, buffer);
+            zip.remove(name);
+            renamed.push({
+                previousBaseName: name.split('/').pop(),
+                nextBaseName: nextName.split('/').pop(),
+            });
+        });
+
+    if (!renamed.length) return 0;
+
+    Object.keys(zip.files)
+        .filter((name) => /\.rels$/i.test(name))
+        .forEach((name) => {
+            const file = zip.file(name);
+            if (!file) return;
+            const xml = file.asText();
+            const nextXml = renamed.reduce(
+                (value, item) => value.split(item.previousBaseName).join(item.nextBaseName),
+                xml,
+            );
+            if (nextXml !== xml) zip.file(name, nextXml);
+        });
+
+    const contentTypesName = '[Content_Types].xml';
+    const contentTypes = zip.file(contentTypesName)?.asText() || '';
+    if (contentTypes && !/<Default\b[^>]*Extension="jpe?g"/i.test(contentTypes)) {
+        zip.file(
+            contentTypesName,
+            contentTypes.replace(
+                '</Types>',
+                '<Default Extension="jpg" ContentType="image/jpeg"/></Types>',
+            ),
+        );
+    }
+
+    return renamed.length;
+};
+
 export {
+    normalizeDocxEmbeddedImageTypes,
     sanitizeDocxDrawingIds
 };
