@@ -1,6 +1,6 @@
 {
-  "version": "11.3.1",
-  "releaseName": "Armi Docente 11.3.1",
+  "version": "11.3.2",
+  "releaseName": "Armi Docente 11.3.2",
   "publishedAt": "2026-08-31",
   "assetName": "ARMI_DOCENTE_Setup.exe",
   "downloadUrl": "https://github.com/Timer93/Armi-Docente/releases/download/Armi_Docente_2026/ARMI_DOCENTE_Setup.exe",
@@ -22,8 +22,8 @@
   ],
   "history": [
     {
-      "version": "11.3.1",
-      "releaseName": "Armi Docente 11.3.1",
+      "version": "11.3.2",
+      "releaseName": "Armi Docente 11.3.2",
       "publishedAt": "2026-08-31",
       "changelog": [
         "Logo y mensajes de inicio flotantes sobre el escritorio, sin tarjeta exterior.",
