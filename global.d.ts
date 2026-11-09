@@ -12,11 +12,18 @@ declare global {
       installDownloadedUpdate?: () => Promise<any>;
     };
     armiApp?: {
+      previewPrint?: (options?: { title?: string }) => Promise<{ success: boolean; message?: string }>;
+      onPrintRequest?: (callback: () => void) => (() => void);
       notifyStartupReady?: () => void;
       onBeforeQuitAttempt?: (callback: () => void | Promise<void>) => (() => void) | void;
+      onBackendRecovered?: (callback: () => void) => (() => void) | void;
       continueQuit?: () => Promise<any>;
       cancelQuit?: () => Promise<any>;
       requestQuit?: () => Promise<any>;
+      restartApplication?: () => Promise<any>;
+      exitApplication?: () => Promise<any>;
+      setStudentContextMenuTarget?: (student: { id: string | number; name: string } | null) => boolean;
+      onDeleteStudentFromContextMenu?: (callback: (student: { id: string | number; name: string }) => void) => (() => void) | void;
     };
   }
 }

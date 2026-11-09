@@ -14,6 +14,7 @@ import {
   saveCloudSyncConfig,
 } from '../services/apiService';
 import { applyArmiLocalState, CLOUD_SYNC_EVENT, collectArmiLocalState, emitCloudSyncUpdated } from '../utils/cloudSyncState';
+import { createCloseAttempt } from '../utils/closeAttempt';
 
 type CloseFlowState = 'idle' | 'checking' | 'syncing' | 'needs-attention' | 'ready-to-close';
 type RestorePromptReason = 'mirror-newer' | 'local-newer' | 'diverged' | 'conflicts' | 'conflicts-missing-current' | 'pending-local';
@@ -52,6 +53,13 @@ const formatTransferBytes = (value: number) => {
 const SKIP_NEXT_LOCAL_PUSH_FLAG = 'armi-sync-skip-next-local-push';
 const RECENT_MANUAL_PUSH_MARK_KEY = 'armi-sync-recent-manual-push';
 const RECENT_MANUAL_PUSH_TTL_MS = 10 * 60 * 1000;
+const BACKEND_RECOVERY_RETRY_DELAYS_MS = [1_500, 3_000];
+
+const isTemporaryBackendDisconnect = (message = '') => /servicio local|backend|servidor no responde|failed to fetch/i.test(message);
+
+const waitForBackendRecovery = (ms: number) => new Promise<void>((resolve) => {
+  window.setTimeout(resolve, ms);
+});
 
 const markRecentManualPush = () => {
   window.localStorage.setItem(RECENT_MANUAL_PUSH_MARK_KEY, String(Date.now()));
@@ -290,6 +298,8 @@ export const SyncLifecycleManager: React.FC = () => {
   const [resourceDelivery, setResourceDelivery] = useState<ResourceDeliveryStatus | null>(null);
   const handledSessionRef = useRef('');
   const closeInFlightRef = useRef(false);
+  const closeAttemptRef = useRef<ReturnType<typeof createCloseAttempt> | null>(null);
+  const [closeLocalSaved, setCloseLocalSaved] = useState(false);
   const restorePromptDiffs = useMemo(
     () => getManifestDiffSummary(status?.localManifest, status?.mirrorManifest),
     [status]
@@ -403,15 +413,6 @@ export const SyncLifecycleManager: React.FC = () => {
   }, [session]);
 
   const refreshStatus = async () => {
-    const frontendState = await saveCloudFrontendState(collectArmiLocalState());
-    if (!frontendState.success) {
-      setNotice({
-        title: 'Guardado local con observaciones',
-        message: frontendState.message || 'No pude actualizar el estado local de sincronizacion.',
-        tone: 'warning',
-      });
-    }
-
     const response = await getCloudSyncStatus();
     if (!response.success || !response.data) {
       setStatus(null);
@@ -436,6 +437,10 @@ export const SyncLifecycleManager: React.FC = () => {
   };
 
   const cancelDesktopClose = async () => {
+    closeAttemptRef.current?.cancel();
+    closeAttemptRef.current = null;
+    closeInFlightRef.current = false;
+    setCloseFlow('idle');
     if (window.armiApp?.cancelQuit) {
       await window.armiApp.cancelQuit();
     }
@@ -605,12 +610,29 @@ export const SyncLifecycleManager: React.FC = () => {
     handledSessionRef.current = sessionFingerprint;
 
     void (async () => {
-      setStartupGateOpen(true);
+      setStartupGateOpen(false);
       setStartupFlow('checking');
       setStartupMessage('Verificando la sincronizacion antes de habilitar el trabajo en esta PC...');
       setCloseError(null);
       setShowRestorePrompt(false);
       setCloseFlow('checking');
+      const localStatus = await getLocalCloudSyncStatus();
+      if (localStatus.success && localStatus.data?.config.mode === 'drive_mirror') {
+        // Opening the app only needs local readiness. Drive diagnostics and
+        // archive comparisons belong to the synchronization panel.
+        setStartupGateOpen(false);
+        setStartupFlow('idle');
+        setCloseFlow('idle');
+        return;
+      }
+      if (!localStatus.success) {
+        // A temporarily disconnected backend must not bring back the startup
+        // gate or trigger a legacy restore while the user works locally.
+        setStartupFlow('idle');
+        setCloseFlow('idle');
+        return;
+      }
+      setStartupGateOpen(true);
       const bootstrapStatus = await getCloudSyncStatus();
       if (bootstrapStatus.success && bootstrapStatus.data?.frontendState?.keys && shouldHydrateStoredFrontendState(bootstrapStatus.data.frontendState.keys)) {
         applyArmiLocalState(bootstrapStatus.data.frontendState.keys);
@@ -621,13 +643,16 @@ export const SyncLifecycleManager: React.FC = () => {
           tone: 'info',
         });
       }
-      let freshStatus = await refreshStatus();
+      let freshStatus = bootstrapStatus.success ? bootstrapStatus.data || null : null;
+      if (freshStatus) setStatus(freshStatus);
       setCloseFlow('idle');
       if (!freshStatus) {
         setStartupGateOpen(false);
         setStartupFlow('idle');
         return;
       }
+      // El estado visual se persiste sin bloquear el inicio. La copia a la carpeta
+      // espejo queda a cargo de la unica cola continua del backend.
       if (freshStatus.config.mode === 'local'
         && freshStatus.config.legacyMode === 'apps_script_drive'
         && freshStatus.driveDesktop?.existingMirrors?.length === 1) {
@@ -660,37 +685,45 @@ export const SyncLifecycleManager: React.FC = () => {
         return;
       }
 
-      if (freshStatus.config.mode === 'drive_mirror' && freshStatus.comparison === 'mirror-missing') {
-        setStartupFlow('syncing');
-        setStartupMessage('La carpeta espejo esta vacia. Creando automaticamente la primera copia de esta PC...');
-        await markPendingCloudSync({
-          reason: 'initial-mirror-upload',
-          note: 'Primera subida automatica despues de vincular la carpeta espejo.',
-        });
-        const initialPush = await pushCloudSync();
-        if (!initialPush.success) {
-          setStartupGateOpen(false);
-          setStartupFlow('idle');
-          setCloseError(null);
-          setNotice({
-            title: 'La primera copia quedo pendiente',
-            message: initialPush.message || 'No se pudo preparar la primera copia en la carpeta espejo. Tus datos locales siguen intactos.',
-            tone: 'warning',
-          });
-          return;
-        }
-        const deliveryPending = initialPush.data?.cloudDeliveryPending === true;
-        setNotice({
-          title: deliveryPending ? 'Copia preparada; Drive sigue pendiente' : 'Primera copia preparada automaticamente',
-          message: deliveryPending
-            ? initialPush.data?.message || 'ARMI preparo los archivos, pero Google Drive debe reanudar la sincronizacion para subirlos.'
-            : 'ARMI copio automaticamente tus datos en la carpeta espejo. No fue necesario pulsar Subir.',
-          tone: deliveryPending ? 'warning' : 'success',
-        });
+      if (freshStatus.config.mode === 'drive_mirror') {
+        // The backend owns row replication and resource delivery. An automatic
+        // full ZIP/restore here reintroduced startup stalls and stale snapshots.
         setStartupGateOpen(false);
         setStartupFlow('idle');
-        emitCloudSyncUpdated();
-        await refreshStatus();
+        if (freshStatus.comparison === 'incremental-pending') {
+          setNotice({ title: 'Actualizando en segundo plano',
+            message: 'Los cambios de notas y evidencias se incorporan mientras trabajas. Google Drive debe entregarlos a esta PC.',
+            tone: 'info' });
+        }
+        return;
+      }
+      void saveCloudFrontendState(collectArmiLocalState());
+
+      if (freshStatus.comparison === 'incremental-pending') {
+        setStartupGateOpen(false);
+        setStartupFlow('idle');
+        setNotice({
+          title: 'Actualizando en segundo plano',
+          message: 'ARMI esta incorporando cambios pequenos de esta PC y de Drive sin bloquear la pantalla.',
+          tone: 'info',
+        });
+        void (async () => {
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+            const response = await getCloudSyncStatus();
+            if (!response.success || !response.data || response.data.comparison === 'incremental-pending') continue;
+            setStatus(response.data);
+            if (Number(response.data.incrementalSync?.appliedOperations || 0) > 0) {
+              setNotice({
+                title: 'Datos de otra PC incorporados',
+                message: 'ARMI actualizara la interfaz una vez para mostrar unidades, sesiones, notas y asistencias recibidas.',
+                tone: 'success',
+              });
+              reloadApplicationView();
+            }
+            return;
+          }
+        })();
         return;
       }
 
@@ -725,12 +758,6 @@ export const SyncLifecycleManager: React.FC = () => {
       }
 
       if (freshStatus.comparison === 'local-newer') {
-        if (freshStatus.config.mode === 'drive_mirror') {
-          setStartupFlow('syncing');
-          setStartupMessage('Esta PC tiene la copia mas completa. La guardaremos automaticamente en la carpeta espejo.');
-          await pushLocalSnapshotToDrive();
-          return;
-        }
         if (hasOnlyFrontendStateDifference(freshStatus.localManifest, freshStatus.mirrorManifest)) {
           setStartupGateOpen(false);
           setStartupFlow('idle');
@@ -842,9 +869,12 @@ export const SyncLifecycleManager: React.FC = () => {
   useEffect(() => {
     if (!window.armiApp?.onBeforeQuitAttempt) return undefined;
 
-    return window.armiApp.onBeforeQuitAttempt(async () => {
+    const unsubscribe = window.armiApp.onBeforeQuitAttempt(async () => {
       if (closeInFlightRef.current) return;
       closeInFlightRef.current = true;
+      const attempt = createCloseAttempt();
+      closeAttemptRef.current = attempt;
+      setCloseLocalSaved(false);
       setCloseModalOpen(true);
       setCloseError(null);
       setCloseFlow('syncing');
@@ -852,7 +882,14 @@ export const SyncLifecycleManager: React.FC = () => {
       setCloseMessage('Guardando datos locales antes de cerrar...');
 
       try {
-        const localSave = await saveCloudFrontendState(collectArmiLocalState());
+        const localState = collectArmiLocalState();
+        let localSave = await attempt.wait(saveCloudFrontendState(localState));
+        for (const delayMs of BACKEND_RECOVERY_RETRY_DELAYS_MS) {
+          if (localSave.success || !isTemporaryBackendDisconnect(localSave.message || '')) break;
+          setCloseMessage('El servicio local se está recuperando. Conservamos la ventana abierta y volveremos a intentar…');
+          await attempt.wait(waitForBackendRecovery(delayMs));
+          localSave = await attempt.wait(saveCloudFrontendState(localState));
+        }
         if (!localSave.success) {
           setCloseFlow('needs-attention');
           setCloseError(localSave.message || 'No pude dejar lista la copia local antes de cerrar.');
@@ -860,27 +897,41 @@ export const SyncLifecycleManager: React.FC = () => {
           return;
         }
 
-        const localStatusResponse = await getLocalCloudSyncStatus();
+        setCloseLocalSaved(true);
+        const localStatusResponse = await attempt.wait(getLocalCloudSyncStatus());
         const localStatus = localStatusResponse.success ? localStatusResponse.data || null : null;
 
-        if (!localStatus || localStatus.config.mode === 'local' || !localStatus.config.autoSyncOnClose) {
+        if (!localStatus) throw new Error(localStatusResponse.message || 'No se pudo comprobar el estado de sincronización. Puedes reintentar o salir solo local.');
+        if (localStatus.config.mode === 'local' || !localStatus.config.autoSyncOnClose) {
           setCloseFlow('ready-to-close');
           setCloseMessage('La copia local quedo guardada. Cerrando aplicativo...');
-          await continueDesktopClose();
+          await attempt.wait(continueDesktopClose());
           return;
         }
 
-        if (!localStatus.hasUnsyncedChanges && !localStatus.pendingLocal) {
+        if (!localStatus.hasUnsyncedChanges
+          && (!localStatus.pendingLocal || (localStatus as any).mirrorPrepared === true)) {
           setCloseFlow('ready-to-close');
-          setCloseMessage('No habia cambios nuevos por subir. Cerrando aplicativo...');
-          await continueDesktopClose();
+          setCloseMessage((localStatus as any).mirrorPrepared === true
+            ? 'Los cambios ya estan en la carpeta espejo. Google Drive puede continuar en segundo plano. Cerrando aplicativo...'
+            : 'No habia cambios nuevos por subir. Cerrando aplicativo...');
+          await attempt.wait(continueDesktopClose());
           return;
         }
 
-        await markPendingCloudSync({
+        const pendingResult = await attempt.wait(markPendingCloudSync({
           reason: 'close-attempt',
-          note: 'Se preparo una copia local de emergencia antes de intentar subir a Drive.',
-        });
+          deferRemote: localStatus.config.mode === 'drive_mirror',
+          note: 'Se confirmo el guardado local. La sincronizacion pendiente se reintentara al abrir ARMI.',
+        }));
+        if (!pendingResult.success) throw new Error(pendingResult.message || 'No se pudo registrar la sincronización pendiente. Tus datos locales se conservan.');
+
+        if (localStatus.config.mode === 'drive_mirror' && pendingResult.data?.closePrepared === true && pendingResult.data?.localSaved === true) {
+          setCloseFlow('ready-to-close');
+          setCloseMessage('Datos guardados en esta PC. Lo pendiente se sincronizará al volver a abrir ARMI. Cerrando aplicativo...');
+          await attempt.wait(continueDesktopClose());
+          return;
+        }
 
         if (localStatus.config.mode === 'apps_script_drive' && !navigator.onLine) {
           setCloseContext('offline');
@@ -891,7 +942,7 @@ export const SyncLifecycleManager: React.FC = () => {
         }
 
         setCloseMessage('Subiendo la copia reciente del usuario a Drive...');
-        const pushResult = await pushCloudSync();
+        const pushResult = await attempt.wait(pushCloudSync());
         if (!pushResult.success) {
           if ((pushResult as any).conflict === true) {
             setCloseFlow('needs-attention');
@@ -920,20 +971,32 @@ export const SyncLifecycleManager: React.FC = () => {
 
         const deliveryPending = pushResult.data?.cloudDeliveryPending === true;
         if (!deliveryPending) {
-          await discardPendingCloudSync();
+          await attempt.wait(discardPendingCloudSync());
         }
         setCloseFlow('ready-to-close');
         setCloseMessage(deliveryPending
           ? 'La copia local y la carpeta espejo quedaron actualizadas. Google Drive continuara cuando se reanude. Cerrando aplicativo...'
           : 'La copia local y la carpeta espejo quedaron actualizadas. Cerrando aplicativo...');
         emitCloudSyncUpdated();
-        await continueDesktopClose();
+        await attempt.wait(continueDesktopClose());
       } catch (error: any) {
+        if (closeAttemptRef.current !== attempt) return;
         setCloseFlow('needs-attention');
         setCloseError(error?.message || 'La sincronizacion protegida no pudo completarse.');
-        closeInFlightRef.current = false;
+      } finally {
+        attempt.dispose();
+        if (closeAttemptRef.current === attempt) {
+          closeAttemptRef.current = null;
+          closeInFlightRef.current = false;
+        }
       }
     });
+    return () => {
+      closeAttemptRef.current?.cancel();
+      closeAttemptRef.current = null;
+      closeInFlightRef.current = false;
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
   }, []);
 
   const closeModalTitle = closeContext === 'offline'
@@ -1372,6 +1435,7 @@ export const SyncLifecycleManager: React.FC = () => {
                   <button
                     type="button"
                     onClick={async () => {
+                      await cancelDesktopClose();
                       closeInFlightRef.current = false;
                       setCloseModalOpen(false);
                       setCloseFlow('idle');
@@ -1387,12 +1451,15 @@ export const SyncLifecycleManager: React.FC = () => {
 
                   <button
                     type="button"
+                    disabled={!closeLocalSaved}
                     onClick={async () => {
+                      if (!closeLocalSaved) return;
                       setCloseMessage('Tus cambios recientes quedaron guardados solo en esta PC. Cerrando aplicativo...');
                       setCloseFlow('ready-to-close');
                       await continueDesktopClose();
                     }}
-                    className="rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-800"
+                    title={closeLocalSaved ? 'Cerrar conservando los cambios locales' : 'Primero debe confirmarse el guardado local. Reintenta el cierre.'}
+                    className="rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Salir solo local
                   </button>

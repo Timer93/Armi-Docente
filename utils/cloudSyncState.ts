@@ -21,20 +21,26 @@ export const collectArmiLocalState = (): Record<string, string> => {
   return snapshot;
 };
 
+const appliedChanges = new Set<string>();
 export const applyArmiLocalState = (payload: Record<string, string>) => {
   const keysToRemove: string[] = [];
   for (let index = 0; index < window.localStorage.length; index += 1) {
     const key = window.localStorage.key(index);
-    if (key?.startsWith('armi_') && !EXCLUDED_SYNC_KEYS.has(key)) keysToRemove.push(key);
+    if (key?.startsWith('armi_') && !EXCLUDED_SYNC_KEYS.has(key)
+      && key !== 'armi_profile_image' && !key.startsWith('armi_profile_image::')
+      && !Object.hasOwn(payload || {}, key)) keysToRemove.push(key);
   }
-  keysToRemove.forEach((key) => window.localStorage.removeItem(key));
+  keysToRemove.forEach((key) => { window.localStorage.removeItem(key); appliedChanges.add(key); });
   Object.entries(payload || {}).forEach(([key, value]) => {
     if (key === 'armi_profile_image' || key.startsWith('armi_profile_image::')) return;
     if (EXCLUDED_SYNC_KEYS.has(key)) return;
-    window.localStorage.setItem(key, value);
+    if (window.localStorage.getItem(key) !== value) {
+      window.localStorage.setItem(key, value); appliedChanges.add(key);
+    }
   });
 };
 
 export const emitCloudSyncUpdated = () => {
-  window.dispatchEvent(new CustomEvent(CLOUD_SYNC_EVENT));
+  const changedKeys = [...appliedChanges]; appliedChanges.clear();
+  window.dispatchEvent(new CustomEvent(CLOUD_SYNC_EVENT, { detail: { changedKeys } }));
 };

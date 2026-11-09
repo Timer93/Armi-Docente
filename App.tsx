@@ -1,31 +1,52 @@
-
-import React, { useState, useEffect } from 'react';
+import { OPEN_SESSION_REGISTER_EVENT, isSessionRegisterTarget, type SessionRegisterTarget } from './utils/sessionRegisterNavigation';
+import React, { lazy, Suspense, useCallback, useMemo, useState, useEffect, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { DatosGeneralesView } from './components/DatosGeneralesView';
-import { CalendarView } from './components/CalendarView';
-import { AreasGradosView } from './components/AreasGradosView';
-import { StudentsView } from './components/StudentsView';
-import { ScheduleView } from './components/ScheduleView';
-import { AnnualProgramView } from './components/AnnualProgramView';
-import { DatabaseManager } from './components/DatabaseManager';
-import { UnitsView } from './components/UnitsView';
-import { SessionsView } from './components/SessionsView';
-import { EvaluationView } from './components/evaluation/EvaluationView';
 import { SyncLifecycleManager } from './components/SyncLifecycleManager';
-import { AppUpdaterOverlay, APP_UPDATER_EXPANDED_EVENT } from './components/AppUpdaterOverlay';
+import { BackgroundSyncIndicator } from './components/BackgroundSyncIndicator';
+import { mergeRecoveryProgress } from './utils/backgroundSyncStatus';
+import { AppUpdaterOverlay } from './components/AppUpdaterOverlay';
 import { GeneralNotesOverlay, GeneralNotesFloatingButton } from './components/GeneralNotesOverlay';
 import { AppErrorBoundary } from './components/AppErrorBoundary';
 import { ModuleStatus, ModuleKey } from './types';
 import { INITIAL_MODULE_STATUS } from './constants';
-import { getDatosGenerales, getEstudiantes, getModuleStatus } from './services/apiService';
+import { bootstrapPortableState, saveCloudFrontendState, getDatosGenerales, getEstudiantes, getModuleStatus } from './services/apiService';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { useAuth } from './components/auth/AuthContext';
-import { CLOUD_SYNC_EVENT } from './utils/cloudSyncState';
+import { CLOUD_SYNC_EVENT, collectArmiLocalState, applyArmiLocalState, emitCloudSyncUpdated } from './utils/cloudSyncState';
+import { observePortableStorage } from './utils/observePortableStorage';
+import {needsAcademicViewRefresh} from './utils/moduleStateRefresh';
 import './styles/buttons.css';
 import './styles/table.css';
 
+// Load each workspace when it is opened; the login and initial screen do not
+// need the lesson editor, gradebook, charts or document generation libraries.
+const lazyWorkspace = <T extends React.ComponentType<any>,>(load: () => Promise<{ default: T }>) => {
+  let pending: Promise<{ default: T }> | undefined;
+  const prepare = () => pending ??= load().catch(error => { pending = undefined; throw error; });
+  return Object.assign(lazy(prepare), { preload: () => { void prepare().catch(() => {}); } });
+};
+const CalendarView = lazyWorkspace(() => import('./components/CalendarView').then(module => ({ default: module.CalendarView })));
+const AreasGradosView = lazyWorkspace(() => import('./components/AreasGradosView').then(module => ({ default: module.AreasGradosView })));
+const ScheduleView = lazyWorkspace(() => import('./components/ScheduleView').then(module => ({ default: module.ScheduleView })));
+const DatabaseManager = lazyWorkspace(() => import('./components/DatabaseManager').then(module => ({ default: module.DatabaseManager })));
+const AccessControlView = lazyWorkspace(() => import('./components/AccessControlView').then(module => ({ default: module.AccessControlView })));
+const StudentsView = lazyWorkspace(() => import('./components/StudentsView').then(module => ({ default: module.StudentsView })));
+const AnnualProgramView = lazyWorkspace(() => import('./components/AnnualProgramView').then(module => ({ default: module.AnnualProgramView })));
+const UnitsView = lazyWorkspace(() => import('./components/UnitsView').then(module => ({ default: module.UnitsView })));
+const SessionsView = lazyWorkspace(() => import('./components/SessionsView').then(module => ({ default: module.SessionsView })));
+const EvaluationView = lazyWorkspace(() => import('./components/evaluation/EvaluationView').then(module => ({ default: module.EvaluationView })));
 
-import { DiagnosticEvaluationView } from './components/DiagnosticEvaluationView';
+const prepareWorkspace = (module: ModuleKey | 'database_admin', section?: string) => {
+  if (module === 'database_admin') {
+    (section === 'control_acceso' ? AccessControlView : DatabaseManager).preload();
+    return;
+  }
+  const workspaces = { calendario: CalendarView, areas_grados: AreasGradosView, horario: ScheduleView,
+    estudiantes: StudentsView, programacion_anual: AnnualProgramView, unidades_didacticas: UnitsView,
+    sesiones: SessionsView, evaluacion: EvaluationView };
+  workspaces[module as keyof typeof workspaces]?.preload();
+};
 
 const BIRTHDAY_TOAST_SEEN_KEY = 'armi_birthdays_toast_seen';
 
@@ -100,35 +121,118 @@ const buildBirthdayToastPayload = (students: Awaited<ReturnType<typeof getEstudi
 
 const App: React.FC = () => {
   const { loading, session, logout } = useAuth();
+  const [sessionRegisterTarget, setSessionRegisterTarget] = useState<SessionRegisterTarget | null>(null);
+  useEffect(() => {
+    const openRegister = (event: Event) => {
+      const target = (event as CustomEvent).detail;
+      if (!isSessionRegisterTarget(target)) return;
+      setSessionRegisterTarget(target);
+      setCurrentModule('sesiones');
+      setCurrentSection('sesiones');
+    };
+    window.addEventListener(OPEN_SESSION_REGISTER_EVENT, openRegister);
+    return () => window.removeEventListener(OPEN_SESSION_REGISTER_EVENT, openRegister);
+  }, []);
   const [currentModule, setCurrentModule] = useState<ModuleKey | 'database_admin'>('datos_generales');
   const [currentSection, setCurrentSection] = useState<string>('institucion');
   const [moduleStatus, setModuleStatus] = useState<ModuleStatus>(INITIAL_MODULE_STATUS);
   const [teacherName, setTeacherName] = useState<string>('');
   const [birthdayToast, setBirthdayToast] = useState<{ title: string; message: string } | null>(null);
   const [generalNotesOpen, setGeneralNotesOpen] = useState(false);
-  const [isUpdaterExpanded, setIsUpdaterExpanded] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [portableReady, setPortableReady] = useState(false);
+  const [portableError, setPortableError] = useState('');
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const bootstrapBaseline = useRef<{ session: string; keys: Record<string, string> } | null>(null);
+  const bootstrapEditedKeys = useRef<string[]>([]);
+  const [localStateRevision, setLocalStateRevision] = useState(0);
+  const displayedLocalState = useRef<Record<string, string> | null>(null);
+  if (displayedLocalState.current === null) displayedLocalState.current = collectArmiLocalState();
+  useEffect(() => {
+    const refresh = (event: Event) => {
+      const keys = collectArmiLocalState();
+      const before = displayedLocalState.current;
+      displayedLocalState.current = keys;
+      const receivedKeys = (event as CustomEvent<{ changedKeys?: string[] }>).detail?.changedKeys;
+      const academicChanged = receivedKeys
+        ? needsAcademicViewRefresh({}, Object.fromEntries(receivedKeys.map(key => [key, 'received-change'])))
+        : needsAcademicViewRefresh(before, keys);
+      if (academicChanged) {
+        setLocalStateRevision(value => value + 1);
+      }
+    };
+    window.addEventListener(CLOUD_SYNC_EVENT, refresh);
+    return () => window.removeEventListener(CLOUD_SYNC_EVENT, refresh);
+  }, []);
+  useEffect(() => {
+    const reload = () => { setPortableReady(false); setBootstrapAttempt((value) => value + 1); };
+    window.addEventListener('armi-portable-configuration-changed', reload);
+    return () => window.removeEventListener('armi-portable-configuration-changed', reload);
+  }, []);
+  useEffect(() => {
+    if (!session) { setPortableReady(false); return; }
+    let active = true;
+    const controller = new AbortController();
+    let retryTimer: ReturnType<typeof setTimeout>;
+    const identity = `${session.user.id}:${session.authenticatedAt}`;
+    if (bootstrapBaseline.current?.session !== identity) bootstrapBaseline.current = { session: identity, keys: collectArmiLocalState() };
+    setPortableReady(false); setPortableError('');
+    const recover = async () => {
+      try {
+        const result = await bootstrapPortableState(collectArmiLocalState(), controller.signal);
+        if (!active) return;
+        if (!result.success) throw new Error(result.message || 'No se pudo recuperar la configuración.');
+        setPortableError('');
+        const current = collectArmiLocalState();
+        const merged = mergeRecoveryProgress(bootstrapBaseline.current!.keys, current, result.data?.frontendState?.keys || current);
+        applyArmiLocalState(merged.keys);
+        bootstrapBaseline.current = { session: identity, keys: merged.baseline };
+        if (Object.keys({ ...current, ...merged.keys }).some(key => current[key] !== merged.keys[key])) emitCloudSyncUpdated();
+        // Editing is now allowed during recovery. Preserve and publish those
+        // edits instead of replacing them with the delayed response.
+        bootstrapEditedKeys.current = merged.changedKeys;
+        if (result.data?.recoveryPending) { retryTimer = setTimeout(recover, 5000); return; }
+        if (!active) return;
+        bootstrapBaseline.current = { session: identity, keys: collectArmiLocalState() };
+        setPortableReady(true);
+      } catch (error) {
+        if (active) { setPortableError(String(error)); retryTimer = setTimeout(recover, 10000); }
+      }
+    };
+    void recover();
+    return () => { active = false; clearTimeout(retryTimer); controller.abort(); };
+  }, [session, bootstrapAttempt]);
+  useEffect(() => {
+    if (portableReady || !session) return;
+    const unsubscribe = window.armiApp?.onBackendRecovered?.(() => setBootstrapAttempt(value => value + 1));
+    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
+  }, [portableReady, session]);
+  useEffect(() => {
+    if (!portableReady) return;
+    const initialKeys = bootstrapEditedKeys.current;
+    bootstrapEditedKeys.current = [];
+    return observePortableStorage(async (keys) => (await saveCloudFrontendState(collectArmiLocalState(), keys)).success, initialKeys);
+  }, [portableReady]);
 
   useEffect(() => {
     if (!loading) window.armiApp?.notifyStartupReady?.();
   }, [loading]);
 
-  const refreshData = async () => {
+  const refreshData = useCallback(async () => {
     try {
-      const status = await getModuleStatus();
+      const [status, generalData] = await Promise.all([getModuleStatus(), getDatosGenerales()]);
       setModuleStatus(status);
-      const generalData = await getDatosGenerales();
       if (generalData && generalData.teacher) {
         setTeacherName(generalData.teacher);
       }
     } catch (e) {
       console.warn('Could not fetch initial app data', e);
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (session) refreshData();
-  }, [session]);
+  }, [session, portableReady, refreshData]);
 
   useEffect(() => {
     if (!birthdayToast) return undefined;
@@ -153,12 +257,13 @@ const App: React.FC = () => {
       setBirthdayToast({ title: payload.title, message: payload.message });
     };
 
-    const timer = window.setTimeout(() => {
+    let timer = window.setTimeout(() => {
       void runBirthdayCheck();
     }, 1200);
 
     const handleSyncRefresh = () => {
-      window.setTimeout(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
         void runBirthdayCheck();
       }, 600);
     };
@@ -185,23 +290,11 @@ const App: React.FC = () => {
     }
   }, [currentModule, currentSection, session, teacherName]);
 
-  useEffect(() => {
-    const handleUpdaterExpanded = (event: Event) => {
-      const customEvent = event as CustomEvent<boolean>;
-      setIsUpdaterExpanded(Boolean(customEvent.detail));
-    };
 
-    window.addEventListener(APP_UPDATER_EXPANDED_EVENT, handleUpdaterExpanded as EventListener);
-    return () => {
-      window.removeEventListener(APP_UPDATER_EXPANDED_EVENT, handleUpdaterExpanded as EventListener);
-    };
-  }, []);
-
-  const handleModuleSuccess = () => {
-    refreshData();
-  };
+  const handleModuleSuccess = refreshData;
 
   const handleNavigate = (module: ModuleKey | 'database_admin', section?: string) => {
+    setSessionRegisterTarget(null);
     setCurrentModule(module);
     if (module === 'datos_generales') {
         setCurrentSection(section || 'institucion');
@@ -213,14 +306,16 @@ const App: React.FC = () => {
         setCurrentSection(section || 'lista_estudiantes');
     } else if (module === 'horario') {
         setCurrentSection(section || 'horario_semanal');
+    } else if (module === 'database_admin') {
+        setCurrentSection(section || 'bases_datos');
     }
     if (section) setCurrentSection(section);
   };
 
-  const renderContent = () => {
+  const content = useMemo(() => {
     switch (currentModule) {
       case 'database_admin':
-        return <DatabaseManager />;
+        return currentSection === 'control_acceso' ? <AccessControlView /> : <DatabaseManager />;
       case 'datos_generales':
         return <DatosGeneralesView onSuccess={handleModuleSuccess} activeSection={currentSection} />;
       case 'calendario':
@@ -242,7 +337,7 @@ const App: React.FC = () => {
       case 'unidades_didacticas':
         return <UnitsView onSuccess={handleModuleSuccess} activeSection={currentSection} />;
       case 'sesiones':
-        return <SessionsView onSuccess={handleModuleSuccess} activeSection={currentSection} />;
+        return <SessionsView key={sessionRegisterTarget?.sessionId || 'sessions'} navigationTarget={sessionRegisterTarget} onSuccess={handleModuleSuccess} activeSection={currentSection} />;
       case 'evaluacion':
         return <EvaluationView activeSection={currentSection} />;
       default:
@@ -252,7 +347,7 @@ const App: React.FC = () => {
           </div>
         );
     }
-  };
+  }, [currentModule, currentSection, sessionRegisterTarget, handleModuleSuccess]);
 
   const sessionModuleAccess = session?.user.permissions?.modules || INITIAL_MODULE_STATUS;
   const hasFullAccess = session?.user.permissions?.features?.includes('full_access') || session?.user.extra?.fullAccess === true;
@@ -274,8 +369,11 @@ const App: React.FC = () => {
   return (
     <AppErrorBoundary onReset={logout}>
       <div className="flex min-h-screen bg-[#eaebef] print:block print:bg-white">
-        <AppUpdaterOverlay />
-        {!isUpdaterExpanded ? <GeneralNotesFloatingButton onClick={() => setGeneralNotesOpen(true)} /> : null}
+        <div className="armi-floating-controls print:hidden">
+          <div id="armi-grading-mode-control" className="flex shrink-0 items-center" />
+          <GeneralNotesFloatingButton onClick={() => setGeneralNotesOpen(true)} />
+          <AppUpdaterOverlay />
+        </div>
         <GeneralNotesOverlay visible={generalNotesOpen} onClose={() => setGeneralNotesOpen(false)} />
         {birthdayToast ? (
           <div className="fixed right-5 top-5 z-[95] max-w-md rounded-[1.8rem] border border-amber-200 bg-white/95 px-5 py-4 text-slate-800 shadow-[0_18px_45px_rgba(15,23,42,0.18)] backdrop-blur print:hidden">
@@ -289,6 +387,7 @@ const App: React.FC = () => {
             currentModule={currentModule as ModuleKey}
             currentSection={currentSection}
             onNavigate={handleNavigate}
+            onPrepareNavigate={prepareWorkspace}
             teacherName={teacherName || session.user.displayName}
             isCollapsed={isSidebarCollapsed}
             toggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
@@ -300,16 +399,19 @@ const App: React.FC = () => {
         </div>
         <main
           className={`
-              flex-1 p-6 transition-all duration-500 ease-in-out
+              flex-1 p-6 pb-20 transition-all duration-500 ease-in-out
               ${isSidebarCollapsed ? 'ml-[6rem]' : 'ml-[19rem]'}
               print:ml-0 print:p-0
           `}
         >
           <div className="max-w-6xl mx-auto pt-2 print:max-w-none print:mx-0 print:pt-0">
              <SyncLifecycleManager />
-             {renderContent()}
+             <Suspense fallback={<div role="status" className="p-6 text-sm text-slate-500">Cargando módulo…</div>}>
+               <React.Fragment key={localStateRevision}>{content}</React.Fragment>
+             </Suspense>
           </div>
         </main>
+        <BackgroundSyncIndicator collapsed={isSidebarCollapsed} ready={portableReady} error={portableError} onRetry={() => setBootstrapAttempt(value => value + 1)} />
       </div>
     </AppErrorBoundary>
   );

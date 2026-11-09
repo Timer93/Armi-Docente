@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import {parseHTML} from 'linkedom';
+const {window,document}=parseHTML('<html><body><div id="inbox"></div></body></html>');
+document.hidden=false;
+let token='student-a',opened=0,unread=0,deferred=null;
+const records=[{id:1,title:'<img src=x onerror=alert(1)>',body:'Entrega tu proyecto <script>parent.pwned=1</script>',teacherName:'Docente',createdAt:'2026-10-17 12:00:00',readAt:null,notifiedAt:null}];
+const intervals=new Map();let nextTimer=1;
+const api=async(route)=>{
+  if(route.endsWith('/teacher-messages')){if(deferred)return await deferred;return {items:structuredClone(records),unread:records.filter(item=>!item.readAt).length};}
+  const match=route.match(/\/(\d+)\/(read|notified)$/);assert.ok(match,route);const item=records.find(item=>item.id===Number(match[1]));item[match[2]==='read'?'readAt':'notifiedAt']='2026-10-17 12:01:00';
+};
+const context=vm.createContext({window,document,console,Intl,Date,Set,setInterval:callback=>{const id=nextTimer++;intervals.set(id,callback);return id;},clearInterval:id=>intervals.delete(id)});
+vm.runInContext(fs.readFileSync('backend/public/student-teacher-messages.js','utf8'),context);
+const host=document.getElementById('inbox');
+const controller=window.armiTeacherMessages.create(host,{api,identity:()=>token,onOpen:()=>opened++,onUnread:count=>unread=count});
+const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
+controller.start();await flush();
+assert.equal(intervals.size,1);assert.ok(document.querySelector('.teacher-toast'));assert.equal(unread,1);
+assert.equal(document.querySelectorAll('.teacher-toast img,.teacher-toast script').length,0,'Toast text must be escaped');
+assert.ok(records[0].notifiedAt);assert.equal(records[0].readAt,null,'Toast display is not a read receipt');
+document.querySelector('[data-teacher-toast-close]').onclick();await controller.refresh();assert.equal(document.querySelector('.teacher-toast'),null,'Dismissed notices do not repeatedly interrupt the student');
+records.unshift({...records[0],id:2,title:'Revisa tu entrega',body:'Tu docente te dejó una indicación personal.',notifiedAt:null});
+for(const callback of intervals.values())callback();await flush();assert.match(document.querySelector('.teacher-toast').textContent,/Revisa tu entrega/);
+document.querySelector('[data-teacher-toast-open]').onclick();await flush();
+assert.equal(opened,1);assert.ok(records[0].readAt);assert.equal(unread,1);assert.equal(document.querySelector('.teacher-toast'),null);assert.match(document.querySelector('.teacher-message-body').textContent,/indicación personal/);
+document.querySelector('[data-teacher-message="1"]').onclick();await flush();assert.equal(unread,0);assert.equal(document.querySelectorAll('.teacher-message-body script').length,0);
+document.hidden=true;records.unshift({...records[0],id:3,readAt:null,notifiedAt:null});await controller.refresh();assert.equal(document.querySelector('.teacher-toast'),null);
+document.hidden=false;document.dispatchEvent(new window.Event('visibilitychange'));await flush();assert.ok(document.querySelector('.teacher-toast'));
+let resolve;deferred=new Promise(done=>resolve=done);const pending=controller.refresh();controller.reset();token='student-b';resolve({items:[{...records[0],body:'Private old message'}],unread:1});await pending;
+assert.equal(host.children.length,0);assert.equal(document.querySelector('.teacher-toast'),null);assert.equal(unread,0);assert.equal(intervals.size,0,'Logout stops polling and removes all private content');
+deferred=null;records.length=0;controller.start();await flush();assert.match(host.textContent,/Aquí encontrarás/);assert.equal(unread,0);controller.reset();
+console.log('OK: highlighted toasts, open-to-read, dismissed notices, safe content, visibility recovery and logout privacy.');

@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { buildUnitSessionPlanning, findUnitPlannedSession, isUnitSessionTransversalItem, resolveSelectedUnitSessionItems } from '../../backend/shared/unitSessionPlanning.js';
 import { getCompetencias, getSesion, getUnidadDidactica } from '../../services/apiService';
 import {
     ENFOQUE_DETAILS,
@@ -22,7 +23,13 @@ import {
 } from './shared';
 import { buildDefaultAreaTemplateSessionData, ensureSessionExtraBlocks } from './sessionAiSupport';
 
+const getInstrumentTypeLabel = (value: unknown) => {
+    const instrumentType = detectInstrumentTypeFromText(String(value || ''));
+    return instrumentType ? instrumentTypeLabelMap[instrumentType] : 'instrumento';
+};
+
 interface UseSessionLoaderParams {
+    ready?: boolean;
     selArea: string;
     selGrade: string;
     selSection: string;
@@ -45,6 +52,7 @@ interface UseSessionLoaderParams {
 }
 
 export const useSessionLoader = ({
+    ready = true,
     selArea,
     selGrade,
     selSection,
@@ -65,7 +73,9 @@ export const useSessionLoader = ({
     loadTemplateRowsByInstrument,
     hydrateMissingInstrumentTemplate
 }: UseSessionLoaderParams) => {
+    const resolvedAreaId = assignments.find(a => a.areaName === selArea)?.areaId || selArea;
     useEffect(() => {
+        if (!ready) return;
         if (selArea && selGrade && selSection && unitNumber && sessionNumber) {
             const areaId = assignments.find(a => a.areaName === selArea)?.areaId || selArea;
             const requestId = ++sessionLoadRequestRef.current;
@@ -99,11 +109,9 @@ export const useSessionLoader = ({
                     const sessionCount = Math.max(unitSessions.length, 1);
                     setMaxSessionsInUnit(sessionCount);
     
-                    const targetSessionId = parseInt(sessionNumber, 10);
-                    const unitSession =
-                        unitSessions.find((s: any) => Number(s?.id) === targetSessionId || Number(s?.sessionNumber) === targetSessionId)
-                        || unitSessions[targetSessionId - 1];
-    
+                    const unitSession = findUnitPlannedSession(unit, sessionNumber);
+                    const unitPlanning = buildUnitSessionPlanning(unit, sessionNumber);
+
                     if (unitSession?.date) {
                         const isMultipleSections = selSection.includes(' y ');
                         if (unitSession.date.includes(' --- ')) {
@@ -139,8 +147,8 @@ export const useSessionLoader = ({
                         if (match) actualCompAreaName = getFlexValue(match, 'competencias');
                     }
     
-                    const criteriaItems = Array.isArray(unitSession?.criteriaItems) ? unitSession.criteriaItems : [];
-                    const evidenceItems = Array.isArray(unitSession?.evidenceItems) ? unitSession.evidenceItems : [];
+                    const criteriaItems = resolveSelectedUnitSessionItems(unit, unitSession, 'criteria');
+                    const evidenceItems = resolveSelectedUnitSessionItems(unit, unitSession, 'evidence');
                     const sessionCapacidades = Array.isArray(unitSession?.capacidades)
                         ? unitSession.capacidades.map((c: any) => String(c || '').trim()).filter(Boolean)
                         : [];
@@ -149,37 +157,14 @@ export const useSessionLoader = ({
                         : [];
                     const activeTransversalSet = new Set(sessionTransversales.map((t: string) => normalizeLoose(t)));
     
-                    const prioCriteriaItems = criteriaItems.filter((it: any) => isBlackColorToken(String(it?.color || 'text-black')));
-                    const prioEvidenceItems = evidenceItems.filter((it: any) => isBlackColorToken(String(it?.color || 'text-black')));
-                    const transCriteriaItems = criteriaItems.filter((it: any) => !isBlackColorToken(String(it?.color || 'text-black')));
-                    const transEvidenceItems = evidenceItems.filter((it: any) => !isBlackColorToken(String(it?.color || 'text-black')));
+                    const prioCriteriaItems = criteriaItems.filter((it: any) => !isUnitSessionTransversalItem(it));
+                    const prioEvidenceItems = evidenceItems.filter((it: any) => !isUnitSessionTransversalItem(it));
+                    const transCriteriaItems = criteriaItems.filter((it: any) => isUnitSessionTransversalItem(it));
+                    const transEvidenceItems = evidenceItems.filter((it: any) => isUnitSessionTransversalItem(it));
 
-                    const buildEvidenceItemsFromCriteria = (criteria: any[], evidenceMap: Record<string, string> | undefined) =>
-                        criteria.flatMap((criterion: any) => {
-                            const sourceCriteriaId = String(criterion?.sourceCriteriaId || '');
-                            const match = sourceCriteriaId.match(/-(\d+)$/);
-                            const matrixIndex = match ? Number(match[1]) : Number.NaN;
-                            const rawEvidence = Number.isFinite(matrixIndex)
-                                ? String(evidenceMap?.[matrixIndex] || '').trim()
-                                : '';
-                            if (!rawEvidence) return [];
-                            return rawEvidence
-                                .split(/\r?\n/)
-                                .map((text: string) => String(text || '').trim())
-                                .filter(Boolean)
-                                .map((text: string, evidenceIndex: number) => ({
-                                    text,
-                                    color: String(criterion?.color || 'text-black'),
-                                    sourceCriteriaId,
-                                    sourceEvidenceId: `${sourceCriteriaId}-${evidenceIndex}`,
-                                    capacidad: String(criterion?.capacidad || '')
-                                }));
-                        });
-                    const currentAreaEvidenceItems = buildEvidenceItemsFromCriteria(prioCriteriaItems, unit.evidencias);
-                    const currentTransEvidenceItems = buildEvidenceItemsFromCriteria(transCriteriaItems, unit.evidenciasTrans);
-                    const effectiveAreaEvidenceItems = currentAreaEvidenceItems.length ? currentAreaEvidenceItems : prioEvidenceItems;
-                    const effectiveTransEvidenceItems = currentTransEvidenceItems.length ? currentTransEvidenceItems : transEvidenceItems;
-    
+                    const effectiveAreaEvidenceItems = prioEvidenceItems;
+                    const effectiveTransEvidenceItems = transEvidenceItems;
+
                     const transCapsByName: Record<string, string[]> = {
                         [TRANSVERSAL_NAMES[0]]: [],
                         [TRANSVERSAL_NAMES[1]]: []
@@ -204,7 +189,7 @@ export const useSessionLoader = ({
                         inst: unitSession?.eval || ''
                     };
     
-                    const transEvals = TRANSVERSAL_NAMES.map((name, idx) => {
+                    const transEvals = unitPlanning?.competenciasTrans || TRANSVERSAL_NAMES.map((name, idx) => {
                         const isActive = activeTransversalSet.size === 0 || activeTransversalSet.has(normalizeLoose(name));
                         const criteria = isActive ? (unit.criteriosTrans?.[idx] || '') : '';
                         const evidence = isActive ? (unit.evidenciasTrans?.[idx] || '') : '';
@@ -220,7 +205,7 @@ export const useSessionLoader = ({
                         };
                     }).filter((row) => activeTransversalSet.has(normalizeLoose(row.comp)));
     
-                    if (transCriteriaItems.length || effectiveTransEvidenceItems.length) {
+                    if (!unitPlanning && (transCriteriaItems.length || effectiveTransEvidenceItems.length)) {
                         const transColorToIndex: Record<string, number> = {
                             '#007c59': 0,
                             '#00b28c': 1
@@ -258,6 +243,8 @@ export const useSessionLoader = ({
                         });
                     }
     
+                    if (unitPlanning) prioComp = { ...prioComp, ...unitPlanning.competenciaPrio, comp: unitPlanning.competenciaPrio.comp || actualCompAreaName };
+
                     const programKey = `${year}-${areaId}-${selGrade}-${selSection}`;
                     const program = allSavedPrograms[programKey];
                     let enfObj = { enfoque: '', valor: '', acciones: '', demuestra: '' };
@@ -301,6 +288,7 @@ export const useSessionLoader = ({
                         title: unitSession?.title || prev.title,
                         competenciaPrio: prioComp,
                         competenciasTrans: transEvals,
+                        unitPlanningSnapshot: unitPlanning || undefined,
                         enfoqueTrans: enfObj,
                         situation: (() => {
                             const unitSituation = String(unit?.situation || '').trim();
@@ -398,13 +386,13 @@ export const useSessionLoader = ({
                             }));
                             const matchEmoji = templateResult.matchQuality === 'full' ? '🎯' : '📎';
                             setToast({
-                                msg: `Instrumento cargado: ${instrumentTypeLabelMap[templateResult.instrumentType]}${templateResult.instrumentName ? ` (${templateResult.instrumentName})` : ''} ${matchEmoji}`,
+                                msg: `Instrumento cargado: ${getInstrumentTypeLabel(templateResult.instrumentType)}${templateResult.instrumentName ? ` (${templateResult.instrumentName})` : ''} ${matchEmoji}`,
                                 type: 'success'
                             });
                         } else if (templateResult.status === 'missing-template') {
                             shouldShowLoadedToast = false;
                             setToast({
-                                msg: `❌ No hay plantilla de ${instrumentTypeLabelMap[templateResult.instrumentType]} en Evaluación > Instrumentos para este filtro.`,
+                                msg: `❌ No hay plantilla de ${getInstrumentTypeLabel(templateResult.instrumentType)} en Evaluación > Instrumentos para este filtro.`,
                                 type: 'error'
                             });
                         } else if (templateResult.status === 'unsupported') {
@@ -500,9 +488,10 @@ export const useSessionLoader = ({
             };
     
             const checkSavedSession = async () => {
-                await loadPlannedSessionCount();
-                if (isStaleRequest()) return;
-                const saved = await getSesion(year, areaId, selGrade, selSection, unitNumber, sessionNumber);
+                // Start both reads together; the session does not depend on the unit count.
+                const savedRequest = getSesion(year, areaId, selGrade, selSection, unitNumber, sessionNumber);
+                void loadPlannedSessionCount();
+                const saved = await savedRequest;
                 if (isStaleRequest()) return;
                 if (saved) {
                     const hydratedSavedResult = await hydrateMissingInstrumentTemplate(saved);
@@ -606,5 +595,9 @@ export const useSessionLoader = ({
             setDateOptions([]);
             setMaxSessionsInUnit(Math.max(Number.parseInt(sessionNumber, 10) || 1, 1));
         }
-    }, [selArea, selGrade, selSection, unitNumber, sessionNumber, year, assignments, allSavedPrograms]);
+        return () => { sessionLoadRequestRef.current += 1; };
+    // Replacing an assignments/programs container is not a session selection.
+    // Wait for the initial sources, then preserve the open draft on background
+    // renders. An actual selection change still reloads and cancels old reads.
+    }, [ready, selArea, resolvedAreaId, selGrade, selSection, unitNumber, sessionNumber, year]);
 };

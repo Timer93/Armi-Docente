@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import { groupWordMarkers, markerGroup, matchesMergeNumbers, matchesMergeSection, toggleVisibleSessionIds } from '../utils/sessionWordMerge.ts';
+assert(matchesMergeSection('A y B', 'A')); assert(matchesMergeSection('A', 'A y B'));
+assert(!matchesMergeSection('C', 'A y B'));
+const rows = [{ id: 'u1s1', unit: '1', session: '1' }, { id: 'u2s1', unit: '2', session: '1' }, { id: 'u2s3', unit: '2', session: '3' }, { id: 'u3s2', unit: '3', session: '2' }];
+assert.deepEqual(rows.filter(row => matchesMergeNumbers(row.unit, ['1', '2']) && matchesMergeNumbers(row.session, ['1', '3'])).map(row => row.id), ['u1s1', 'u2s1', 'u2s3']);
+assert(matchesMergeNumbers(7, [])); assert(matchesMergeNumbers(7, ['7']));
+assert.deepEqual(toggleVisibleSessionIds(['hidden', 'a'], ['a', 'b']), ['hidden', 'a', 'b']);
+assert.deepEqual(toggleVisibleSessionIds(['hidden', 'a', 'b'], ['a', 'b']), ['hidden']);
+assert.deepEqual(toggleVisibleSessionIds(['hidden'], []), ['hidden']);
+const template = ['docente', 'competencia_priorizada', '%anexo_1_imagen', 'evaluacion_estrategias', 'instrumento_evaluacion', 'personalizado_muy_largo'];
+const grouped = groupWordMarkers(template, ['docente', 'DOCENTE', '#ejes_tematicos_regionales']);
+assert.equal(grouped.flatMap(group => group.markers).length, 7, 'No duplicates across template and suggestions.');
+assert.equal(markerGroup('evaluacion_estrategias'), 'development'); assert.equal(markerGroup('instrumento_evaluacion'), 'assessment');
+assert.equal(markerGroup('%anexo_1_imagen'), 'resources'); assert.equal(markerGroup('competencia_priorizada'), 'competencies');
+assert.deepEqual(groupWordMarkers(template, [], 'evaluación estrategias').flatMap(group => group.markers), ['evaluacion_estrategias']);
+assert(grouped.some(group => group.id === 'other' && group.markers.includes('personalizado_muy_largo')));
+console.log('OK: multiple units/sessions, grouped sections, visible-row selection, marker groups and accent-insensitive search.');

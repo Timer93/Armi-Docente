@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "ARMI Estudiantes — Control de acceso",
+  "version": "1.1.0",
+  "description": "Recibe y aplica las reglas de navegación configuradas por el docente en ARMI.",
+  "minimum_chrome_version": "121",
+  "permissions": [
+    "storage",
+    "alarms",
+    "declarativeNetRequest",
+    "tabs",
+    "nativeMessaging"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "ARMI Estudiantes",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png"
+    }
+  },
+  "options_page": "popup.html",
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvU+9J08vR5JfwC6aKtS7WOYBmMz6vKR6ryVqBhBwkm4AGZZJZQSrKa8vFd4FRekX0Ib4pu7HdhK/LISIW9RVX9EopnzH3jcRYwvBe+ZHsSud7lDzR/XLhVlFJ2kxjdwHy248mkxHbphb6GTfeQKn2v7k6kuWXkDxSEoeEKq49YnlAGeq0S6WDCX0+TDr1pnpTg93eacdwo5Yl3zr/K2P811v8TUNkxaEd5O4JPOyLG+vUeOQUKcn0oF44Hya2pfbRaXza78hP2gLo4c3cC5AT03GbDRJ4nUiBPw72uJqJc/B/hTUCXEUMQPtQmUF8+lhlanJTczWLXnHUFZfQeZNMQIDAQAB"
+}

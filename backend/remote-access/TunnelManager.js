@@ -44,11 +44,22 @@ export class TunnelManager extends EventEmitter {
     return this.getState();
   }
 
+  beginStart({ reconnecting = false } = {}) {
+    this.updateState({
+      enabledByTeacher: true,
+      tunnelStatus: reconnecting ? TUNNEL_STATUS.RECONNECTING : TUNNEL_STATUS.STARTING,
+      publicUrl: '',
+      lastError: null,
+    });
+    return this.getState();
+  }
+
   start() {
     return this.enqueue(async () => {
       this.updateState({
         enabledByTeacher: true,
         tunnelStatus: TUNNEL_STATUS.STARTING,
+        publicUrl: '',
         lastError: null,
       });
       this.log('TunnelStartRequested');
@@ -67,7 +78,7 @@ export class TunnelManager extends EventEmitter {
   restart() {
     return this.enqueue(async () => {
       if (!this.state.enabledByTeacher) return this.getState();
-      this.updateState({ tunnelStatus: TUNNEL_STATUS.RECONNECTING, lastError: null });
+      this.updateState({ tunnelStatus: TUNNEL_STATUS.RECONNECTING, publicUrl: '', lastError: null });
       this.log('TunnelRestartRequested');
       try {
         await this.provider.restart();
@@ -82,6 +93,8 @@ export class TunnelManager extends EventEmitter {
   }
 
   stop({ disableByTeacher = true } = {}) {
+    // A ten-minute quick-tunnel startup must not hold a queued close hostage.
+    this.provider.cancelPendingStart?.();
     return this.enqueue(async () => {
       if (disableByTeacher) this.state.enabledByTeacher = false;
       if (!this.provider.isRunning()) {
@@ -113,6 +126,8 @@ export class TunnelManager extends EventEmitter {
   }
 
   async refresh() {
+    const previouslyConnected = this.state.tunnelStatus === TUNNEL_STATUS.CONNECTED;
+    const previousUrl = this.state.publicUrl;
     const providerStatus = await this.provider.getStatus();
     const connected = providerStatus === TUNNEL_STATUS.CONNECTED;
     const publicUrl = connected ? String(this.provider.getPublicUrl() || '') : '';
@@ -123,8 +138,9 @@ export class TunnelManager extends EventEmitter {
         : providerStatus || TUNNEL_STATUS.DISCONNECTED,
       publicUrl,
       lastError: lastError ? publicError(lastError, 'El acceso remoto no esta disponible.') : null,
+      ...(typeof this.provider.getConnectionInfo === 'function' ? this.provider.getConnectionInfo() : {}),
     });
-    if (connected) this.log('TunnelStarted', { publicUrl });
+    if (connected && (!previouslyConnected || previousUrl !== publicUrl)) this.log('TunnelStarted', { publicUrl });
     return this.getState();
   }
 

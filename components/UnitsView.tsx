@@ -1,3 +1,4 @@
+import '../styles/ai-provider-dialog.css';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
@@ -16,11 +17,28 @@ import {
 import { Select } from './Select';
 import { Type } from "@google/genai";
 import { UnitTemplateMergeView } from './UnitTemplateMergeView';
+import { SessionActions } from './sessions-view/SessionActions';
 import { readStoredViewSelection, writeStoredViewSelection } from '../utils/viewSelectionStorage';
 import { createGeminiClient, generateGeminiContent, generateGeminiContentStream } from '../utils/gemini';
 import { fetchGeminiImageCapability, fetchGeminiTextModels, fetchOpenAIImageCapability, fetchOpenAITextModels, getDefaultModelForProvider, getFallbackModelOptions, type AiImageCapability, type AiModelOption } from '../utils/aiModels';
 import { getAiUsageProgress, registerAiUsage, type AiUsageProgress } from '../utils/aiUsage';
 import { classifyAiIssue } from '../utils/aiErrors';
+import { distributeOrderedCriteriaByBlocks } from '../utils/orderedSessionDistribution';
+import { editUnitLinkedEvaluation } from '../utils/unitLinkedEvaluation';
+import { validateGeneratedUnitSessionTitles } from '../backend/shared/unitSessionTitles.js';
+
+// Keep the draft while typing; commit on blur so list parsing cannot move the
+// caret or remove an evidence halfway through replacing its text.
+const LinkedEvaluationTextarea: React.FC<{ value: string; onCommit: (value: string) => void; className: string }> = ({ value, onCommit, className }) => {
+    const [draft, setDraft] = useState(value);
+    const focused = useRef(false);
+    useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
+    return <textarea className={className} value={draft}
+        onFocus={() => { focused.current = true; }}
+        onChange={(event) => { setDraft(event.target.value); event.currentTarget.style.height = 'auto'; event.currentTarget.style.height = `${event.currentTarget.scrollHeight}px`; }}
+        onBlur={() => { focused.current = false; if (draft !== value) onCommit(draft); }}
+        title="Al terminar la edición se actualiza también la tabla de competencias y las sesiones vinculadas." />;
+};
 
 interface Props {
   activeSection: string;
@@ -453,9 +471,9 @@ const AuthOverlay: React.FC<{
     }, [provider, inputKey, openaiKey]);
 
     return (
-        <div className="fixed inset-0 z-[5000] flex items-start justify-center overflow-y-auto overscroll-contain p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
-            <div className="my-2 bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col md:flex-row">
-                <div className="bg-blue-600 w-full md:w-72 p-8 text-white flex flex-col justify-between">
+        <div role="dialog" aria-modal="true" aria-label="Configuración de proveedor IA" className="ai-provider-overlay fixed inset-0 z-[5000] flex items-start justify-center overflow-y-auto overscroll-contain p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
+            <div className="ai-provider-dialog my-2 bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col md:flex-row">
+                <div className="ai-provider-aside bg-blue-600 w-full md:w-72 p-8 text-white flex flex-col justify-between">
                     <div>
                         <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center text-3xl mb-6 shadow-inner">🤖</div>
                         <h3 className="text-xl font-black uppercase tracking-tight leading-tight mb-4">Asistente IA Armi</h3>
@@ -477,16 +495,16 @@ const AuthOverlay: React.FC<{
                     </div>
                 </div>
 
-                <div className="flex-1 p-10 flex flex-col">
+                <div className="ai-provider-content flex-1 p-10 flex flex-col">
                     <div className="flex justify-between items-start mb-8">
                         <div>
                             <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">Motor IA</h4>
                             <h2 className="text-2xl font-black text-slate-800 uppercase tracking-tighter">Configuracion de Proveedor</h2>
                         </div>
-                        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">✕</button>
+                        <button type="button" aria-label="Cerrar configuración de IA" onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">✕</button>
                     </div>
 
-                    <div className="space-y-6 flex-1">
+                    <div className="ai-provider-fields space-y-6 flex-1">
                         <div className="group">
                             <label className="block text-[10px] font-black text-slate-500 mb-3 ml-1 uppercase tracking-widest">Proveedor IA activo:</label>
                             <div className="grid grid-cols-2 gap-3">
@@ -608,6 +626,7 @@ const AuthOverlay: React.FC<{
 };
 
 export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
+    const planningHeaderRef = useRef<HTMLDivElement>(null);
     const initialSelection = useMemo(() => readStoredViewSelection(UNITS_VIEW_SELECTION_STORAGE_KEY), []);
     const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
     const [selectedAreaId, setSelectedAreaId] = useState(initialSelection.areaId || '');
@@ -615,6 +634,8 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [selectedSection, setSelectedSection] = useState(initialSelection.section || '');
     const [unitNumber, setUnitNumber] = useState(initialSelection.unitNumber || '1');
     const [competenciasBase, setCompetenciasBase] = useState<any[]>([]);
+    const [loadedCurriculumKey, setLoadedCurriculumKey] = useState('');
+    const [loadedUnitKey, setLoadedUnitKey] = useState('');
     const [estandaresBase, setEstandaresBase] = useState<any[]>([]);
     const [generalData, setGeneralData] = useState<GeneralData | null>(null);
     
@@ -660,6 +681,9 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         evaluacion: DEFAULT_EVAL_TEXT
     });
     const [themeColor, setThemeColor] = useState(localStorage.getItem('armi_units_theme') || '#d35400');
+    const curriculumKey = JSON.stringify([selectedAreaId, selectedGrade]);
+    const unitKey = JSON.stringify([year, selectedAreaId, selectedGrade, selectedSection, unitNumber]);
+    const unitPlanningReady = loadedCurriculumKey === curriculumKey && loadedUnitKey === unitKey;
 
     // REFS PARA FOCUS Y SCROLL
     const purposeRef = useRef<HTMLTextAreaElement>(null);
@@ -669,10 +693,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const sessionFieldRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
     const tableFieldRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
     const sessionRowRefs = useRef<Record<number, HTMLTableRowElement | null>>({});
-    const typingBuffers = useRef<Record<string, string>>({});
-    const typingTargets = useRef<Record<string, string>>({});
-    const activeTypingTasks = useRef<Set<string>>(new Set());
-    const isGeneratingIARef = useRef(false);
+    const fieldAnimationTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
     const latestUnitDataRef = useRef(unitData);
     const lastLoadedToastKeyRef = useRef('');
 
@@ -682,12 +703,12 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const sessionsTableRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        isGeneratingIARef.current = isGeneratingIA;
-    }, [isGeneratingIA]);
-
-    useEffect(() => {
         latestUnitDataRef.current = unitData;
     }, [unitData]);
+
+    useEffect(() => () => {
+        Object.values(fieldAnimationTimers.current).forEach(clearTimeout);
+    }, []);
 
     useEffect(() => {
         Object.values(sesionesRefs.current).forEach(autoResizeTextarea);
@@ -743,18 +764,16 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
     useEffect(() => {
         const load = async () => {
+            const programsRequest = getProgramacionesAnuales();
+            const unitsRequest = getAllUnidadesDidacticas();
             const gd = await getDatosGenerales();
             setGeneralData(gd);
             if (!initialSelection.year && gd.year) setYear(gd.year);
             const saved = localStorage.getItem('armi_assignments');
             if (saved) setAssignments(JSON.parse(saved));
             setAssignmentsLoaded(true);
-            const [progs, unitsMap] = await Promise.all([
-                getProgramacionesAnuales(),
-                getAllUnidadesDidacticas()
-            ]);
-            setAllPrograms(progs);
-            setHasStoredUnits(Object.keys(unitsMap || {}).length > 0);
+            programsRequest.then(setAllPrograms);
+            unitsRequest.then(unitsMap => setHasStoredUnits(Object.keys(unitsMap || {}).length > 0));
         };
         load();
     }, [initialSelection.year]);
@@ -964,13 +983,19 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     }, [transversalesBase, transversalesEstandares]);
 
     const prioritizedCompetencies = useMemo(() => {
-        return groupedByCompetency.filter(g => !!unitData.selectedComps[g.id]);
-    }, [groupedByCompetency, unitData.selectedComps]);
+        const explicitlySelected = groupedByCompetency.filter(g => !!unitData.selectedComps[g.id]);
+        // EPT has a single curricular competency. Treat that catalog fact as the
+        // selection even during the render before the persistence effect commits.
+        if (isEPT && explicitlySelected.length === 0 && groupedByCompetency.length === 1) {
+            return groupedByCompetency;
+        }
+        return explicitlySelected;
+    }, [groupedByCompetency, unitData.selectedComps, isEPT]);
 
-    const sessionEvidenceCatalog = useMemo(() => {
+    const buildSessionEvidenceCatalog = (sourceData: any): SessionEvidenceOption[] => {
         const areaOptions: SessionEvidenceOption[] = prioritizedCompetencies.flatMap((group) =>
             (group.rows || []).flatMap((row: any) =>
-                splitBulletLikeText(unitData.evidencias?.[row.originalIdx] || '').map((text, evidenceIdx) => ({
+                splitBulletLikeText(sourceData.evidencias?.[row.originalIdx] || '').map((text, evidenceIdx) => ({
                     id: `area-${row.originalIdx}-${evidenceIdx}`,
                     criterionGroupId: `area-${group.id}-${row.originalIdx}`,
                     text,
@@ -987,7 +1012,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
         const transOptions: SessionEvidenceOption[] = groupedTransversales.flatMap((group, transIdx) =>
             (group.rows || []).flatMap((row: any) =>
-                splitBulletLikeText(unitData.evidenciasTrans?.[row.originalIdx] || '').map((text, evidenceIdx) => ({
+                splitBulletLikeText(sourceData.evidenciasTrans?.[row.originalIdx] || '').map((text, evidenceIdx) => ({
                     id: `trans-${row.originalIdx}-${evidenceIdx}`,
                     criterionGroupId: `trans-${group.id}-${row.originalIdx}`,
                     text,
@@ -1003,7 +1028,12 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         );
 
         return [...areaOptions, ...transOptions];
-    }, [prioritizedCompetencies, groupedTransversales, unitData.evidencias, unitData.evidenciasTrans]);
+    };
+
+    const sessionEvidenceCatalog = useMemo(
+        () => buildSessionEvidenceCatalog(unitData),
+        [prioritizedCompetencies, groupedTransversales, unitData.evidencias, unitData.evidenciasTrans]
+    );
 
     const sessionEvidenceContextSignature = useMemo(() => JSON.stringify(
         (unitData.sesiones || []).map((session: any) => ({
@@ -1032,14 +1062,17 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         return usage;
     }, [unitData.sesiones]);
 
-    const criteriaOwners = useMemo(() => {
-        const owners = new Map<string, number>();
+    const criteriaUsageMap = useMemo(() => {
+        const usage = new Map<string, number[]>();
         (unitData.sesiones || []).forEach((session: any) => {
             (Array.isArray(session?.selectedCriteriaIds) ? session.selectedCriteriaIds : []).forEach((criteriaId: string) => {
-                if (!owners.has(criteriaId)) owners.set(criteriaId, Number(session.id));
+                if (!usage.has(criteriaId)) usage.set(criteriaId, []);
+                const sessions = usage.get(criteriaId)!;
+                const sessionId = Number(session.id);
+                if (!sessions.includes(sessionId)) sessions.push(sessionId);
             });
         });
-        return owners;
+        return usage;
     }, [unitData.sesiones]);
 
     // Lógica para autoseleccionar competencia si solo hay una
@@ -1074,9 +1107,12 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             if (!currentAssign) return;
 
             const unitIdx = parseInt(unitNumber) - 1;
-            
+            let cancelled = false;
+
             const loadUnitData = async () => {
+                setLoadedUnitKey('');
                 const sqlData = await getUnidadDidactica(year, selectedAreaId, selectedGrade, selectedSection, unitNumber);
+                if (cancelled) return;
                 const loadKey = `${year}-${selectedAreaId}-${selectedGrade}-${selectedSection}-U${unitNumber}`;
                 
                 const programKey = `${year}-${selectedAreaId}-${selectedGrade}-${selectedSection}`;
@@ -1124,6 +1160,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                     enfoques: Object.keys(syncEnfoques).length > 0 ? syncEnfoques : (sqlData?.enfoques || {})
                 }));
                 setIsDirty(false);
+                setLoadedUnitKey(unitKey);
 
                 if (sqlData && lastLoadedToastKeyRef.current !== loadKey) {
                     lastLoadedToastKeyRef.current = loadKey;
@@ -1133,24 +1170,35 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
             loadUnitData();
 
-            getCompetencias(selectedGrade, currentAssign.areaName).then(setCompetenciasBase);
-            getEstandares(selectedGrade, currentAssign.areaName).then(setEstandaresBase);
-
-            const fetchTrans = async () => {
-                let allTransComp: any[] = [];
-                let allTransEst: any[] = [];
-                for (const name of TRANSVERSAL_NAMES) {
-                    const comps = await getCompetencias(selectedGrade, name);
-                    const ests = await getEstandares(selectedGrade, name);
-                    allTransComp = [...allTransComp, ...comps];
-                    allTransEst = [...allTransEst, ...ests];
-                }
-                setTransversalesBase(allTransComp);
-                setTransversalesEstandares(allTransEst);
-            };
-            fetchTrans();
+            return () => { cancelled = true; };
         }
     }, [selectedAreaId, selectedGrade, selectedSection, unitNumber, allPrograms, assignments, year, sessionDetails.length]);
+
+    // Curriculum depends on area and grade, not the selected unit or its sessions.
+    useEffect(() => {
+        const assignment = assignments.find(a => a.areaId === selectedAreaId && a.grade === selectedGrade);
+        if (!assignment) return;
+        let cancelled = false;
+        setLoadedCurriculumKey('');
+        Promise.all([
+            getCompetencias(selectedGrade, assignment.areaName),
+            getEstandares(selectedGrade, assignment.areaName),
+            Promise.all(TRANSVERSAL_NAMES.map(name => getCompetencias(selectedGrade, name))),
+            Promise.all(TRANSVERSAL_NAMES.map(name => getEstandares(selectedGrade, name)))
+        ]).then(([comps, standards, transComps, transStandards]) => {
+            if (cancelled) return;
+            setCompetenciasBase(comps);
+            setEstandaresBase(standards);
+            setTransversalesBase(transComps.flat());
+            setTransversalesEstandares(transStandards.flat());
+            // Empty API results also mean a failed/incomplete load. Never use
+            // them to invalidate selections already saved in the unit.
+            if (comps.length > 0 && transComps.every(rows => rows.length > 0)) {
+                setLoadedCurriculumKey(curriculumKey);
+            }
+        });
+        return () => { cancelled = true; };
+    }, [selectedAreaId, selectedGrade, assignments]);
 
     const handleInputChange = (section: string, field: string, value: any) => {
         setIsDirty(true);
@@ -1161,6 +1209,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const deriveSessionEvaluationData = (session: any, sourceData: any) => {
+        if (!unitPlanningReady) return {};
         const selectedCapacities = Array.isArray(session.capacidades) ? session.capacidades : [];
         const relevantAreaComp = prioritizedCompetencies.find((group) => group.id === session.competencia);
         const relevantTransComps = groupedTransversales.filter((group) =>
@@ -1220,7 +1269,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         const criteriaText = criteriaItems.map((item) => item.text).join('\n').trim();
 
         const selectedCriteriaSet = new Set(selectedCriteriaIds);
-        const availableEvidenceOptions = sessionEvidenceCatalog.filter((candidate) =>
+        const availableEvidenceOptions = buildSessionEvidenceCatalog(sourceData).filter((candidate) =>
             selectedCriteriaSet.has(candidate.criterionGroupId)
             && selectedCapacities.some((capacity: string) => normalizeLoose(capacity) === normalizeLoose(candidate.capacidad))
             && (candidate.isTrans
@@ -1246,7 +1295,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             });
 
         const evidenceItems = session.evidenceDistributionMode === 'manual' && selectedEvidenceOptions.length === 0
-            ? (Array.isArray(session.evidenceItems) ? session.evidenceItems : [])
+            ? (Array.isArray(session.evidenceItems) ? session.evidenceItems.filter((item: any) => !item.sourceEvidenceId) : [])
             : selectedEvidenceOptions.map((candidate) => ({
                 text: `${selectedEvidenceOptions.length > 1 ? '• ' : ''}${normalizeBulletArtifacts(candidate.text)}`.trim(),
                 color: candidate.color,
@@ -1259,7 +1308,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         return {
             des: criteriaText,
             evi: session.evidenceDistributionMode === 'manual' && evidenceItems.length === 0
-                ? String(session.evi || '').trim()
+                ? (!(session.evidenceItems || []).length && !(session.selectedEvidenceIds || []).length ? String(session.evi || '').trim() : '')
                 : derivedEvidenceText,
             eval: evalInstrument,
             criteriaItems,
@@ -1277,19 +1326,15 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const normalizeSessionCriterionOwnership = (sessions: any[]) => {
-        const owners = new Map<string, number>();
-        const normalized = sessions.map((session: any) => {
+        if (!unitPlanningReady) return sessions;
+        return sessions.map((session: any) => {
             const availableIds = new Set(
                 (session.availableCriteriaOptions || []).map((criterion: any) => criterion.id)
             );
             const selectedCriteriaIds = (Array.isArray(session.selectedCriteriaIds)
                 ? session.selectedCriteriaIds
                 : []
-            ).filter((criterionId: string) => {
-                if (!availableIds.has(criterionId) || owners.has(criterionId)) return false;
-                owners.set(criterionId, Number(session.id));
-                return true;
-            });
+            ).filter((criterionId: string) => availableIds.has(criterionId));
             const selectedCriteria = (session.availableCriteriaOptions || []).filter((criterion: any) =>
                 selectedCriteriaIds.includes(criterion.id)
             );
@@ -1332,24 +1377,6 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 evi: evidenceItems.map((item: any) => item.text).join('\n').trim()
             };
         });
-
-        return normalized.map((session: any) => {
-            const capacities = (session.capacidades || []).filter((capacity: string) => {
-                const capacityCriteria = (session.capacityCriteriaOptions || []).filter((criterion: any) =>
-                    normalizeLoose(criterion.capacidad) === normalizeLoose(capacity)
-                );
-                return !(
-                    capacityCriteria.length > 0
-                    && capacityCriteria.every((criterion: any) => {
-                        const owner = owners.get(criterion.id);
-                        return owner && owner !== Number(session.id);
-                    })
-                );
-            });
-            return capacities.length === (session.capacidades || []).length
-                ? session
-                : { ...session, capacidades: capacities };
-        });
     };
 
 
@@ -1363,13 +1390,6 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 const previousAvailableIds = new Set(
                     (previousSession.availableCriteriaOptions || []).map((criterion: any) => criterion.id)
                 );
-                const ownedByOtherSessions = new Set<string>();
-                (prev.sesiones || []).forEach((session: any, sessionIndex: number) => {
-                    if (sessionIndex === index) return;
-                    (Array.isArray(session.selectedCriteriaIds) ? session.selectedCriteriaIds : [])
-                        .forEach((criterionId: string) => ownedByOtherSessions.add(criterionId));
-                });
-
                 newSesiones[index].selectedCriteriaIds = Array.isArray(previousSession.selectedCriteriaIds)
                     ? [...previousSession.selectedCriteriaIds]
                     : [];
@@ -1379,7 +1399,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 const firstDerived = deriveSessionEvaluationData(newSesiones[index], prev);
                 const newlyAvailableIds = (firstDerived.availableCriteriaOptions || [])
                     .map((criterion: any) => criterion.id)
-                    .filter((criterionId: string) => !previousAvailableIds.has(criterionId) && !ownedByOtherSessions.has(criterionId));
+                    .filter((criterionId: string) => !previousAvailableIds.has(criterionId));
                 newSesiones[index] = {
                     ...newSesiones[index],
                     ...firstDerived,
@@ -1405,6 +1425,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     useEffect(() => {
+        if (!unitPlanningReady) return;
         setUnitData((prev: any) => {
             let changed = false;
             const sesiones = prev.sesiones.map((session: any) => {
@@ -1437,6 +1458,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 : prev;
         });
     }, [
+        unitPlanningReady,
         unitData.criterios,
         unitData.evidencias,
         unitData.instrumentos,
@@ -1494,12 +1516,30 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             const textKey = kind === 'criteria' ? 'des' : 'evi';
             const items = Array.isArray(session[itemsKey]) ? [...session[itemsKey]] : [];
             if (!items[itemIdx]) return prev;
+            const sourceId = kind === 'criteria' ? items[itemIdx].sourceCriteriaId : items[itemIdx].sourceEvidenceId;
+            const linked = sourceId ? editUnitLinkedEvaluation(prev, sessionId, kind, sourceId, value, splitBulletLikeText) : prev;
+            if (linked !== prev) {
+                return { ...linked, sesiones: normalizeSessionCriterionOwnership(linked.sesiones.map((candidate: any) => ({
+                    ...candidate, ...deriveSessionEvaluationData(candidate, linked)
+                }))) };
+            }
             items[itemIdx] = { ...items[itemIdx], text: value };
             session[itemsKey] = items;
             if (kind === 'evidence') session.evidenceDistributionMode = 'manual';
             session[textKey] = items.map((it: any) => it.text).join('\n').trim();
             newSesiones[index] = session;
             return { ...prev, sesiones: newSesiones };
+        });
+    };
+
+    const handleSessionCriterionEdit = (sessionId: number, criterionId: string, value: string) => {
+        setIsDirty(true);
+        setUnitData((prev: any) => {
+            const linked = editUnitLinkedEvaluation(prev, sessionId, 'criteria', criterionId, value, splitBulletLikeText);
+            if (linked === prev) return prev;
+            return { ...linked, sesiones: normalizeSessionCriterionOwnership(linked.sesiones.map((session: any) => ({
+                ...session, ...deriveSessionEvaluationData(session, linked)
+            }))) };
         });
     };
 
@@ -1561,6 +1601,7 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             const selectedItems = available.filter((candidate: SessionEvidenceOption) => nextIds.includes(candidate.id));
 
             session.selectedEvidenceIds = nextIds;
+            session.evidenceDistributionMode = 'manual';
             session.evidenceItems = selectedItems.map((candidate: SessionEvidenceOption) => ({
                 text: `${selectedItems.length > 1 ? '• ' : ''}${normalizeBulletArtifacts(candidate.text)}`.trim(),
                 color: candidate.color,
@@ -1635,7 +1676,18 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         }
     };
 
-    const startTypingField = async (fieldPath: string, targetText: string, ref?: any) => {
+    const triggerFieldAnimation = (fieldPath: string) => {
+        if (fieldAnimationTimers.current[fieldPath]) {
+            clearTimeout(fieldAnimationTimers.current[fieldPath]);
+        }
+        setFieldsGenerating((prev) => ({ ...prev, [fieldPath]: true }));
+        fieldAnimationTimers.current[fieldPath] = setTimeout(() => {
+            setFieldsGenerating((prev) => ({ ...prev, [fieldPath]: false }));
+            delete fieldAnimationTimers.current[fieldPath];
+        }, 950);
+    };
+
+    const startTypingField = (fieldPath: string, targetText: string, ref?: any) => {
         const shouldNormalizeAsList =
             fieldPath.startsWith('evidencias.') ||
             fieldPath.startsWith('evidenciasTrans.') ||
@@ -1644,68 +1696,30 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         const normalizedTargetText = shouldNormalizeAsList ? normalizeListText(targetText) : targetText;
         if (!normalizedTargetText) return;
         
-        typingTargets.current[fieldPath] = normalizedTargetText;
-        
-        const isNewTask = !activeTypingTasks.current.has(fieldPath);
-        if (isNewTask) {
-            activeTypingTasks.current.add(fieldPath);
-            if (ref?.current) {
-                ref.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
-        } else {
-            return;
-        }
-        
-        setFieldsGenerating(p => ({ ...p, [fieldPath]: true }));
-        
         const keys = fieldPath.split('.');
-        let current = typingBuffers.current[fieldPath] || "";
-
-        while (true) {
-            const finalTarget = typingTargets.current[fieldPath] || "";
-            if (current.length >= finalTarget.length) {
-                if (!isGeneratingIARef.current) break;
-                await new Promise(r => setTimeout(r, 50));
-                continue;
+        setUnitData((prev: any) => {
+            const next = { ...prev };
+            let source: any = prev;
+            let target: any = next;
+            for (let i = 0; i < keys.length - 1; i++) {
+                const key = keys[i];
+                const sourceChild = source?.[key];
+                const clonedChild = Array.isArray(sourceChild)
+                    ? [...sourceChild]
+                    : { ...(sourceChild || {}) };
+                target[key] = clonedChild;
+                source = sourceChild;
+                target = clonedChild;
             }
+            target[keys[keys.length - 1]] = normalizedTargetText;
+            latestUnitDataRef.current = next;
+            return next;
+        });
 
-            current += finalTarget[current.length];
-            typingBuffers.current[fieldPath] = current;
-
-            setUnitData((prev: any) => {
-                const newData = { ...prev };
-                let t = newData;
-                for (let i = 0; i < keys.length - 1; i++) {
-                    const k = keys[i];
-                    t = t[k];
-                }
-                t[keys[keys.length - 1]] = current;
-                return newData;
-            });
-
-            if (ref?.current) ref.current.scrollTop = ref.current.scrollHeight;
-            await new Promise(r => setTimeout(r, 7));
-        }
-        
-        setFieldsGenerating(p => ({ ...p, [fieldPath]: false }));
-        activeTypingTasks.current.delete(fieldPath);
-    };
-
-    const extractStreamingValue = (jsonStr: string, key: string) => {
-        const regex = new RegExp(`"${key}"\\s*:\\s*"([^"]*)`, "i");
-        const match = jsonStr.match(regex);
-        return match ? match[1] : null;
-    };
-
-    const extractStreamingNthValue = (jsonStr: string, key: string, n: number) => {
-        const regex = new RegExp(`"${key}"\\s*:\\s*"([^"]*)`, "gi");
-        let match;
-        let count = 0;
-        while ((match = regex.exec(jsonStr)) !== null) {
-            if (count === n) return match[1];
-            count++;
-        }
-        return null;
+        // El dato completo ya estÃ¡ guardado; la escritura es solo una animaciÃ³n CSS.
+        triggerFieldAnimation(fieldPath);
+        // Mantener visible el inicio evita que los conocimientos parezcan truncados.
+        if (ref?.current) ref.current.scrollTop = 0;
     };
 
     const extractJsonBlock = (rawText: string) => {
@@ -1766,6 +1780,10 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const handleGenerateAI = async () => {
+        if (!unitPlanningReady) {
+            setToast({ msg: 'Espere a que se carguen la unidad y sus competencias antes de generar.', type: 'warning' });
+            return;
+        }
         const areaName = assignments.find(a => a.areaId === selectedAreaId)?.areaName;
         if (!areaName || !selectedGrade || !unitData.title) {
             setToast({ msg: "⚠️ Área, Grado y Título son obligatorios.", type: 'warning' });
@@ -1784,19 +1802,52 @@ export const UnitsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             return;
         }
 
-        const activeComps = prioritizedCompetencies;
+        let activeComps = prioritizedCompetencies;
+        // The AI button can be pressed while the background curriculum request is
+        // still completing. EPT can safely recover its one competency on demand.
+        if (activeComps.length === 0 && isEPT) {
+            const [freshCompetencies, freshStandards] = await Promise.all([
+                getCompetencias(selectedGrade, areaName),
+                getEstandares(selectedGrade, areaName)
+            ]);
+            const freshGroups = groupRows(freshCompetencies, freshStandards);
+            if (freshGroups.length === 1) {
+                activeComps = freshGroups;
+                setCompetenciasBase(freshCompetencies);
+                setEstandaresBase(freshStandards);
+                setUnitData((prev: any) => ({
+                    ...prev,
+                    selectedComps: { ...prev.selectedComps, [freshGroups[0].id]: true }
+                }));
+            }
+        }
         if (activeComps.length === 0) {
-            setToast({ msg: "⚠️ Seleccione al menos una competencia.", type: 'warning' });
+            setToast({
+                msg: isEPT
+                    ? "⚠️ No se pudo cargar la competencia de EPT. Intente nuevamente."
+                    : "⚠️ Seleccione al menos una competencia.",
+                type: 'warning'
+            });
             return;
         }
 
         setIsGeneratingIA(true);
-        typingBuffers.current = {};
-        typingTargets.current = {};
-        activeTypingTasks.current.clear();
+        Object.values(fieldAnimationTimers.current).forEach(clearTimeout);
+        fieldAnimationTimers.current = {};
+        setFieldsGenerating({});
 
         try {
             const ai = aiProvider === 'gemini' ? createGeminiClient(apiKey) : null;
+            let activeGeminiModel = preferredGeminiModel;
+            let usedGeminiFallback = false;
+            const unavailableGeminiModels = new Set<string>();
+            const geminiFallbackOptions = {
+                unavailableModels: unavailableGeminiModels,
+                onModelSelected: (model: string, usedFallback: boolean) => {
+                    if (usedFallback || model !== preferredGeminiModel) usedGeminiFallback = true;
+                    activeGeminiModel = model;
+                }
+            };
             let totalTokensUsed = 0;
             const areaRows = activeComps.flatMap(g => g.rows);
             const transRows = groupedTransversales.flatMap(g => g.rows);
@@ -1833,19 +1884,17 @@ Devuelve SOLO JSON: {"purpose": "...", "product": "...", "situation": "..."}`;
                 if (step1Data?.product) startTypingField('product', step1Data.product, productRef);
                 if (step1Data?.situation) startTypingField('situation', step1Data.situation, situationRef);
             } else if (ai) {
-                const step1Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: step1Prompt }] }] }, preferredGeminiModel);
+                const step1Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: step1Prompt }] }] }, activeGeminiModel, geminiFallbackOptions);
                 let fullStep1 = "";
                 let step1Tokens = 0;
                 for await (const chunk of step1Stream) {
                     fullStep1 += chunk.text;
                     step1Tokens = Number(chunk?.usageMetadata?.totalTokenCount || step1Tokens || 0);
-                    const p = extractStreamingValue(fullStep1, "purpose");
-                    const pr = extractStreamingValue(fullStep1, "product");
-                    const s = extractStreamingValue(fullStep1, "situation");
-                    if (p) startTypingField('purpose', p, purposeRef);
-                    if (pr) startTypingField('product', pr, productRef);
-                    if (s) startTypingField('situation', s, situationRef);
                 }
+                const finalStep1 = JSON.parse(extractJsonBlock(fullStep1));
+                if (finalStep1?.purpose) startTypingField('purpose', finalStep1.purpose, purposeRef);
+                if (finalStep1?.product) startTypingField('product', finalStep1.product, productRef);
+                if (finalStep1?.situation) startTypingField('situation', finalStep1.situation, situationRef);
                 totalTokensUsed += step1Tokens;
             }
 
@@ -1880,32 +1929,27 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
                     if (item.instrumento) handleInputChange('instrumentosTrans', row.originalIdx.toString(), normalizeInstrumentInternal(item.instrumento));
                 });
             } else if (ai) {
-                const step2Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: promptEvaluacion }] }] }, preferredGeminiModel);
+                const step2Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: promptEvaluacion }] }] }, activeGeminiModel, geminiFallbackOptions);
                 let fullStep2 = "";
                 let step2Tokens = 0;
                 for await (const chunk of step2Stream) {
                     fullStep2 += chunk.text;
                     step2Tokens = Number(chunk?.usageMetadata?.totalTokenCount || step2Tokens || 0);
-                    areaRows.forEach((row, i) => {
-                        const c = extractStreamingNthValue(fullStep2, "criterio", i);
-                        const e = extractStreamingNthValue(fullStep2, "evidencia", i);
-                        const inst = extractStreamingNthValue(fullStep2, "instrumento", i);
-                        if (c) startTypingField(`criterios.${row.originalIdx}`, c);
-                        if (e) startTypingField(`evidencias.${row.originalIdx}`, e);
-                        if (inst) handleInputChange('instrumentos', row.originalIdx.toString(), normalizeInstrumentInternal(inst));
-                    });
-                    transRows.forEach((row, i) => {
-                        const idx = areaRows.length + i;
-                        const c = extractStreamingNthValue(fullStep2, "criterio", idx);
-                        const e = extractStreamingNthValue(fullStep2, "evidencia", idx);
-                        const inst = extractStreamingNthValue(fullStep2, "instrumento", idx);
-                        if (c) startTypingField(`criteriosTrans.${row.originalIdx}`, c);
-                        if (e) startTypingField(`evidenciasTrans.${row.originalIdx}`, e);
-                        if (inst) handleInputChange('instrumentosTrans', row.originalIdx.toString(), normalizeInstrumentInternal(inst));
-                    });
                 }
                 const parsedStep2 = JSON.parse(extractJsonBlock(fullStep2));
                 generatedEvaluations = Array.isArray(parsedStep2?.evaluaciones) ? parsedStep2.evaluaciones : [];
+                areaRows.forEach((row, i) => {
+                    const item = generatedEvaluations[i] || {};
+                    if (item.criterio) startTypingField(`criterios.${row.originalIdx}`, item.criterio);
+                    if (item.evidencia) startTypingField(`evidencias.${row.originalIdx}`, item.evidencia);
+                    if (item.instrumento) handleInputChange('instrumentos', row.originalIdx.toString(), normalizeInstrumentInternal(item.instrumento));
+                });
+                transRows.forEach((row, i) => {
+                    const item = generatedEvaluations[areaRows.length + i] || {};
+                    if (item.criterio) startTypingField(`criteriosTrans.${row.originalIdx}`, item.criterio);
+                    if (item.evidencia) startTypingField(`evidenciasTrans.${row.originalIdx}`, item.evidencia);
+                    if (item.instrumento) handleInputChange('instrumentosTrans', row.originalIdx.toString(), normalizeInstrumentInternal(item.instrumento));
+                });
                 totalTokensUsed += step2Tokens;
             }
 
@@ -1919,22 +1963,30 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
             const sessionCount = unitData.sesiones.length;
             const areaCompCapPairs: { compId: string, cap: string }[] = [];
             const transCompCapPairs: { compId: string, cap: string }[] = [];
-            const areaCriteriaCatalog = areaRows.map((row: any) => {
+            const areaCriteriaCatalog = areaRows.map((row: any, rowIndex: number) => {
                 const owner = activeComps.find((comp: any) => comp.rows.includes(row));
+                const generated = generatedEvaluations[rowIndex] || {};
                 return {
                     id: `area-${owner?.id}-${row.originalIdx}`,
                     compId: owner?.id || '',
                     cap: row.capacidades,
-                    performance: row.desempenos_dcbn || ''
+                    performance: row.desempenos_dcbn || '',
+                    criterion: generated.criterio || '',
+                    evidence: generated.evidencia || '',
+                    instrument: normalizeInstrumentInternal(generated.instrumento || unitData.instrumentos?.[row.originalIdx] || '')
                 };
             }).filter((item: any) => item.compId);
-            const transversalCriteriaCatalog = transRows.map((row: any) => {
+            const transversalCriteriaCatalog = transRows.map((row: any, rowIndex: number) => {
                 const owner = groupedTransversales.find((comp: any) => comp.rows.includes(row));
+                const generated = generatedEvaluations[areaRows.length + rowIndex] || {};
                 return {
                     id: `trans-${owner?.id}-${row.originalIdx}`,
                     compId: owner?.id || '',
                     cap: row.capacidades,
-                    performance: row.desempenos_dcbn || ''
+                    performance: row.desempenos_dcbn || '',
+                    criterion: generated.criterio || '',
+                    evidence: generated.evidencia || '',
+                    instrument: normalizeInstrumentInternal(generated.instrumento || unitData.instrumentosTrans?.[row.originalIdx] || '')
                 };
             }).filter((item: any) => item.compId);
             
@@ -1956,25 +2008,31 @@ Devuelve SOLO JSON: {"evaluaciones": [{"criterio": "...", "evidencia": "...", "i
 
             const generatedAreaCriteria: Record<number, string> = {};
             const generatedAreaEvidence: Record<number, string> = {};
+            const generatedAreaInstruments: Record<number, string> = {};
             const generatedTransCriteria: Record<number, string> = {};
             const generatedTransEvidence: Record<number, string> = {};
+            const generatedTransInstruments: Record<number, string> = {};
             areaRows.forEach((row: any, index: number) => {
                 const item = generatedEvaluations[index] || {};
                 if (item.criterio) generatedAreaCriteria[row.originalIdx] = item.criterio;
                 if (item.evidencia) generatedAreaEvidence[row.originalIdx] = item.evidencia;
+                if (item.instrumento) generatedAreaInstruments[row.originalIdx] = normalizeInstrumentInternal(item.instrumento);
             });
             transRows.forEach((row: any, index: number) => {
                 const item = generatedEvaluations[areaRows.length + index] || {};
                 if (item.criterio) generatedTransCriteria[row.originalIdx] = item.criterio;
                 if (item.evidencia) generatedTransEvidence[row.originalIdx] = item.evidencia;
+                if (item.instrumento) generatedTransInstruments[row.originalIdx] = normalizeInstrumentInternal(item.instrumento);
             });
 
             let updatedState = {
                 ...latestUnitDataRef.current,
                 criterios: { ...(latestUnitDataRef.current.criterios || {}), ...generatedAreaCriteria },
                 evidencias: { ...(latestUnitDataRef.current.evidencias || {}), ...generatedAreaEvidence },
+                instrumentos: { ...(latestUnitDataRef.current.instrumentos || {}), ...generatedAreaInstruments },
                 criteriosTrans: { ...(latestUnitDataRef.current.criteriosTrans || {}), ...generatedTransCriteria },
                 evidenciasTrans: { ...(latestUnitDataRef.current.evidenciasTrans || {}), ...generatedTransEvidence },
+                instrumentosTrans: { ...(latestUnitDataRef.current.instrumentosTrans || {}), ...generatedTransInstruments },
                 sesiones: [...(latestUnitDataRef.current?.sesiones || [])]
             };
 
@@ -1988,7 +2046,7 @@ Situación: ${latestUnitDataRef.current.situation || unitData.situation || 'No d
 ${aiExtraContext}
 
 Catálogo de criterios del área:
-${areaCriteriaCatalog.map((item, idx) => `${idx + 1}. Competencia: ${item.compId} | Capacidad: ${item.cap} | Desempeño base: ${item.performance}`).join('\n')}
+${areaCriteriaCatalog.map((item, idx) => `${idx + 1}. Competencia: ${item.compId} | Capacidad: ${item.cap} | Desempeño base: ${item.performance} | Criterio: ${item.criterion} | Evidencia: ${item.evidence} | Instrumento: ${item.instrument}`).join('\n')}
 
 Catálogo de criterios transversales:
 ${transversalCriteriaCatalog.length > 0 ? transversalCriteriaCatalog.map((item, idx) => `${idx + 1}. Competencia: ${item.compId} | Capacidad: ${item.cap} | Desempeño base: ${item.performance}`).join('\n') : 'Sin opciones transversales.'}
@@ -1998,12 +2056,18 @@ Devuelve SOLO JSON:
 
 Reglas:
 - Usa exactamente ${sessionCount} sesiones.
-- Distribuye los criterios de manera progresiva y coherente con el propósito y producto de la unidad.
-- Cada índice de criterio del área debe aparecer exactamente una vez en toda la unidad: no lo omitas ni lo repitas.
+- Distribuye las capacidades del área en bloques consecutivos, respetando el orden del catálogo y la secuencia natural del proyecto.
+- Primero abarca todas las capacidades del área. Puedes repetir un criterio o capacidad en varias sesiones consecutivas cuando necesite mayor desarrollo.
+- No regreses a una capacidad anterior después de avanzar a la siguiente.
+- Reserva para las sesiones finales las capacidades orientadas a evaluar resultados, reflexionar, validar o mejorar el producto.
+- Ninguna sesión puede quedar sin criterio del área.
+- Elige conscientemente los índices según lo que debe ocurrir en cada sesión: capacidad, criterio, evidencia e instrumento viajan vinculados.
+- Puedes repetir un índice en sesiones consecutivas si el aprendizaje requiere desarrollo, práctica, aplicación o evaluación durante más de una sesión.
+- Evita cargar una sesión con criterios que correspondan a momentos distintos del proyecto.
 - Cada índice de criterio transversal debe aparecer exactamente una vez en toda la unidad: no lo omitas ni lo repitas.
 - Los criterios determinan automáticamente sus competencias y capacidades; no devuelvas nombres libres.
 - En una misma sesión, los criterios del área deben pertenecer a una sola competencia del área.
-- Los arreglos pueden quedar vacíos solamente cuando no haya suficientes criterios para todas las sesiones.`;
+- Los criterios transversales son opcionales en una sesión.`;
 
             let aiAssignments: Array<{ areaCriterionIndexes?: number[]; transversalCriterionIndexes?: number[] }> = [];
             if (aiProvider === 'openai') {
@@ -2014,7 +2078,7 @@ Reglas:
             } else if (ai) {
                 const assignmentResponse = await generateGeminiContent(ai, {
                     contents: [{ parts: [{ text: assignmentPrompt }] }]
-                }, preferredGeminiModel);
+                }, activeGeminiModel, geminiFallbackOptions);
                 totalTokensUsed += Number(assignmentResponse?.usageMetadata?.totalTokenCount || 0);
                 const assignmentText = assignmentResponse.text || '';
                 const assignmentData = JSON.parse(extractJsonBlock(assignmentText));
@@ -2057,7 +2121,11 @@ Reglas:
                 return distributed;
             };
 
-            const assignedAreaCriteria = distributeUniqueCriteria('areaCriterionIndexes', areaCriteriaCatalog, true);
+            const assignedAreaCriteria = distributeOrderedCriteriaByBlocks(
+                sessionCount,
+                areaCriteriaCatalog,
+                aiAssignments.map((assignment) => assignment?.areaCriterionIndexes || [])
+            );
             const assignedTransversalCriteria = distributeUniqueCriteria('transversalCriterionIndexes', transversalCriteriaCatalog, false);
             const generatedSessions = updatedState.sesiones.map((session: any, index: number) => {
                 const areaCriteria = assignedAreaCriteria[index] || [];
@@ -2081,10 +2149,24 @@ Reglas:
             });
             updatedState = { ...updatedState, sesiones: normalizeSessionCriterionOwnership(generatedSessions) };
 
-            setUnitData((prev: any) => ({
-                ...prev,
-                sesiones: updatedState.sesiones
-            }));
+            setUnitData((prev: any) => {
+                const next = {
+                    ...prev,
+                    criterios: { ...(prev.criterios || {}), ...generatedAreaCriteria },
+                    evidencias: { ...(prev.evidencias || {}), ...generatedAreaEvidence },
+                    instrumentos: { ...(prev.instrumentos || {}), ...generatedAreaInstruments },
+                    criteriosTrans: { ...(prev.criteriosTrans || {}), ...generatedTransCriteria },
+                    evidenciasTrans: { ...(prev.evidenciasTrans || {}), ...generatedTransEvidence },
+                    instrumentosTrans: { ...(prev.instrumentosTrans || {}), ...generatedTransInstruments },
+                    sesiones: updatedState.sesiones
+                };
+                latestUnitDataRef.current = next;
+                return next;
+            });
+            updatedState.sesiones.forEach((_session: any, index: number) => {
+                triggerFieldAnimation(`sesiones.${index}.des`);
+                triggerFieldAnimation(`sesiones.${index}.evi`);
+            });
 
             // Ahora pedimos a la IA que genere los Títulos y Conocimientos basándose en lo ya asignado
             const step3Prompt = `Como experto pedagógico, genera un "title" (estructura del título: Verbo + contenido + condición) y "con" (Conocimientos específicos/temario necesario) para las siguientes ${sessionCount} sesiones del área ${areaName}. 
@@ -2106,26 +2188,27 @@ Reglas:
                 const step3Result = await requestOpenAIJson(apiKey, step3Prompt, preferredOpenAIModel);
                 totalTokensUsed += step3Result.totalTokens;
                 const step3Data = step3Result.data;
-                const sesiones = Array.isArray(step3Data?.sesiones) ? step3Data.sesiones : [];
+                const sesiones = validateGeneratedUnitSessionTitles(step3Data, sessionCount);
                 updatedState.sesiones.forEach((s: any, i: number) => {
                     const item = sesiones[i] || {};
                     if (item.title) startTypingField(`sesiones.${i}.title`, item.title, { current: sesionesRefs.current[s.id] });
                     if (item.con) startTypingField(`sesiones.${i}.con`, item.con, { current: sessionFieldRefs.current[`con-${s.id}`] });
                 });
             } else if (ai) {
-                const step3Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: step3Prompt }] }] }, preferredGeminiModel);
+                const step3Stream = await generateGeminiContentStream(ai, { contents: [{ parts: [{ text: step3Prompt }] }] }, activeGeminiModel, geminiFallbackOptions);
                 let fullStep3 = "";
                 let step3Tokens = 0;
                 for await (const chunk of step3Stream) {
                     fullStep3 += chunk.text;
                     step3Tokens = Number(chunk?.usageMetadata?.totalTokenCount || step3Tokens || 0);
-                    updatedState.sesiones.forEach((s:any, i:number) => {
-                        const title = extractStreamingNthValue(fullStep3, "title", i);
-                        const con = extractStreamingNthValue(fullStep3, "con", i);
-                        if (title) startTypingField(`sesiones.${i}.title`, title, { current: sesionesRefs.current[s.id] });
-                        if (con) startTypingField(`sesiones.${i}.con`, con, { current: sessionFieldRefs.current[`con-${s.id}`] });
-                    });
                 }
+                const finalStep3 = JSON.parse(extractJsonBlock(fullStep3));
+                const finalSessions = validateGeneratedUnitSessionTitles(finalStep3, sessionCount);
+                updatedState.sesiones.forEach((s: any, i: number) => {
+                    const item = finalSessions[i] || {};
+                    if (item.title) startTypingField(`sesiones.${i}.title`, item.title, { current: sesionesRefs.current[s.id] });
+                    if (item.con) startTypingField(`sesiones.${i}.con`, item.con, { current: sessionFieldRefs.current[`con-${s.id}`] });
+                });
                 totalTokensUsed += step3Tokens;
             }
 
@@ -2133,11 +2216,17 @@ Reglas:
             registerAiUsage(aiProvider, 'unit_plan', totalTokensUsed);
             const nextUsage = getAiUsageProgress();
             setAiUsageProgress(nextUsage);
-            setToast({ msg: "✨ IA Armi completó la unidad correctamente.", type: 'success', usage: nextUsage });
+            setToast({
+                msg: usedGeminiFallback
+                    ? `✨ IA Armi completó la unidad usando ${activeGeminiModel}, porque el modelo seleccionado no tenía cuota disponible.`
+                    : "✨ IA Armi completó la unidad correctamente.",
+                type: 'success',
+                usage: nextUsage
+            });
         } catch (e: any) {
             const issue = classifyAiIssue(e);
             if (issue.kind === 'auth') setShowAuthScreen(true);
-            if (issue.kind === 'quota_minute' || issue.kind === 'quota_daily' || issue.kind === 'quota_general' || issue.kind === 'saturation' || issue.kind === 'malformed_json' || issue.kind === 'empty_response' || issue.kind === 'model_access') {
+            if (issue.kind === 'quota_minute' || issue.kind === 'quota_daily' || issue.kind === 'quota_general' || issue.kind === 'billing_required' || issue.kind === 'saturation' || issue.kind === 'malformed_json' || issue.kind === 'empty_response' || issue.kind === 'model_access') {
                 const toastType = issue.kind === 'quota_minute' || issue.kind === 'quota_daily' || issue.kind === 'quota_general' || issue.kind === 'saturation' ? 'warning' : 'error';
                 setToast({ msg: `${toastType === 'warning' ? "Aviso:" : "Error:"} ${issue.userMessage}`, type: toastType });
                 return;
@@ -2154,10 +2243,21 @@ Reglas:
     };
 
     const handleSave = async () => {
+        if (!unitPlanningReady) {
+            setToast({ msg: 'Espere a que se carguen la unidad y sus competencias antes de guardar.', type: 'warning' });
+            return false;
+        }
         if (!selectedAreaId || !selectedGrade || !selectedSection) {
             setToast({ msg: '⚠️ Seleccione Área, Grado y Sección.', type: 'warning' });
-            return;
+            return false;
         }
+
+        const sessionsForSave = normalizeSessionCriterionOwnership(
+            (unitData.sesiones || []).map((session: any) => ({
+                ...session,
+                ...deriveSessionEvaluationData(session, unitData)
+            }))
+        );
 
         const payload = {
             year,
@@ -2175,7 +2275,7 @@ Reglas:
             criteriosTrans: unitData.criteriosTrans,
             evidenciasTrans: unitData.evidenciasTrans,
             instrumentosTrans: unitData.instrumentosTrans,
-            sesiones: unitData.sesiones.map((s: any, i: number) => ({
+            sesiones: sessionsForSave.map((s: any) => ({
                 ...s,
                 fechasPorSeccion: sessionDetails.find(sd => sd.id === s.id)?.combinations || []
             })),
@@ -2194,12 +2294,16 @@ Reglas:
 
         const res = await saveUnidadDidactica(payload);
         if (res.success) {
-            setToast({ msg: '✅ Unidad Sincronizada.', type: 'success' });
+            setUnitData((previous: any) => ({ ...previous, sesiones: sessionsForSave }));
+            const updatedLessons = Number(res.data?.updatedLessons || 0);
+            setToast({ msg: updatedLessons ? `✅ Unidad guardada. ${updatedLessons} sesión(es) actualizada(s).` : '✅ Unidad Sincronizada.', type: 'success' });
             setIsDirty(false);
             setHasStoredUnits(true);
             onSuccess();
+            return true;
         } else {
             setToast({ msg: '❌ Error SQL: ' + res.message, type: 'error' });
+            return false;
         }
     };
 
@@ -2340,7 +2444,7 @@ const handleFillDefaultBiblio = () => {
         }));
     };
 
-    const selectedCompsCount = useMemo(() => Object.values(unitData.selectedComps).filter(Boolean).length, [unitData.selectedComps]);
+    const selectedCompsCount = prioritizedCompetencies.length;
 
     const headerFilled = !!(selectedAreaId && selectedGrade && selectedSection && unitNumber && (isEPT || selectedCompsCount > 0));
 
@@ -2350,12 +2454,6 @@ const handleFillDefaultBiblio = () => {
 
     return (
         <div className="animate-fade-in pb-20 space-y-6 relative">
-            <div className="absolute top-6 right-8 z-[200]">
-                <div className="w-10 h-10 rounded-full border-2 border-white/40 shadow-lg cursor-pointer overflow-hidden transition-transform hover:scale-110 active:scale-95 flex items-center justify-center bg-white/20 backdrop-blur-md" title="Cambiar color del módulo">
-                    <span className="text-xl">🎨</span>
-                    <input type="color" value={themeColor} onChange={(e) => { setThemeColor(e.target.value); localStorage.setItem('armi_units_theme', e.target.value); }} className="absolute inset-0 opacity-0 cursor-pointer" />
-                </div>
-            </div>
 
             {typeof document !== 'undefined' && toast && createPortal(
                 <div className="fixed top-10 right-10 z-[2147483000] w-full max-w-md pointer-events-none">
@@ -2365,7 +2463,7 @@ const handleFillDefaultBiblio = () => {
             )}
 
             {/* Added AuthOverlay to handle missing API key errors and configuration */}
-            {showAuthScreen && (
+            {typeof document !== 'undefined' && showAuthScreen && createPortal(
                 <AuthOverlay 
                     onSave={handleSaveIAKey} 
                     onClose={() => setShowAuthScreen(false)} 
@@ -2378,7 +2476,8 @@ const handleFillDefaultBiblio = () => {
                     initialAiPedagogicalRoute={(generalData as any)?.ai_pedagogical_route || ''}
                     initialInstitutionalProblems={(generalData as any)?.ai_institutional_problems || ''}
                     initialUnitPedagogicalFocus={(generalData as any)?.ai_unit_pedagogical_focus || ''}
-                />
+                />,
+                document.body
             )}
 
               {isDirty && createPortal(
@@ -2413,25 +2512,22 @@ const handleFillDefaultBiblio = () => {
                 </div>
             )}
 
-            <div className="text-white p-7 rounded-[3rem] shadow-2xl relative z-[100] overflow-visible" style={{ backgroundColor: themeColor }}>
-                <div className="flex flex-col lg:flex-row items-center gap-6 mb-8">
+            <div ref={planningHeaderRef} className="text-white p-7 rounded-[3rem] shadow-2xl relative z-[100] overflow-visible" style={{ backgroundColor: themeColor }}>
+                <div className="session-header-top mb-8">
                     <div className="flex items-center gap-5"><div className="bg-white/20 p-4 rounded-3xl border border-white/30 shadow-inner backdrop-blur-md"><span className="text-4xl drop-shadow-lg">📗</span></div><div className="flex flex-col"><h1 className="text-3xl font-black italic font-serif tracking-tight uppercase leading-none">Unidades Didácticas {year}</h1><span className="text-[10px] font-black uppercase tracking-[0.4em] text-orange-200 mt-2">Planificación de Unidades - {currentBimesterRoman} Bimestre</span></div></div>
-                    <div className="bg-white/20 p-3 rounded-[3rem] border border-white/30 shadow-inner backdrop-blur-md flex gap-3 relative z-[120] ml-auto lg:ml-40">
-                        <div className="relative shrink-0">
-                            <button onClick={handleGenerateAI} disabled={!headerFilled || isGeneratingIA} className={`btn-3d-purple shrink-0 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`} title={`Completar con IA Armi\n${aiUsageProgress.tokenLabel}`}>{isGeneratingIA ? <span className="text-xl">⌛</span> : <span className="text-lg">🤖</span>}</button>
-                            <button type="button" onClick={() => setShowAuthScreen(true)} className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-white text-slate-700 border border-slate-200 shadow-lg hover:bg-slate-50 flex items-center justify-center text-[10px] font-black" title="Configuración de IA">⚙</button>
-                        </div>
-                        <button onClick={handleSave} disabled={!headerFilled} className={`btn-3d-plus shrink-0 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : ''}`} title="Guardar Unidad"><span>+</span></button>
-                        <button onClick={handleOpenUnitManager} disabled={!hasStoredUnits} className={`btn-water water-white w-14 h-14 rounded-full flex items-center justify-center hover:scale-110 active:scale-95 transition-all relative group ${!hasStoredUnits ? 'opacity-40 grayscale cursor-not-allowed' : ''}`} title="Gestor de Unidades"><span className="text-2xl">🗃️</span></button>
-                        <button onClick={() => setShowTemplateMode(true)} disabled={!hasStoredUnits} className={`btn-3d-blue shrink-0 ${!hasStoredUnits ? 'opacity-40 grayscale cursor-not-allowed' : ''}`} title="Correspondencia"><span>📄</span></button>
-                    </div>
+                    <SessionActions module="units" headerRef={planningHeaderRef} themeColor={themeColor} setThemeColor={setThemeColor}
+                        contextLabel={`${selectedGrade || 'Grado'} ${selectedSection || ''} · U${unitNumber}`}
+                        headerFilled={headerFilled} isGeneratingIA={isGeneratingIA} aiTokenLabel={aiUsageProgress.tokenLabel}
+                        saveDisabled={!headerFilled} managerDisabled={!hasStoredUnits} templateDisabled={!hasStoredUnits}
+                        onAI={handleGenerateAI} onAISettings={() => setShowAuthScreen(true)} onSave={handleSave}
+                        onManager={handleOpenUnitManager} onTemplate={() => setShowTemplateMode(true)} />
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-black/10 p-6 rounded-[2.5rem] border border-white/10 backdrop-blur-xl items-end overflow-visible relative z-[110]">
                     <div className="md:col-span-4"><Select label="ÁREA" name="area" options={areaOptions} value={selectedAreaId} onChange={e => { setSelectedAreaId(e.target.value); setSelectedGrade(''); setSelectedSection(''); }} className="text-orange-900 font-black h-auto" placeholder="Área..." labelClassName="text-white" /></div>
                     <div className="md:col-span-2"><Select label="GRADO" name="grade" options={gradeOptions} value={selectedGrade} onChange={e => { setSelectedGrade(e.target.value); setSelectedSection(''); }} disabled={!selectedAreaId} className="text-orange-900 font-black h-auto" placeholder="Grado..." labelClassName="text-white" /></div>
                     <div className="md:col-span-2"><Select label="SECCIÓN" name="section" options={sectionOptions} value={selectedSection} onChange={e => setSelectedSection(e.target.value)} disabled={!selectedGrade} className="text-orange-900 font-black h-auto" placeholder="-" labelClassName="text-white" /></div>
                     <div className="md:col-span-1"><Select label="UNID." name="unit" options={UNITS.map(u => ({ value: u.toString(), label: u.toString() }))} value={unitNumber} onChange={e => setUnitNumber(e.target.value)} disabled={!selectedSection} className="text-orange-900 font-black h-auto" labelClassName="text-white" /></div>
-                    <div className="md:col-span-1"><label className="block text-[10px] font-black text-white mb-2 ml-1 uppercase tracking-[0.15em] leading-none">PRIO.</label><button disabled={!selectedSection || isEPT} onClick={() => setShowCompSelector(true)} className={`w-full h-[42px] bg-slate-50 border border-slate-200 rounded-xl px-3 font-black text-[11px] uppercase transition-all shadow-inner text-center ${selectedCompsCount > 0 ? 'text-blue-700 bg-blue-50 border-blue-200' : 'text-slate-400'} disabled:opacity-50 disabled:cursor-not-allowed`}>{isEPT ? '1 CP' : (selectedCompsCount > 0 ? `${selectedCompsCount} CP` : 'S/P')}</button></div>
+                        <div className="md:col-span-1"><label className="block text-[10px] font-black text-white mb-2 ml-1 uppercase tracking-[0.15em] leading-none">PRIO.</label><button disabled={!selectedSection || isEPT} onClick={() => setShowCompSelector(true)} className={`w-full h-[42px] bg-slate-50 border border-slate-200 rounded-xl px-3 font-black text-[11px] uppercase transition-all shadow-inner text-center ${selectedCompsCount > 0 ? 'text-blue-700 bg-blue-50 border-blue-200' : 'text-slate-400'} disabled:opacity-50 disabled:cursor-not-allowed`}>{isEPT ? (selectedCompsCount > 0 ? '1 CP' : 'CARGANDO') : (selectedCompsCount > 0 ? `${selectedCompsCount} CP` : 'S/P')}</button></div>
                     <div className="md:col-span-2"><div className="bg-white/10 px-4 py-2.5 rounded-2xl border border-white/10 flex items-center gap-2 shadow-inner w-full justify-center h-[42px]"><div className="flex flex-col items-center"><span className="text-[10px] font-black text-white">{calculatedSessionCount} SES.</span><span className="text-[7px] font-black uppercase tracking-widest text-white-400">DETECTADAS</span></div></div></div>
                 </div>
             </div>
@@ -2442,7 +2538,7 @@ const handleFillDefaultBiblio = () => {
                 <>
                     <div ref={sectionIRef} className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative z-10 scroll-mt-24">
                         {[{ id: 'I', label: 'TÍTULO DE LA UNIDAD / EdA', field: 'title', icon: '🏷️', ref: null }, { id: 'III', label: 'PRODUCTO DE UNIDAD', field: 'product', icon: '📦', ref: productRef }, { id: 'II', label: 'PROPÓSITO DE APRENDIZAJE', field: 'purpose', icon: '🎯', ref: purposeRef }, { id: 'IV', label: 'SITUACIÓN SIGNIFICATIVA', field: 'situation', icon: '🔥', ref: situationRef }].map(sec => (
-                            <div key={sec.id} className={`bg-white rounded-[2.5rem] shadow-lg border overflow-hidden transition-all duration-500 ${fieldsGenerating[sec.field] ? 'generating-glow' : ''}`} style={{ borderColor: themeColor }}><div className="text-white px-6 py-3 flex justify-between items-center relative overflow-hidden" style={{ backgroundColor: themeColor }}><span className="text-[10px] font-black uppercase tracking-widest relative z-10">{sec.id}. {sec.label}</span><span className="text-xl relative z-10 opacity-50">{sec.icon}</span></div><textarea ref={sec.ref} className="w-full p-6 h-40 resize-none outline-none text-slate-700 font-bold italic text-[11px] leading-relaxed text-justify focus:bg-orange-50/20 transition-all placeholder:text-slate-300" placeholder={sec.id === 'IV' ? "Redacte aquí la situación significativa..." : "Cargando..."} value={unitData[sec.field] || ''} onChange={e => handleInputChange(sec.field, '', e.target.value)} /></div>
+                            <div key={sec.id} className={`bg-white rounded-[2.5rem] shadow-lg border overflow-hidden transition-all duration-500 ${fieldsGenerating[sec.field] ? 'generating-glow' : ''}`} style={{ borderColor: themeColor }}><div className="text-white px-6 py-3 flex justify-between items-center relative overflow-hidden" style={{ backgroundColor: themeColor }}><span className="text-[10px] font-black uppercase tracking-widest relative z-10">{sec.id}. {sec.label}</span><span className="text-xl relative z-10 opacity-50">{sec.icon}</span></div><textarea ref={sec.ref} className="w-full p-6 h-40 resize-none outline-none text-slate-700 font-bold italic text-[11px] leading-relaxed text-justify focus:bg-orange-50/20 transition-all placeholder:text-slate-300" placeholder={sec.id === 'IV' ? "Redacte aquí la situación significativa..." : "Escriba el contenido..."} value={unitData[sec.field] || ''} onChange={e => handleInputChange(sec.field, '', e.target.value)} /></div>
                         ))}
                     </div>
 
@@ -2506,6 +2602,7 @@ const handleFillDefaultBiblio = () => {
 
                     <div ref={sessionsTableRef} className="bg-white rounded-[2.5rem] shadow-xl border overflow-hidden relative z-10 scroll-mt-24" style={{borderColor: themeColor}}>
                         <div className="text-white p-4 text-center text-sm font-black uppercase tracking-widest flex items-center justify-center gap-3" style={{ backgroundColor: themeColor }}><span className="text-xl">📅</span> VI. SECUENCIA DE SESIONES DE APRENDIZAJE ({unitData.sesiones.length} Sesiones)</div>
+                        <p className="bg-white px-4 py-2 text-[10px] text-slate-600">Al terminar de editar un criterio o evidencia, se actualiza también su fila en Competencias y capacidades priorizadas y las sesiones que usan el mismo dato. La selección se mantiene independiente de la edición.</p>
                           <div className="overflow-x-auto overflow-y-visible relative">
                               <table className="w-full border-collapse text-[11px]">
                                 <thead className="sticky top-0 z-10">
@@ -2663,24 +2760,18 @@ const handleFillDefaultBiblio = () => {
                                                             const capacityCriteria = (ses.capacityCriteriaOptions || []).filter((criterion: any) =>
                                                                 normalizeLoose(criterion.capacidad) === normalizeLoose(cap.value)
                                                             );
-                                                            const lockedOwners = capacityCriteria
-                                                                .map((criterion: any) => criteriaOwners.get(criterion.id))
-                                                                .filter((owner: number | undefined) => owner && owner !== Number(ses.id));
-                                                            const capacityLocked = !isSelected && capacityCriteria.length > 0 && capacityCriteria.every((criterion: any) => {
-                                                                const owner = criteriaOwners.get(criterion.id);
-                                                                return owner && owner !== Number(ses.id);
-                                                            });
-                                                            const ownerText = Array.from(new Set(lockedOwners)).join(', ');
-                                                            const ownerCount = new Set(lockedOwners).size;
+                                                            const usedInSessions = Array.from(new Set(capacityCriteria.flatMap((criterion: any) =>
+                                                                criteriaUsageMap.get(criterion.id) || []
+                                                            ))).filter((sessionId: number) => sessionId !== Number(ses.id));
                                                             return (
                                                                 <label
                                                                     key={cap.value}
-                                                                    title={capacityLocked
-                                                                        ? `No disponible: todos sus criterios ya se evalúan ${ownerCount > 1 ? `en las sesiones ${ownerText}` : `en la sesión ${ownerText}`}.`
+                                                                    title={usedInSessions.length > 0
+                                                                        ? `${cap.label}. También usada en sesión${usedInSessions.length > 1 ? 'es' : ''} ${usedInSessions.join(', ')}.`
                                                                         : cap.label}
-                                                                    className={`flex items-start gap-2 p-1 rounded border ${capacityLocked ? 'cursor-not-allowed opacity-45 bg-slate-100 border-slate-200' : 'cursor-pointer'} ${isSelected ? (isTrans ? transClasses : 'bg-blue-50 border-blue-200') : (isTrans ? transClasses : 'bg-slate-50 border-slate-100')}`}
+                                                                    className={`flex items-start gap-2 p-1 rounded border cursor-pointer ${isSelected ? (isTrans ? transClasses : 'bg-blue-50 border-blue-200') : (isTrans ? transClasses : 'bg-slate-50 border-slate-100')}`}
                                                                 >
-                                                                    <input type="checkbox" checked={isSelected} disabled={capacityLocked} onChange={e => {
+                                                                    <input type="checkbox" checked={isSelected} onChange={e => {
                                                                         const current = ses.capacidades || [];
                                                                         const next = e.target.checked ? [...current, cap.value] : current.filter((v: string) => v !== cap.value);
                                                                         handleSessionInputChangeById(ses.id, 'capacidades', next);
@@ -2697,23 +2788,32 @@ const handleFillDefaultBiblio = () => {
                                                         {(ses.availableCriteriaOptions || []).length > 0 ? (
                                                             (ses.availableCriteriaOptions || []).map((criterion: any) => {
                                                                 const selected = (ses.selectedCriteriaIds || []).includes(criterion.id);
-                                                                const owner = criteriaOwners.get(criterion.id);
-                                                                const locked = Boolean(owner) && owner !== Number(ses.id);
+                                                                const usedInOtherSessions = (criteriaUsageMap.get(criterion.id) || [])
+                                                                    .filter((sessionId) => sessionId !== Number(ses.id));
                                                                 return (
-                                                                    <button
+                                                                    <div
                                                                         key={`crit-${ses.id}-${criterion.id}`}
-                                                                        type="button"
-                                                                        aria-disabled={locked}
-                                                                        onClick={() => !locked && toggleSessionCriterion(ses.id, criterion.id)}
-                                                                        className={`w-full mb-1.5 rounded-lg border px-2 py-1.5 text-left text-[9px] leading-tight font-medium italic transition-all ${criterion.color || AREA_TEXT_COLOR} ${locked ? 'border-slate-200 bg-slate-100 opacity-35 cursor-not-allowed' : selected ? 'border-emerald-400 bg-emerald-50 shadow-sm' : 'border-slate-200 bg-slate-50 opacity-55 hover:opacity-80'}`}
-                                                                        title={locked
-                                                                            ? `Bloqueado: este criterio ya se evalúa en la sesión ${owner}.`
-                                                                            : selected
-                                                                                ? 'Criterio incluido. Clic para excluir todo este bloque vinculado.'
+                                                                        className={`w-full mb-1.5 rounded-lg border px-2 py-1.5 text-left text-[9px] leading-tight font-medium italic transition-all ${criterion.color || AREA_TEXT_COLOR} ${selected ? 'border-emerald-400 bg-emerald-50 shadow-sm' : 'border-slate-200 bg-slate-50 opacity-55 hover:opacity-80'}`}
+                                                                        title={selected
+                                                                            ? 'Criterio incluido. Clic para excluir todo este bloque vinculado.'
+                                                                            : usedInOtherSessions.length > 0
+                                                                                ? `Disponible. También se usa en sesión${usedInOtherSessions.length > 1 ? 'es' : ''} ${usedInOtherSessions.join(', ')}.`
                                                                                 : 'Criterio disponible. Clic para incluir todo este bloque vinculado.'}
                                                                     >
-                                                                        {criterion.text}
-                                                                    </button>
+                                                                        <button type="button" onClick={() => toggleSessionCriterion(ses.id, criterion.id)} className="mb-1 block w-full text-left text-[8px] font-bold not-italic">
+                                                                            {selected ? '✓ Incluido · clic para excluir' : '+ Incluir criterio'}
+                                                                        </button>
+                                                                        {selected ? <LinkedEvaluationTextarea
+                                                                            value={criterion.text}
+                                                                            onCommit={(value) => handleSessionCriterionEdit(ses.id, criterion.id, value)}
+                                                                            className={`session-auto-textarea block w-full border-0 outline-none bg-transparent resize-none text-[9px] leading-tight font-medium italic overflow-hidden ${criterion.color || AREA_TEXT_COLOR}`}
+                                                                        /> : <span>{criterion.text}</span>}
+                                                                        {usedInOtherSessions.length > 0 ? (
+                                                                            <span className="mt-1 block text-[7px] not-italic text-slate-400">
+                                                                                Usado también en S. {usedInOtherSessions.join(', ')}
+                                                                            </span>
+                                                                        ) : null}
+                                                                    </div>
                                                                 );
                                                             })
                                                         ) : <span className="text-[9px] text-slate-400 italic">Seleccione capacidades para mostrar sus criterios.</span>}
@@ -2734,11 +2834,10 @@ const handleFillDefaultBiblio = () => {
                                                         {(ses.evidenceItems || []).length > 0 ? (
                                                             (ses.evidenceItems || []).map((item: any, itemIdx: number) => (
                                                                 <div key={`evi-${ses.id}-${itemIdx}`} className="relative">
-                                                                    <textarea
+                                                                    <LinkedEvaluationTextarea
                                                                         className={`session-auto-textarea w-full border-0 outline-none bg-transparent resize-none text-[9px] leading-tight font-medium overflow-hidden pr-6 ${item.color || AREA_TEXT_COLOR}`}
                                                                         value={item.text}
-                                                                        onChange={e => handleSessionItemChange(ses.id, 'evidence', itemIdx, e.target.value)}
-                                                                        onInput={e => autoResizeTextarea(e.currentTarget)}
+                                                                        onCommit={(value) => handleSessionItemChange(ses.id, 'evidence', itemIdx, value)}
                                                                     />
                                                                     <button
                                                                         type="button"
@@ -2956,7 +3055,32 @@ const handleFillDefaultBiblio = () => {
                 .animate-fly-in-right { animation: flyInRight 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
                 @keyframes bounceSlow { 0%, 100% { transform: translate(-50%, 0); } 50% { transform: translate(-50%, -10px); } }
                 .animate-bounce-slow { animation: bounceSlow 3s infinite ease-in-out; }
-                .generating-glow { position: relative; animation: glow-pulse-border 1.5s infinite; }
+                .generating-glow {
+                    position: relative;
+                    overflow: hidden;
+                    animation: glow-pulse-border 1.5s infinite, safe-typewriter-reveal 900ms steps(18, end) both;
+                }
+                .generating-glow::after {
+                    content: '';
+                    position: absolute;
+                    z-index: 20;
+                    top: 0;
+                    bottom: 0;
+                    width: 2px;
+                    pointer-events: none;
+                    background: rgba(211, 84, 0, 0.75);
+                    box-shadow: 0 0 7px rgba(211, 84, 0, 0.55);
+                    animation: safe-typewriter-caret 900ms steps(18, end) both;
+                }
+                @keyframes safe-typewriter-reveal {
+                    from { clip-path: inset(0 100% 0 0); opacity: 0.45; }
+                    to { clip-path: inset(0 0 0 0); opacity: 1; }
+                }
+                @keyframes safe-typewriter-caret {
+                    0% { left: 0; opacity: 1; }
+                    92% { left: calc(100% - 2px); opacity: 1; }
+                    100% { left: calc(100% - 2px); opacity: 0; }
+                }
                 @keyframes glow-pulse-border { 0% { box-shadow: 0 0 5px rgba(211, 84, 0, 0.2); border-color: rgba(211, 84, 0, 0.3); } 50% { box-shadow: 0 0 20px rgba(211, 84, 0, 0.5); border-color: rgba(211, 84, 0, 0.6); } 100% { box-shadow: 0 0 5px rgba(211, 84, 0, 0.2); border-color: rgba(211, 84, 0, 0.3); } }
                 .scroll-mt-24 { scroll-margin-top: 6rem; }
             `}} />

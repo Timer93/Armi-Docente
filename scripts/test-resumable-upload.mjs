@@ -1,15 +1,25 @@
 import assert from 'assert/strict';
 import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { Readable } from 'stream';
-import db from '../backend/db.js';
-import {
+
+const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'armi-resumable-upload-'));
+const databaseRoot = path.join(testRoot, 'database');
+fs.mkdirSync(databaseRoot, { recursive: true });
+fs.writeFileSync(path.join(databaseRoot, 'armi.db'), '');
+process.env.ARMI_DATA_ROOT = testRoot;
+
+const { default: db } = await import('../backend/db.js');
+const {
   assembleResumableUpload,
   cancelResumableUpload,
   completeResumableUpload,
   getResumableUploadStatus,
   initializeResumableUpload,
   receiveUploadChunk,
-} from '../backend/remote-access/resumableUploadService.js';
+} = await import('../backend/remote-access/resumableUploadService.js');
 
 const payload = crypto.randomBytes(1024 * 1024);
 const expectedHash = crypto.createHash('sha256').update(payload).digest('hex');
@@ -23,6 +33,8 @@ try {
     fileType: 'application/pdf',
     totalSize: payload.length,
     sha256: expectedHash,
+    observation: 'Descripcion por archivo',
+    evidenceLink: 'https://example.edu/evidencia',
   });
   uploadId = initialized.uploadId;
   assert.equal(initialized.totalChunks, 1);
@@ -40,6 +52,8 @@ try {
 
   const assembled = await assembleResumableUpload(uploadId, '__test_student__');
   assert.equal(assembled.sha256, expectedHash);
+  assert.equal(assembled.row.observation, 'Descripcion por archivo');
+  assert.equal(assembled.row.evidence_link, 'https://example.edu/evidencia');
   await completeResumableUpload(uploadId);
   assert.equal(getResumableUploadStatus(uploadId, '__test_student__').status, 'COMPLETED');
   console.log('Subida reanudable de 1 MB: OK');
@@ -112,3 +126,6 @@ try {
 } finally {
   if (corruptId) db.prepare('DELETE FROM portal_evidence_uploads WHERE upload_id = ?').run(corruptId);
 }
+
+db.close();
+fs.rmSync(testRoot, { recursive: true, force: true });

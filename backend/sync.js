@@ -2,22 +2,47 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { execFile, spawn } from 'child_process';
+import { execFile } from 'child_process';
+import { createDriveDesktopLauncher } from './driveDesktopLauncher.js';
+import { createContinuousSyncQueue } from './continuousSyncQueue.js';
+import { createFrontendStateStore } from './frontendStateStore.js';
 import { fileURLToPath } from 'url';
 import { ZipArchive } from 'archiver';
 import PizZip from 'pizzip';
+import Database from 'better-sqlite3';
 import db, { dumpDatabase, restoreDatabase, SYNC_EXCLUDED_TABLES, getSyncChangeSignature } from './db.js';
-import { portableEvidenceKey, reconcileEvidenceMirrorIndex } from './evidenceMirrorIndex.js';
+import { listEvidenceTombstoneKeys, portableEvidenceKey, reconcileEvidenceMirrorIndex } from './evidenceMirrorIndex.js';
 import { appRoot, dataRoot, databaseRoot, uploadsRoot, syncRuntimeRoot, ensureDir } from './paths.js';
 import { createIncrementalMirrorSync } from './incrementalMirrorSync.js';
+import { createDumpReferenceTranslator, createSyncReferenceIdentity } from './syncReferenceIdentity.js';
+import { readMirrorJson as readMirrorJsonAsync, readMirrorJsonResult } from './mirrorJsonReader.js';
+import { createInternetConnectivityMonitor } from './internetConnectivity.js';
+import { createTransferProgress } from './transferProgress.js';
+import { createResourceConflictStore, resourceChecksum } from './resourceConflicts.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const quoteIdentifier = (value) => `"${String(value).replace(/"/g, '""')}"`;
 const runtimeFolder = syncRuntimeRoot;
 const stateFolder = path.join(runtimeFolder, 'state');
 const snapshotsFolder = path.join(runtimeFolder, 'restore-points');
 const dbDumpPath = path.join(runtimeFolder, 'database-dump.json');
 const frontendStatePath = path.join(stateFolder, 'frontend-local-storage.json');
+const resourceConflicts = createResourceConflictStore(path.join(runtimeFolder, 'resource-conflicts'));
+let resourceResolutionRunning = false;
+export const listResourceConflicts = () => resourceConflicts.list();
+export const getResourceConflictSnapshot = (id, version) => resourceConflicts.snapshot(id, version);
+export const resolveResourceConflict = async (id, version) => {
+  if (continuousMirrorTickRunning || resourceResolutionRunning) throw new Error('Espera a que termine la revisión de archivos e inténtalo otra vez.');
+  resourceResolutionRunning = true;
+  try {
+    const result = await resourceConflicts.resolve(id, version,
+      (source, destination, checksum) => copyFileAtomicStreaming(source, destination, () => {}, { checksum }));
+    continuousMirrorSyncedResourceSignature = '';
+    requestContinuousMirrorSync({ delayMs: 250 });
+    return result;
+  } finally { resourceResolutionRunning = false; }
+};
 const localManifestPath = path.join(runtimeFolder, 'local-manifest.json');
 const configPath = path.join(runtimeFolder, 'sync-config.json');
 const authSettingsPath = path.join(runtimeFolder, 'auth-settings.json');
@@ -46,6 +71,8 @@ const APPS_SCRIPT_CHUNK_BASE64_CHARS = 6 * 1024 * 1024;
 const MIRROR_ROOT_MARKER = '.armi-sync-root.json';
 const fileFingerprintCache = new Map();
 const activeResourceTransfers = new Map();
+const downloadProgress = createTransferProgress();
+let receivedChanges = null;
 let activeMirrorTransfer = null;
 
 const ensureParentDir = (target) => ensureDir(path.dirname(target));
@@ -189,17 +216,19 @@ const copyFileAtomic = (sourcePath, destinationPath) => {
   fs.renameSync(tempPath, destinationPath);
 };
 
-const copyFileAtomicStreaming = (sourcePath, destinationPath, onProgress = () => {}) => new Promise((resolve, reject) => {
+const copyFileAtomicStreaming = (sourcePath, destinationPath, onProgress = () => {}, expected = {}) => new Promise((resolve, reject) => {
   ensureParentDir(destinationPath);
   const tempPath = `${destinationPath}.${process.pid}.${crypto.randomUUID()}.partial`;
   const totalBytes = Number(safeStat(sourcePath)?.size || 0);
   let copiedBytes = 0;
+  const digest = expected.checksum ? crypto.createHash('sha256') : null;
   const input = fs.createReadStream(sourcePath, { highWaterMark: 1024 * 1024 });
   const output = fs.createWriteStream(tempPath, { flags: 'wx' });
   const cleanup = () => {
     try { fs.rmSync(tempPath, { force: true }); } catch {}
   };
   input.on('data', (chunk) => {
+    digest?.update(chunk);
     copiedBytes += chunk.length;
     onProgress({ copiedBytes, totalBytes });
   });
@@ -216,6 +245,8 @@ const copyFileAtomicStreaming = (sourcePath, destinationPath, onProgress = () =>
   output.on('finish', () => {
     const previousPath = `${destinationPath}.${process.pid}.previous`;
     try {
+      if ((digest && digest.digest('hex') !== expected.checksum)
+        || (expected.size !== undefined && copiedBytes !== expected.size)) throw new Error('El archivo no coincide con la versión esperada. Se conserva la copia anterior.');
       if (pathExists(destinationPath)) fs.renameSync(destinationPath, previousPath);
       fs.renameSync(tempPath, destinationPath);
       try { fs.rmSync(previousPath, { force: true }); } catch {}
@@ -322,6 +353,7 @@ const defaultConfig = () => ({
 });
 
 const getDeviceId = () => {
+  if (process.env.ARMI_SYNC_DEVICE_ID) return crypto.createHash('sha1').update(process.env.ARMI_SYNC_DEVICE_ID).digest('hex').slice(0, 16);
   const source = [os.hostname(), process.env.USERNAME || process.env.USER || '', process.platform].join('|');
   return crypto.createHash('sha1').update(source).digest('hex').slice(0, 16);
 };
@@ -342,12 +374,33 @@ const readConfig = () => {
   return merged;
 };
 
+const frontendStateStore = createFrontendStateStore(db, frontendStatePath);
+
 const incrementalMirrorSync = createIncrementalMirrorSync({
   db,
   runtimeFolder,
   excludedTables: Array.from(SYNC_EXCLUDED_TABLES),
   getDeviceId,
   getSourceSignature: () => getDatabaseSourceSignature(),
+  isMaintenanceAllowed: mirror => {
+    const config = readConfig();
+    return config.mode === 'drive_mirror' && resolveEffectiveMirrorPath(config).mirrorPath === mirror;
+  },
+  getBootstrapSeed: () => {
+    const seed = readJsonFile(path.join(databaseRoot, '.bundled-seed.json'), null);
+    if (!seed) return null;
+    if (seed.tables) return { tables: seed.tables };
+    const sourcePath = path.join(process.resourcesPath || appRoot, 'database', 'armi.db');
+    if (!fs.existsSync(sourcePath) || path.resolve(sourcePath) === path.resolve(databaseRoot, 'armi.db')) return null;
+    const source = new Database(sourcePath, { readonly: true });
+    try {
+      const tables = {};
+      for (const { name } of source.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()) {
+        if (!SYNC_EXCLUDED_TABLES.has(name)) tables[name] = source.prepare('SELECT * FROM ' + quoteIdentifier(name)).all();
+      }
+      return { tables };
+    } finally { source.close(); }
+  },
 });
 
 const saveConfig = (patch) => {
@@ -796,6 +849,30 @@ const buildLocalManifest = () => {
   return buildManifestFromFiles(serializeLocalFiles(), 'local-app-storage', 'local');
 };
 
+const buildLightweightLocalManifest = (fallbackManifest = null) => {
+  const databaseStats = safeStat(path.join(databaseRoot, 'armi.db'));
+  const frontendStats = safeStat(frontendStatePath);
+  const latestMtime = Math.max(Number(databaseStats?.mtimeMs || 0), Number(frontendStats?.mtimeMs || 0));
+  const digest = crypto.createHash('sha256')
+    .update(`${getDatabaseSourceSignature()}|${frontendStats?.size || 0}:${frontendStats?.mtimeMs || 0}`)
+    .digest('hex');
+  return {
+    ...(fallbackManifest || {}),
+    version: 2,
+    provider: 'local-app-storage',
+    storageMode: 'local',
+    generatedAt: latestMtime ? new Date(latestMtime).toISOString() : new Date().toISOString(),
+    digest,
+    summary: {
+      entities: getSyncEntityCounts(),
+      includesAttendance: true,
+      includesFaceProfiles: true,
+    },
+    files: Array.isArray(fallbackManifest?.files) ? fallbackManifest.files : [],
+    lightweight: true,
+  };
+};
+
 export const buildSyncPackageBase64 = async (manifest) => {
   const absolutePathByRelativePath = new Map(serializeLocalFiles().map((file) => [file.relativePath, file.absolutePath]));
   const packagePath = path.join(runtimeFolder, `sync-package-${process.pid}-${crypto.randomUUID()}.zip.tmp`);
@@ -941,22 +1018,31 @@ const listContinuousLocalResources = () => continuousResourceDirectories
   .filter((file) => normalizeRequestedResourcePath(file.relativePath))
   .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
 
-const getContinuousResourceSourceSignature = () => crypto
+const buildContinuousResourceSourceSignature = (files) => crypto
   .createHash('sha1')
-  .update(listContinuousLocalResources()
+  .update(files
     .map((file) => `${file.relativePath}:${file.size}:${file.sourceMtimeMs}`)
     .join('|'))
   .digest('hex')
   .slice(0, 20);
+const getContinuousResourceSourceSignature = () => buildContinuousResourceSourceSignature(listContinuousLocalResources());
 
-const readContinuousMirrorResourceCatalog = (mirrorPath) => {
+const readResourceMetadata = async (file, field) => {
+  const result = await readMirrorJsonResult(file);
+  if (result.status === 'missing') return null;
+  if (result.status !== 'ready' || !Array.isArray(result.value?.[field])) {
+    throw new Error('Esperando verificar el catálogo de archivos de Drive. Se conservan los archivos y se reintentará sin volver a copiarlos.');
+  }
+  return result.value;
+};
+
+const readContinuousMirrorResourceCatalog = async (mirrorPath) => {
   const catalogRoot = getContinuousResourceCatalogRoot(mirrorPath);
   if (!pathExists(catalogRoot)) return [];
   const byPath = new Map();
-  fs.readdirSync(catalogRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .forEach((entry) => {
-      const catalog = readJsonFile(path.join(catalogRoot, entry.name), null);
+  for (const entry of (await fs.promises.readdir(catalogRoot, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))) {
+      const catalog = await readResourceMetadata(path.join(catalogRoot, entry.name), 'resources');
       (Array.isArray(catalog?.resources) ? catalog.resources : []).forEach((resource) => {
         const relativePath = normalizeRequestedResourcePath(resource?.relativePath);
         if (!relativePath) return;
@@ -971,16 +1057,16 @@ const readContinuousMirrorResourceCatalog = (mirrorPath) => {
           byPath.set(relativePath, candidate);
         }
       });
-    });
+    }
   return [...byPath.values()];
 };
 
-const refreshExpectedResourceCatalogFromMirror = (mirrorPath) => {
-  const manifestResources = (readMirrorManifest(mirrorPath)?.files || [])
+const refreshExpectedResourceCatalogFromMirror = async (mirrorPath) => {
+  const manifestResources = ((await readResourceMetadata(getMirrorFilePath(mirrorPath, 'manifest.json'), 'files'))?.files || [])
     .filter(isResourceFile)
     .map(({ relativePath, size, checksum }) => ({ relativePath, size: Number(size || 0), checksum: String(checksum || ''), updatedAt: '' }));
   const byPath = new Map(manifestResources.map((resource) => [resource.relativePath, resource]));
-  readContinuousMirrorResourceCatalog(mirrorPath).forEach((resource) => byPath.set(resource.relativePath, resource));
+  (await readContinuousMirrorResourceCatalog(mirrorPath)).forEach((resource) => byPath.set(resource.relativePath, resource));
   const resources = [...byPath.values()];
   writeJsonAtomic(expectedResourceCatalogPath, {
     format: 2,
@@ -991,19 +1077,36 @@ const refreshExpectedResourceCatalogFromMirror = (mirrorPath) => {
   return resources;
 };
 
-export const publishContinuousResourcesToMirror = async (mirrorPath) => {
+export const publishContinuousResourcesToMirror = async (mirrorPath, localResources = null) => {
   ensureMirrorStructure(mirrorPath);
   const deviceId = getDeviceId();
   const catalogRoot = getContinuousResourceCatalogRoot(mirrorPath);
   ensureDir(catalogRoot);
   const catalogPath = path.join(catalogRoot, `${deviceId}.json`);
-  const previous = readJsonFile(catalogPath, { resources: [] });
+  // A slow/unreadable catalog is never an empty catalog. Stop before copying.
+  const previous = await readResourceMetadata(catalogPath, 'resources') || { resources: [] };
   const previousByPath = new Map((previous.resources || []).map((resource) => [resource.relativePath, resource]));
+  // Other PCs and legacy snapshots may already have published the same content.
+  const knownResources = await readContinuousMirrorResourceCatalog(mirrorPath);
+  const manifest = await readResourceMetadata(getMirrorFilePath(mirrorPath, 'manifest.json'), 'files');
+  const knownByPath = new Map();
+  for (const resource of [...(manifest?.files || []), ...knownResources, ...previous.resources]) {
+    if (!knownByPath.has(resource.relativePath)) knownByPath.set(resource.relativePath, []);
+    knownByPath.get(resource.relativePath).push(resource);
+  }
   const resources = [];
   let copiedFiles = 0;
   let copiedBytes = 0;
 
-  for (const file of listContinuousLocalResources()) {
+  const sourceFiles = Array.isArray(localResources) ? localResources : listContinuousLocalResources();
+  const pendingFiles = [];
+  const progress = { phase: 'checking', completedFiles: 0, totalFiles: sourceFiles.length,
+    completedBytes: 0, totalBytes: sourceFiles.reduce((sum, file) => sum + file.size, 0),
+    currentFile: '', reviewedFiles: 0, unchangedFiles: 0 };
+  updateContinuousMirrorState({ progress });
+  for (const file of sourceFiles) {
+    progress.currentFile = file.relativePath;
+    updateContinuousMirrorState({ progress: { ...progress } });
     const destinationPath = getMirrorFilePath(mirrorPath, file.relativePath);
     const previousResource = previousByPath.get(file.relativePath);
     let checksum = '';
@@ -1012,24 +1115,77 @@ export const publishContinuousResourcesToMirror = async (mirrorPath) => {
       && Number(previousResource.sourceMtimeMs || 0) === file.sourceMtimeMs
       && String(previousResource.checksum || '');
     if (metadataUnchanged) checksum = String(previousResource.checksum);
-    else checksum = hashFile(file.absolutePath);
+    else {
+      const hash = crypto.createHash('sha256');
+      for await (const chunk of fs.createReadStream(file.absolutePath)) hash.update(chunk);
+      checksum = hash.digest('hex');
+    }
 
     const destinationStats = safeStat(destinationPath);
-    let destinationMatches = Number(destinationStats?.size ?? -1) === file.size;
-    if (destinationMatches && !metadataUnchanged) destinationMatches = hashFile(destinationPath) === checksum;
-    if (!destinationMatches) {
-      await copyFileAtomicStreaming(file.absolutePath, destinationPath);
-      copiedFiles += 1;
-      copiedBytes += file.size;
+    // Compare against published metadata; reading the destination would
+    // download a Drive placeholder merely to decide whether to upload a file.
+    const knownVersions = knownByPath.get(file.relativePath) || [];
+    const versionTime = resource => resourceCatalogTimestamp(resource.updatedAt)
+      || Number(resource.sourceMtimeMs || resource.mtimeMs || 0);
+    const newestTime = Math.max(0, ...knownVersions.map(versionTime));
+    const latestVersions = knownVersions.filter(resource => versionTime(resource) === newestTime);
+    const contentPublished = latestVersions.length > 0 && latestVersions.every(resource =>
+      Number(resource.size) === file.size && resource.checksum === checksum);
+    let destinationMatches = contentPublished && Number(destinationStats?.size ?? -1) === file.size;
+    let preserveVersion = false;
+    if (!destinationMatches && destinationStats?.isFile()) {
+      const mirrorHash = await resourceChecksum(destinationPath);
+      if (mirrorHash === checksum) destinationMatches = true;
+      else if (previousResource?.checksum === checksum) {
+        // Only the other PC changed the file. Do not overwrite it with this stale copy.
+        preserveVersion = true;
+      } else if (!previousResource?.checksum || previousResource.checksum !== mirrorHash) {
+        await resourceConflicts.capture({ relativePath: file.relativePath, localPath: file.absolutePath, mirrorPath: destinationPath });
+        preserveVersion = true;
+      }
     }
-    resources.push({
+    if (!destinationMatches && !preserveVersion) {
+      pendingFiles.push({ file, destinationPath });
+    } else progress.unchangedFiles += 1;
+    if (preserveVersion) { if (previousResource) resources.push(previousResource); }
+    else resources.push({
       relativePath: file.relativePath,
       size: file.size,
       checksum,
       sourceMtimeMs: file.sourceMtimeMs,
-      updatedAt: new Date(file.sourceMtimeMs || Date.now()).toISOString(),
+      updatedAt: new Date(contentPublished ? newestTime || file.sourceMtimeMs || Date.now()
+        : Math.max(Date.now(), newestTime + 1)).toISOString(),
     });
+    progress.completedFiles += 1;
+    progress.reviewedFiles += 1;
+    progress.completedBytes += file.size;
+    updateContinuousMirrorState({ progress: { ...progress } });
   }
+
+  // Only files which actually need copying enter the upload denominator.
+  // Checking unchanged files is a separate, explicitly labelled phase.
+  Object.assign(progress, { phase: 'copying', completedFiles: 0, totalFiles: pendingFiles.length,
+    completedBytes: 0, totalBytes: pendingFiles.reduce((sum, {file}) => sum + file.size, 0), currentFile: '' });
+  updateContinuousMirrorState({ progress: { ...progress } });
+  for (const {file, destinationPath} of pendingFiles) {
+    progress.currentFile = file.relativePath;
+    updateContinuousMirrorState({ progress: { ...progress } });
+    const bytesBeforeFile = progress.completedBytes;
+    await copyFileAtomicStreaming(file.absolutePath, destinationPath, ({ copiedBytes: fileBytes }) => {
+      updateContinuousMirrorState({ progress: { ...progress, completedBytes: bytesBeforeFile + fileBytes } });
+    });
+    copiedFiles += 1;
+    copiedBytes += file.size;
+    progress.completedFiles = copiedFiles;
+    progress.completedBytes = copiedBytes;
+    updateContinuousMirrorState({ progress: { ...progress } });
+  }
+  Object.assign(progress, { phase: 'catalog', currentFile: '' });
+  updateContinuousMirrorState({ progress: { ...progress } });
+
+  // A missing local download is not a deletion of a version already published.
+  const localPaths = new Set(sourceFiles.map(file => file.relativePath));
+  for (const resource of previous.resources) if (!localPaths.has(resource.relativePath)) resources.push(resource);
 
   writeJsonAtomic(catalogPath, {
     format: 1,
@@ -1037,16 +1193,27 @@ export const publishContinuousResourcesToMirror = async (mirrorPath) => {
     generatedAt: new Date().toISOString(),
     resources,
   });
-  const visibleResources = refreshExpectedResourceCatalogFromMirror(mirrorPath);
-  return { copiedFiles, copiedBytes, publishedFiles: resources.length, visibleFiles: visibleResources.length };
+  const visibleResources = await refreshExpectedResourceCatalogFromMirror(mirrorPath);
+  return {
+    copiedFiles,
+    copiedBytes,
+    publishedFiles: resources.length,
+    visibleFiles: visibleResources.length,
+    sourceSignature: buildContinuousResourceSourceSignature(sourceFiles),
+    conflicts: resourceConflicts.list().length,
+  };
 };
 
-const runIncrementalMirrorSync = async (mirrorPath) => incrementalMirrorSync.run({
-  mirrorPath,
-  mirrorDatabaseDumpPath: mirrorPath
-    ? getMirrorFilePath(mirrorPath, 'database/database-dump.json')
-    : '',
-});
+const runIncrementalMirrorSync = async (mirrorPath) => {
+  const result = await incrementalMirrorSync.run({
+    mirrorPath,
+    mirrorDatabaseDumpPath: mirrorPath ? getMirrorFilePath(mirrorPath, 'database/database-dump.json') : '',
+  });
+  if (result.success && !result.data?.alreadyRunning && (result.data?.appliedOperations > 0 || result.data?.identityMigrationApplied)) {
+    receivedChanges = { operations: Math.max(1,result.data.appliedOperations), completedAt: new Date().toISOString() };
+  }
+  return result;
+};
 
 const verifyMirrorIntegrity = (mirrorPath, manifest) => {
   if (!manifest) {
@@ -1158,12 +1325,14 @@ export const ensureMirrorResourceAvailable = async (requestedRelativePath) => {
     }
     expected = { relativePath, size: Number(uncataloguedStats.size || 0), checksum: '' };
   }
-  if (Number(safeStat(localPath)?.size ?? -1) === Number(expected.size || 0)) {
+  const localStatsBefore = safeStat(localPath);
+  if (Number(localStatsBefore?.size ?? -1) === Number(expected.size || 0)
+    && (!expected.checksum || await resourceChecksum(localPath) === expected.checksum)) {
     return { success: true, code: 'available', localPath };
   }
 
   const existing = activeResourceTransfers.get(relativePath);
-  if (existing?.promise) return existing.promise;
+  if (existing?.promise && existing.state === 'downloading') return existing.promise;
 
   const mirrorPath = String(catalog.mirrorPath || discoveredMirrorPath || '').trim();
   const mirrorFilePath = mirrorPath ? getMirrorFilePath(mirrorPath, relativePath) : '';
@@ -1178,6 +1347,7 @@ export const ensureMirrorResourceAvailable = async (requestedRelativePath) => {
       observedAt: new Date().toISOString(),
     };
     activeResourceTransfers.set(relativePath, waitingState);
+    downloadProgress.begin(relativePath, waitingState.totalBytes, 'waiting');
     setTimeout(() => {
       if (activeResourceTransfers.get(relativePath) === waitingState) activeResourceTransfers.delete(relativePath);
     }, 10000);
@@ -1188,6 +1358,17 @@ export const ensureMirrorResourceAvailable = async (requestedRelativePath) => {
     };
   }
 
+  if (localStatsBefore?.isFile() && expected.checksum) {
+    const localHash = await resourceChecksum(localPath);
+    const ownCatalog = await readResourceMetadata(path.join(getContinuousResourceCatalogRoot(mirrorPath), `${getDeviceId()}.json`), 'resources');
+    const baseline = ownCatalog?.resources.find(file => file.relativePath === relativePath);
+    if (localHash !== expected.checksum && localHash !== baseline?.checksum) {
+      const conflict = await resourceConflicts.capture({ relativePath, localPath, mirrorPath: mirrorFilePath });
+      if (conflict) return { success: false, code: 'resource-conflict', message: 'Este recurso tiene dos versiones. El docente puede elegir cuál conservar en el aviso de sincronización.' };
+      return { success: true, code: 'available', localPath };
+    }
+  }
+
   const state = {
     relativePath,
     fileName: path.basename(relativePath),
@@ -1196,12 +1377,14 @@ export const ensureMirrorResourceAvailable = async (requestedRelativePath) => {
     totalBytes: Number(expected.size || 0),
     startedAt: new Date().toISOString(),
   };
+  downloadProgress.begin(relativePath, state.totalBytes);
   const promise = (async () => {
     try {
       await copyFileAtomicStreaming(mirrorFilePath, localPath, ({ copiedBytes, totalBytes }) => {
         state.copiedBytes = copiedBytes;
         state.totalBytes = Number(expected.size || totalBytes || 0);
-      });
+        downloadProgress.update(relativePath, state.copiedBytes, state.totalBytes);
+      }, { checksum: expected.checksum, size: Number(expected.size || 0) });
       const localStats = safeStat(localPath);
       if (Number(localStats?.size || 0) !== Number(expected.size || 0)
         || (expected.checksum && hashFile(localPath) !== expected.checksum)) {
@@ -1210,13 +1393,15 @@ export const ensureMirrorResourceAvailable = async (requestedRelativePath) => {
       state.state = 'available';
       state.copiedBytes = state.totalBytes;
       state.completedAt = new Date().toISOString();
+      downloadProgress.complete(relativePath);
       return { success: true, code: 'downloaded', localPath };
     } catch (error) {
       state.state = 'error';
       state.message = `No se pudo descargar el recurso desde Drive. Puede seguir subiendose desde la otra PC o Drive puede estar pausado.${error?.message ? ` Detalle: ${error.message}` : ''}`;
+      downloadProgress.fail(relativePath, state.message);
       return { success: false, code: 'download-failed', message: state.message };
     } finally {
-      setTimeout(() => activeResourceTransfers.delete(relativePath), 5000);
+      setTimeout(() => { if (activeResourceTransfers.get(relativePath) === state) activeResourceTransfers.delete(relativePath); }, 5000);
     }
   })();
   activeResourceTransfers.set(relativePath, { ...state, promise });
@@ -1285,7 +1470,13 @@ const getLikelyUserHome = () => {
   return path.resolve(home);
 };
 
+let cachedDriveCandidates = { userKey: '', checkedAt: 0, candidates: [] };
 const detectGoogleDriveCandidates = (syncUserKey = DEFAULT_SYNC_USER_KEY) => {
+  const cacheKey = sanitizeUserScope(syncUserKey);
+  if (cachedDriveCandidates.userKey === cacheKey
+    && Date.now() - cachedDriveCandidates.checkedAt < 120_000) {
+    return cachedDriveCandidates.candidates.map((candidate) => ({ ...candidate }));
+  }
   const home = getLikelyUserHome();
   const directCandidates = [
     path.join(home, 'Google Drive'),
@@ -1320,10 +1511,12 @@ const detectGoogleDriveCandidates = (syncUserKey = DEFAULT_SYNC_USER_KEY) => {
     }
   }
 
-  return Array.from(discovered).map((basePath) => ({
+  const candidates = Array.from(discovered).map((basePath) => ({
     basePath,
     suggestedMirrorPath: buildSuggestedMirrorPath(basePath, syncUserKey),
   }));
+  cachedDriveCandidates = { userKey: cacheKey, checkedAt: Date.now(), candidates };
+  return candidates.map((candidate) => ({ ...candidate }));
 };
 
 const detectExistingMirrorPaths = (syncUserKey = DEFAULT_SYNC_USER_KEY, driveCandidates = null) => {
@@ -1354,27 +1547,18 @@ const detectExistingMirrorPaths = (syncUserKey = DEFAULT_SYNC_USER_KEY, driveCan
   return Array.from(discovered);
 };
 
-let cachedDriveProcessState = { checkedAt: 0, running: false };
-let cachedInternetState = { checkedAt: 0, online: null };
-const isGoogleDriveDesktopRunning = async () => {
-  if (process.platform !== 'win32') return null;
-  if (Date.now() - cachedDriveProcessState.checkedAt < 15000) {
-    return cachedDriveProcessState.running;
-  }
-  const running = await new Promise((resolve) => {
-    execFile(
-      'tasklist.exe',
-      ['/FI', 'IMAGENAME eq GoogleDriveFS.exe', '/NH'],
-      { windowsHide: true, encoding: 'utf8', timeout: 3000 },
-      (error, stdout) => resolve(!error && /GoogleDriveFS\.exe/i.test(String(stdout || '')))
-    );
-  });
-  cachedDriveProcessState = { checkedAt: Date.now(), running };
-  return running;
-};
+let cachedDriveExecutable = { checkedAt: 0, path: '' };
+const internetConnectivity = createInternetConnectivityMonitor({ onChange: () => {
+  if (readConfig().mode === 'drive_mirror') requestContinuousMirrorSync({ delayMs: 150 });
+} });
+export const getInternetConnectivity = (options) => internetConnectivity.check(options);
+const driveDesktopLauncher = createDriveDesktopLauncher({ automaticEnabled: process.env.ARMI_DISABLE_DRIVE_LAUNCH !== '1' });
 
 const detectGoogleDriveDesktopExecutable = () => {
   if (process.platform !== 'win32') return '';
+  if (Date.now() - cachedDriveExecutable.checkedAt < 10 * 60_000) {
+    return cachedDriveExecutable.path;
+  }
   const candidates = [
     path.join(String(process.env.LOCALAPPDATA || ''), 'Google', 'DriveFS', 'GoogleDriveFS.exe'),
     path.join(String(process.env.ProgramFiles || 'C:\\Program Files'), 'Google', 'Drive File Stream', 'GoogleDriveFS.exe'),
@@ -1386,44 +1570,13 @@ const detectGoogleDriveDesktopExecutable = () => {
       .sort((left, right) => right.name.localeCompare(left.name, undefined, { numeric: true }))
       .forEach((entry) => candidates.unshift(path.join(versionRoot, entry.name, 'GoogleDriveFS.exe')));
   } catch {}
-  return candidates.find((candidate) => pathExists(candidate)) || '';
+  const executablePath = candidates.find((candidate) => pathExists(candidate)) || '';
+  cachedDriveExecutable = { checkedAt: Date.now(), path: executablePath };
+  return executablePath;
 };
 
-const launchGoogleDriveDesktop = (executablePath) => {
-  if (!executablePath) return false;
-  try {
-    const child = spawn(executablePath, [], {
-      detached: true,
-      windowsHide: true,
-      stdio: 'ignore',
-    });
-    child.unref();
-    cachedDriveProcessState = { checkedAt: 0, running: false };
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const checkInternetConnection = async () => {
-  if (Date.now() - cachedInternetState.checkedAt < 30_000) return cachedInternetState.online;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3500);
-  let online = false;
-  try {
-    const response = await fetch('https://www.googleapis.com/generate_204', {
-      method: 'GET',
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-    online = response.ok || response.status === 204;
-  } catch {
-    online = false;
-  } finally {
-    clearTimeout(timer);
-  }
-  cachedInternetState = { checkedAt: Date.now(), online };
-  return online;
+const checkInternetConnection = async ({ waitForFresh = true } = {}) => {
+  return (await internetConnectivity.check({ wait: waitForFresh })).online;
 };
 
 const getDrivePauseObservation = () => {
@@ -1455,15 +1608,15 @@ const getDrivePauseObservation = () => {
 };
 
 const getDriveDesktopHealth = async (config, resolvedMirror, driveCandidates) => {
-  let processRunning = await isGoogleDriveDesktopRunning();
   const executablePath = detectGoogleDriveDesktopExecutable();
-  const installed = !!executablePath || driveCandidates.length > 0;
-  let launchAttempted = false;
-  if (config.mode === 'drive_mirror' && processRunning === false && executablePath) {
-    launchAttempted = launchGoogleDriveDesktop(executablePath);
-    if (launchAttempted) processRunning = null;
-  }
-  const internetOnline = config.mode === 'drive_mirror' ? await checkInternetConnection() : null;
+  const drive = await driveDesktopLauncher.observe({ executablePath, automatic: config.mode === 'drive_mirror' });
+  const { processRunning, launchAttempted } = drive;
+  const installed = processRunning === true || !!executablePath || driveCandidates.length > 0;
+  // Internet no condiciona la escritura segura en la carpeta espejo y no debe
+  // bloquear ni el inicio ni el cierre. El resultado se actualiza en background.
+  const internetOnline = config.mode === 'drive_mirror'
+    ? await checkInternetConnection({ waitForFresh: false })
+    : null;
   const pauseObservation = getDrivePauseObservation();
   const mirrorPath = String(resolvedMirror?.mirrorPath || '').trim();
   const folderAccessible = !!mirrorPath && pathExists(mirrorPath);
@@ -1479,20 +1632,26 @@ const getDriveDesktopHealth = async (config, resolvedMirror, driveCandidates) =>
   } else if (!mirrorPath || !folderAccessible) {
     state = 'folder-missing';
     message = 'La carpeta configurada no esta disponible. Drive puede estar cerrado, desconectado o la carpeta fue movida.';
-  } else if (launchAttempted) {
+  } else if (drive.starting) {
     state = 'starting';
-    message = 'ARMI encontro Google Drive para escritorio y lo esta abriendo automaticamente.';
+    message = 'Google Drive esta iniciando. ARMI no repetira el intento automaticamente en esta sesion.';
   } else if (processRunning === false) {
     state = 'app-not-running';
     message = installed
-      ? 'Google Drive para escritorio esta instalado, pero no pudo iniciarse automaticamente. Abrelo para enviar los cambios.'
+      ? 'Google Drive esta cerrado. Usa Abrir Google Drive para enviar los cambios; la copia local sigue disponible.'
       : 'Google Drive para escritorio no esta instalado. Los cambios seguiran seguros en la carpeta local configurada.';
+  } else if (processRunning === null) {
+    state = 'unknown';
+    message = 'No pudimos comprobar si Drive esta abierto. No intentaremos abrirlo mientras su estado sea desconocido.';
   } else if (pauseObservation.paused === true) {
     state = 'paused';
     message = 'Google Drive informa que la sincronizacion esta pausada. Los cambios de ARMI estan seguros en esta PC, pero siguen pendientes de subir.';
   } else if (internetOnline === false) {
     state = 'offline';
-    message = 'Google Drive esta abierto y la copia local es accesible, pero no hay conexion a internet. ARMI seguira guardando y enviara los cambios al reconectarse.';
+    message = 'Las comprobaciones de red indican que no hay conexion a Internet. Los cambios locales se conservan y se reintentara automaticamente.';
+  } else if (internetOnline !== true) {
+    state = 'unknown';
+    message = 'Drive esta abierto y la carpeta local es accesible. No se pudo verificar internet; esto no confirma una desconexion. ARMI seguira copiando los cambios al espejo local.';
   } else {
     state = 'ready';
     message = 'Google Drive esta ejecutandose y la carpeta de ARMI esta accesible.';
@@ -1516,6 +1675,14 @@ const getDriveDesktopHealth = async (config, resolvedMirror, driveCandidates) =>
       ? 'No se pudo confirmar desde Drive si la sincronizacion esta pausada.'
       : `Ultimo estado informado por Google Drive: ${pauseObservation.paused ? 'pausado' : 'activo'}.`,
   };
+};
+
+export const openGoogleDriveDesktop = async () => {
+  const executablePath = detectGoogleDriveDesktopExecutable();
+  if (!executablePath) return { success: false, message: 'No encontramos Google Drive instalado.' };
+  const result = await driveDesktopLauncher.observe({ executablePath, manual: true });
+  requestContinuousMirrorSync({ delayMs: 250 });
+  return { success: result.processRunning === true || result.starting, message: result.error || (result.processRunning === true ? 'Google Drive ya esta abierto.' : result.starting ? 'Google Drive esta iniciando.' : 'No pudimos confirmar el estado de Drive. Vuelve a intentarlo.'), data: result };
 };
 
 const resolveEffectiveMirrorPath = (configLike = {}) => {
@@ -1548,10 +1715,10 @@ const resolveEffectiveMirrorPath = (configLike = {}) => {
   };
 };
 
-const saveFrontendStateSnapshot = (payload = {}) => {
-  const normalized = normalizeFrontendStatePayload(payload);
-  writeJsonAtomic(frontendStatePath, normalized);
-  return normalized;
+const saveFrontendStateSnapshot = (payload = {}, changedKeys = []) => {
+  const result = frontendStateStore.observe(payload, changedKeys);
+  if (!result.unchanged) requestContinuousMirrorSync({ delayMs: 750 });
+  return result;
 };
 
 const readPendingLocalState = () => readJsonFile(pendingLocalStatePath, null);
@@ -1578,9 +1745,26 @@ const persistPendingLocalState = (payload = {}) => {
 };
 
 export const markPendingLocalBackup = async (payload = {}) => {
+  if (payload.reason === 'close-attempt' && payload.deferRemote === true && readConfig().mode === 'drive_mirror') {
+    // Closing is a local durability boundary, not a full Drive export. SQLite
+    // already persisted the edits and its incremental outbox; checkpoint what
+    // can be checkpointed without waiting for readers or a remote filesystem.
+    db.pragma('wal_checkpoint(PASSIVE)');
+    frontendStateStore.snapshot();
+    const previous = readPendingLocalState();
+    const protectedConflict = /another-pc|fewer-records|conflict/.test(previous?.reason || '');
+    const pending = persistPendingLocalState({
+      reason: protectedConflict ? previous.reason : 'close-attempt',
+      restorePoint: previous?.restorePoint || '',
+      manifest: previous?.manifest || null,
+      note: protectedConflict ? previous.note : 'Datos guardados en esta PC. La sincronizacion pendiente se reintentara al abrir ARMI.',
+    });
+    return { success: true, data: { ...pending, closePrepared: true, localSaved: true, cloudDeliveryPending: true } };
+  }
   stageLocalDatabaseDump();
   const manifest = buildManifestFromFiles(serializeLocalFiles(), 'local-pending-backup', 'local');
-  writeJsonAtomic(localManifestPath, manifest);
+  // localManifest is the last synchronized baseline. Advancing it before the
+  // upload succeeds makes this PC's own edits look like another-PC conflict.
   return {
     success: true,
     data: persistPendingLocalState({
@@ -1865,8 +2049,9 @@ export const clearCloudVersionHistory = async () => {
 };
 
 const mergeAttendanceTablesFromDump = (dump) => {
-  const attendanceRows = Array.isArray(dump?.tables?.asistencia_registros) ? dump.tables.asistencia_registros : [];
-  const faceRows = Array.isArray(dump?.tables?.asistencia_rostros) ? dump.tables.asistencia_rostros : [];
+  const translate = createDumpReferenceTranslator(db,dump);
+  const attendanceRows = (Array.isArray(dump?.tables?.asistencia_registros) ? dump.tables.asistencia_registros : []).map(row => translate('asistencia_registros',row));
+  const faceRows = (Array.isArray(dump?.tables?.asistencia_rostros) ? dump.tables.asistencia_rostros : []).map(row => translate('asistencia_rostros',row));
   let insertedAttendance = 0;
   let updatedAttendance = 0;
   let insertedFaces = 0;
@@ -2000,7 +2185,12 @@ const buildStudentIdentityKey = (row = {}, scope = 'student') => {
 };
 
 const mergeStudentsTablesFromDump = (dump) => {
-  const studentRows = Array.isArray(dump?.tables?.db_estudiantes) ? dump.tables.db_estudiantes : [];
+  const identity = createSyncReferenceIdentity(db);
+  const sourceReferences = identity.legacyCatalog(dump?.tables || {});
+  const incomingStudentRows = Array.isArray(dump?.tables?.db_estudiantes) ? dump.tables.db_estudiantes : [];
+  const incomingStudentTombstones = Array.isArray(dump?.tables?.student_deletion_tombstones)
+    ? dump.tables.student_deletion_tombstones.map(row => identity.portable('student_deletion_tombstones',row,sourceReferences))
+    : [];
   const graduateRows = Array.isArray(dump?.tables?.db_egresados) ? dump.tables.db_egresados : [];
   let insertedStudents = 0;
   let updatedStudents = 0;
@@ -2014,6 +2204,20 @@ const mergeStudentsTablesFromDump = (dump) => {
     return leftTime - rightTime;
   };
 
+  const localStudentTombstones = db.prepare('SELECT student_id, dni FROM student_deletion_tombstones').all()
+    .map(row => identity.portable('student_deletion_tombstones',row));
+  const tombstoneIds = new Set();
+  const tombstoneDnis = new Set();
+  [...localStudentTombstones, ...incomingStudentTombstones].forEach((row) => {
+    const id = String(row?.student_id || '').trim();
+    const dni = String(row?.dni || '').trim();
+    if (id.startsWith('@student:')) tombstoneIds.add(id);
+    if (/^\d{8}$/.test(dni) && !/^(\d)\1{7}$/.test(dni)) tombstoneDnis.add(dni);
+  });
+  const isDeletedStudent = (row) => tombstoneDnis.has(String(row?.dni || '').trim())
+    || tombstoneIds.has(identity.catalog().students[String(row?.id)]?.token);
+  const studentRows = incomingStudentRows.filter((row) => !tombstoneDnis.has(String(row.dni || '').trim())
+    && !tombstoneIds.has(sourceReferences.students[String(row.id)]?.token));
   const existingStudents = db.prepare('SELECT * FROM db_estudiantes').all();
   const existingGraduates = db.prepare('SELECT * FROM db_egresados').all();
   const studentKeyMap = new Map(existingStudents.map((row) => [buildStudentIdentityKey(row, 'student'), row]));
@@ -2021,6 +2225,14 @@ const mergeStudentsTablesFromDump = (dump) => {
   const graduateByDni = new Map(existingGraduates.filter((row) => String(row?.dni || '').trim()).map((row) => [String(row.dni).trim(), row]));
 
   const transaction = db.transaction(() => {
+    const saveStudentTombstone = db.prepare(`
+      INSERT INTO student_deletion_tombstones (student_id, dni, student_name, deleted_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(student_id) DO UPDATE SET
+        dni = excluded.dni,
+        student_name = excluded.student_name,
+        deleted_at = excluded.deleted_at
+    `);
     const insertStudent = db.prepare(`
       INSERT INTO db_estudiantes (
         nivel, dni, estudiantes, grado, secc, fecha_nacimiento, gmail, outlook, estado, grupo, sexo, edad, updated_at
@@ -2042,6 +2254,19 @@ const mergeStudentsTablesFromDump = (dump) => {
       SET estudiante_id_origen = ?, nivel = ?, dni = ?, estudiantes = ?, grado = ?, secc = ?, fecha_nacimiento = ?, gmail = ?, outlook = ?, estado = ?, grupo = ?, sexo = ?, edad = ?, egresado_at = ?
       WHERE id = ?
     `);
+
+    incomingStudentTombstones.forEach((row) => {
+      const portable = identity.portable('student_deletion_tombstones',row,sourceReferences);
+      const studentId = String(portable?.student_id || '').trim();
+      if (!studentId) return;
+      saveStudentTombstone.run(
+        studentId,
+        String(row?.dni || '').trim(),
+        String(row?.student_name || '').trim(),
+        row?.deleted_at || new Date().toISOString(),
+      );
+    });
+    existingStudents.filter(isDeletedStudent).forEach((row) => deleteStudent.run(row.id));
 
     studentRows.forEach((row) => {
       const key = buildStudentIdentityKey(row, 'student');
@@ -2191,7 +2416,7 @@ const detectDestructiveCountRegression = (localCounts, remoteCounts) => {
   };
 };
 
-export const getSyncStatus = async () => {
+const buildSyncStatus = async () => {
   const config = readConfig();
   const resolvedMirror = resolveEffectiveMirrorPath(config);
   let localManifest = null;
@@ -2199,15 +2424,20 @@ export const getSyncStatus = async () => {
   const driveCandidates = detectGoogleDriveCandidates(config.syncUserKey);
   const existingMirrorPaths = detectExistingMirrorPaths(config.syncUserKey, driveCandidates);
   const driveDesktopHealth = await getDriveDesktopHealth(config, resolvedMirror, driveCandidates);
-  const incrementalResult = config.mode === 'drive_mirror' && resolvedMirror.mirrorPath
-    ? await runIncrementalMirrorSync(resolvedMirror.mirrorPath)
+  const incrementalInspection = config.mode === 'drive_mirror' && resolvedMirror.mirrorPath
+    ? await incrementalMirrorSync.inspectAsync({ mirrorPath: resolvedMirror.mirrorPath })
     : null;
-  if (incrementalResult?.success) {
-    clearPendingLocalState();
+  const continuousLocalChangesPending = config.mode === 'drive_mirror'
+    && !!resolvedMirror.mirrorPath
+    && getContinuousSourceSignature() !== continuousMirrorSyncedSignature;
+  if (!continuousMirrorTickRunning && (incrementalInspection?.pending
+    || incrementalInspection?.initialized === false
+    || continuousLocalChangesPending)) {
+    requestContinuousMirrorSync({ delayMs: 150 });
   }
   const remoteState = readJsonFile(remoteSyncStatePath, {});
   let mirrorManifest = config.mode === 'drive_mirror' && resolvedMirror.mirrorPath
-    ? readMirrorManifest(resolvedMirror.mirrorPath)
+    ? await readMirrorJsonAsync(getMirrorFilePath(resolvedMirror.mirrorPath, 'manifest.json'))
     : null;
   let remoteUser = null;
   let remoteActivity = null;
@@ -2231,10 +2461,10 @@ export const getSyncStatus = async () => {
       remoteLookupMessage = String(remoteStatus.message || '').trim();
     }
   }
-  const additiveMerge = config.mode === 'drive_mirror' && resolvedMirror.mirrorPath && mirrorManifest
-    ? mergeAdditiveMirrorData(resolvedMirror.mirrorPath, mirrorManifest)
-    : null;
-  localManifest = buildLocalManifest();
+  const additiveMerge = null;
+  // Consultar el estado nunca debe exportar la BD ni recorrer todos los recursos.
+  // Las operaciones manuales de respaldo siguen construyendo el manifiesto completo.
+  localManifest = buildLightweightLocalManifest(savedManifest || mirrorManifest);
   const integrity = config.mode === 'drive_mirror' && resolvedMirror.mirrorPath
     ? verifyMirrorIntegrity(resolvedMirror.mirrorPath, mirrorManifest)
     : { ok: true, code: 'not-applicable', missingFiles: [] };
@@ -2269,21 +2499,35 @@ export const getSyncStatus = async () => {
         ? readLatestMirrorOperation(resolvedMirror.mirrorPath, mirrorManifest)
         : null,
       comparison: integrity.ok
-        ? incrementalResult?.success
-          ? 'in-sync'
-          : compareSyncManifests(localManifest, mirrorManifest, config.mode, savedManifest)
+        ? (incrementalInspection?.pending || continuousLocalChangesPending)
+          ? 'incremental-pending'
+          : incrementalInspection?.initialized
+            ? 'in-sync'
+            : compareSyncManifests(savedManifest || localManifest, mirrorManifest, config.mode, savedManifest)
         : integrity.code === 'missing-manifest'
           ? 'mirror-missing'
           : integrity.code,
       lastFrontendStateAt: readJsonFile(frontendStatePath, null)?.exportedAt || null,
       driveDesktop: {
-        detected: driveCandidates.length > 0,
+        detected: driveDesktopHealth.installed,
         candidates: driveCandidates,
         existingMirrors: existingMirrorPaths,
         ...driveDesktopHealth,
       },
+      internetConnectivity: internetConnectivity.snapshot(),
+      downloadProgress: downloadProgress.snapshot(),
+      resourceConflicts: resourceConflicts.list(),
+      receivedChanges,
+      activeTransfers: Array.from(activeResourceTransfers.values()).map(({ promise: _promise, ...transfer }) => transfer),
+      mirrorTransfer: activeMirrorTransfer ? { ...activeMirrorTransfer } : null,
       pendingLocal: readPendingLocalState(),
-      incrementalSync: incrementalResult?.data || incrementalMirrorSync.getState(),
+      incrementalSync: {
+        ...incrementalMirrorSync.getState(),
+        inspection: {
+          ...(incrementalInspection || {}),
+          continuousLocalChangesPending,
+        },
+      },
       continuousSync: { ...continuousMirrorState },
       resourceDelivery: summarizeResourceDelivery(),
       frontendState: readJsonFile(frontendStatePath, { keys: {} }),
@@ -2298,13 +2542,24 @@ export const getSyncStatus = async () => {
   };
 };
 
+let syncStatusInFlight = null;
+export const getSyncStatus = async () => {
+  if (syncStatusInFlight) return syncStatusInFlight;
+  syncStatusInFlight = buildSyncStatus().finally(() => {
+    syncStatusInFlight = null;
+  });
+  return syncStatusInFlight;
+};
+
 const mergeEvidenceTablesFromDump = (dump, evidenceRoot) => {
-  const incomingRows = Array.isArray(dump?.tables?.evaluacion_evidencias) ? dump.tables.evaluacion_evidencias : [];
+  const translate = createDumpReferenceTranslator(db,dump);
+  const incomingRows = (Array.isArray(dump?.tables?.evaluacion_evidencias) ? dump.tables.evaluacion_evidencias : []).map(row => translate('evaluacion_evidencias',row));
   if (!evidenceRoot || !pathExists(evidenceRoot) || incomingRows.length === 0) {
     return { inserted: 0, updated: 0, waitingForFile: 0 };
   }
   const tableColumns = db.prepare('PRAGMA table_info(evaluacion_evidencias)').all().map((column) => column.name);
   const allowedColumns = new Set(tableColumns.filter((column) => column !== 'id'));
+  const tombstoneKeys = listEvidenceTombstoneKeys(evidenceRoot);
   let inserted = 0;
   let updated = 0;
   let waitingForFile = 0;
@@ -2326,6 +2581,7 @@ const mergeEvidenceTablesFromDump = (dump, evidenceRoot) => {
         return;
       }
       const evidenceKey = String(row?.evidence_key || portableEvidenceKey(relativePath));
+      if (tombstoneKeys.has(evidenceKey)) return;
       const existing = db.prepare(`
         SELECT * FROM evaluacion_evidencias
         WHERE evidence_key = ? OR REPLACE(relative_path, '\\', '/') = ?
@@ -2379,21 +2635,41 @@ const mergeAdditiveMirrorData = (mirrorPath, mirrorManifest) => {
   return { attendance, evidences };
 };
 
-export const getLocalSyncStatus = async () => {
+export const getLocalSyncStatus = async ({ lightweight = false } = {}) => {
   const config = readConfig();
   const resolvedMirror = resolveEffectiveMirrorPath(config);
-  const incrementalResult = config.mode === 'drive_mirror' && resolvedMirror.mirrorPath
-    ? await runIncrementalMirrorSync(resolvedMirror.mirrorPath)
-    : null;
-  if (incrementalResult?.success) clearPendingLocalState();
-  const localManifest = buildLocalManifest();
   const savedManifest = readJsonFile(localManifestPath, null);
   const pendingLocal = readPendingLocalState();
+  const currentSourceSignature = config.mode === 'drive_mirror'
+    ? getContinuousSourceSignature()
+    : '';
+  if (config.mode === 'drive_mirror' && resolvedMirror.mirrorPath) {
+    await internetConnectivity.check({ wait: false });
+    // Polling a finished transfer must not start another one. Only new work
+    // needs the queue; an active pass already owns the completion checkpoint.
+    if (!continuousMirrorTickRunning) {
+      const inspection = await incrementalMirrorSync.inspectAsync({ mirrorPath: resolvedMirror.mirrorPath });
+      if (currentSourceSignature !== continuousMirrorSyncedSignature || !inspection.initialized || inspection.pending) {
+        requestContinuousMirrorSync({ delayMs: 150 });
+      }
+    }
+  }
+  const mirrorPrepared = config.mode === 'drive_mirror'
+    && !!resolvedMirror.mirrorPath
+    && !!continuousMirrorSyncedSignature
+    && currentSourceSignature === continuousMirrorSyncedSignature
+    && ['in-sync', 'waiting-for-drive'].includes(continuousMirrorState.state);
+  // In mirror mode pending changes are determined by the source revision below.
+  // A status read must not export and hash the entire database/resources while
+  // another incremental pass is running. Explicit backup operations still do so.
+  const localManifest = mirrorPrepared ? savedManifest
+    : config.mode === 'drive_mirror' || lightweight ? buildLightweightLocalManifest(savedManifest)
+    : buildLocalManifest();
   const localDigest = getComparableManifestDigest(localManifest);
   const savedDigest = getComparableManifestDigest(savedManifest);
-  const hasUnsyncedChanges = incrementalResult?.success
-    ? false
-    : !savedDigest || localDigest !== savedDigest;
+  const hasUnsyncedChanges = config.mode === 'drive_mirror'
+    ? !mirrorPrepared
+    : lightweight && config.mode === 'local' ? false : !savedDigest || localDigest !== savedDigest;
 
   return {
     success: true,
@@ -2406,21 +2682,52 @@ export const getLocalSyncStatus = async () => {
       localManifest,
       savedManifest,
       pendingLocal,
-      incrementalSync: incrementalResult?.data || incrementalMirrorSync.getState(),
+      incrementalSync: incrementalMirrorSync.getState(),
       continuousSync: { ...continuousMirrorState },
       hasUnsyncedChanges,
-      lastFrontendStateAt: readJsonFile(frontendStatePath, null)?.exportedAt || null,
-      frontendState: readJsonFile(frontendStatePath, { keys: {} }),
+      internetConnectivity: internetConnectivity.snapshot(),
+      activeTransfers: Array.from(activeResourceTransfers.values()).map(({ promise: _promise, ...transfer }) => transfer),
+      mirrorTransfer: activeMirrorTransfer ? { ...activeMirrorTransfer } : null,
+      downloadProgress: downloadProgress.snapshot(),
+      resourceConflicts: resourceConflicts.list(),
+      receivedChanges,
+      mirrorPrepared,
+      ...(lightweight ? {} : {
+        lastFrontendStateAt: readJsonFile(frontendStatePath, null)?.exportedAt || null,
+        frontendState: readJsonFile(frontendStatePath, { keys: {} }),
+      }),
     },
   };
 };
 
 let continuousMirrorTimer = null;
-let continuousMirrorKickTimer = null;
+let continuousMirrorInitialTimer = null;
+let dataMirrorTimer = null;
+let dataMirrorWriteTimer = null;
+let dataMirrorRunning = null;
+
+// Grades and evidence metadata must keep moving even while a large resource
+// copy is waiting for Drive. This lane never copies evidence binaries.
+const runDataMirrorTick = () => {
+  if (dataMirrorRunning) return dataMirrorRunning;
+  dataMirrorRunning = (async () => {
+    const config = readConfig();
+    const mirror = resolveEffectiveMirrorPath(config).mirrorPath;
+    if (config.mode !== 'drive_mirror' || !mirror) return { success: true };
+    const result = await runIncrementalMirrorSync(mirror);
+    if (result.success) frontendStateStore.snapshot();
+    return result;
+  })().finally(() => { dataMirrorRunning = null; });
+  return dataMirrorRunning;
+};
+let continuousMirrorWatchers = [];
+let continuousMirrorWatchedPath = '';
+let continuousMirrorRerunRequested = false;
 let continuousMirrorTickRunning = false;
 let continuousMirrorCandidateSignature = '';
 let continuousMirrorCandidateSince = 0;
 let continuousMirrorSyncedSignature = '';
+let continuousMirrorSyncedResourceSignature = '';
 let continuousMirrorState = {
   enabled: false,
   state: 'inactive',
@@ -2445,13 +2752,46 @@ const updateContinuousMirrorState = (next) => {
   };
 };
 
+const stopContinuousMirrorWatchers = () => {
+  continuousMirrorWatchers.forEach((watcher) => watcher.close());
+  continuousMirrorWatchers = [];
+  continuousMirrorWatchedPath = '';
+};
+
+const ensureContinuousMirrorWatchers = (mirrorPath) => {
+  if (continuousMirrorWatchedPath === mirrorPath) return;
+  stopContinuousMirrorWatchers();
+  const watch = (root, relevant) => {
+    try {
+      const watcher = fs.watch(root, { recursive: true, persistent: false }, (_event, filename) => {
+        if (relevant(String(filename || '').replace(/\\/g, '/'))) requestContinuousMirrorSync({ delayMs: 750 });
+      });
+      watcher.on('error', () => {
+        watcher.close();
+        continuousMirrorWatchedPath = '';
+      });
+      continuousMirrorWatchers.push(watcher);
+    } catch { /* The periodic scan remains active if notifications are unavailable. */ }
+  };
+  watch(uploadsRoot, (name) => name.startsWith('session-resources/') || name.startsWith('user-assets/'));
+  watch(mirrorPath, (name) => name.endsWith('.json') && (
+    name.includes('/incremental-v1/') || name.includes('/resource-catalog-v1/')
+  ));
+  continuousMirrorWatchedPath = mirrorPath;
+};
+
 const runContinuousMirrorTick = async (quietMs) => {
-  if (continuousMirrorTickRunning) return;
+  if (resourceResolutionRunning) return { retry: true };
+  if (continuousMirrorTickRunning) {
+    continuousMirrorRerunRequested = true;
+    return { retry: true };
+  }
   continuousMirrorTickRunning = true;
   try {
     const config = readConfig();
     const effectiveMirror = resolveEffectiveMirrorPath(config);
     if (config.mode !== 'drive_mirror') {
+      stopContinuousMirrorWatchers();
       updateContinuousMirrorState({ enabled: false, state: 'inactive', message: 'El modo carpeta espejo no esta activo.' });
       return;
     }
@@ -2460,8 +2800,13 @@ const runContinuousMirrorTick = async (quietMs) => {
       return;
     }
 
-    updateContinuousMirrorState({ enabled: true, state: 'syncing', message: 'Sincronizando cambios pequeños en segundo plano.' });
-    const incrementalResult = await runIncrementalMirrorSync(effectiveMirror.mirrorPath);
+    ensureContinuousMirrorWatchers(effectiveMirror.mirrorPath);
+    const sourceBeforeSync = getDatabaseSourceSignature();
+    updateContinuousMirrorState({ enabled: true, state: 'syncing', message: 'Sincronizando cambios pequeños en segundo plano.', progress: null });
+    const incrementalInspection = await incrementalMirrorSync.inspectAsync({ mirrorPath: effectiveMirror.mirrorPath });
+    const incrementalResult = (!incrementalInspection.initialized || incrementalInspection.pending)
+      ? await runDataMirrorTick()
+      : { success: true, data: incrementalMirrorSync.getState() };
     if (!incrementalResult?.success) {
       updateContinuousMirrorState({
         enabled: true,
@@ -2469,17 +2814,42 @@ const runContinuousMirrorTick = async (quietMs) => {
         message: incrementalResult?.message || 'Los datos permanecen locales y se reintentara la sincronizacion.',
         lastErrorAt: new Date().toISOString(),
       });
-      return;
+      return { success: false, message: incrementalResult?.message || continuousMirrorState.message };
     }
-    const resourceResult = await publishContinuousResourcesToMirror(effectiveMirror.mirrorPath);
+    // Consume current row events before using a legacy full snapshot as fallback.
+    frontendStateStore.importMissing(await readMirrorJsonAsync(getMirrorFilePath(effectiveMirror.mirrorPath, 'state/frontend-local-storage.json')));
+    frontendStateStore.snapshot();
+    const localResources = listContinuousLocalResources();
+    const resourceSignature = buildContinuousResourceSourceSignature(localResources);
+    const resourceResult = resourceSignature !== continuousMirrorSyncedResourceSignature
+      ? await publishContinuousResourcesToMirror(effectiveMirror.mirrorPath, localResources)
+      : {
+          copiedFiles: 0,
+          copiedBytes: 0,
+          publishedFiles: localResources.length,
+          visibleFiles: (await refreshExpectedResourceCatalogFromMirror(effectiveMirror.mirrorPath)).length,
+          sourceSignature: resourceSignature,
+        };
     const driveHealth = await getDriveDesktopHealth(
       config,
       effectiveMirror,
       detectGoogleDriveCandidates(config.syncUserKey)
     );
-    continuousMirrorSyncedSignature = getContinuousSourceSignature();
+    continuousMirrorSyncedResourceSignature = resourceResult.sourceSignature || resourceSignature;
+    const frontendStats = safeStat(frontendStatePath);
+    continuousMirrorSyncedSignature = [
+      getDatabaseSourceSignature(),
+      frontendStats ? `frontend:${frontendStats.size}:${frontendStats.mtimeMs}` : 'frontend:missing',
+      `resources:${continuousMirrorSyncedResourceSignature}`,
+    ].join('|');
     continuousMirrorCandidateSignature = continuousMirrorSyncedSignature;
     continuousMirrorCandidateSince = Date.now();
+    if (sourceBeforeSync !== getDatabaseSourceSignature()) {
+      continuousMirrorRerunRequested = true;
+      continuousMirrorSyncedSignature = '';
+      updateContinuousMirrorState({ enabled: true, state: 'pending', message: 'Hay cambios nuevos; la siguiente copia ya esta programada.' });
+      return { retry: true };
+    }
     if (driveHealth.state !== 'ready') {
       updateContinuousMirrorState({
         enabled: true,
@@ -2487,6 +2857,15 @@ const runContinuousMirrorTick = async (quietMs) => {
         message: driveHealth.message || 'Los cambios estan seguros en esta PC y esperan a Google Drive.',
         lastErrorAt: new Date().toISOString(),
       });
+      return;
+    }
+    if (incrementalResult.data?.pendingOperations) {
+      updateContinuousMirrorState({ enabled: true, state: 'pending',
+        message: incrementalResult.data.message || 'Drive aun debe entregar cambios pendientes.' });
+      return;
+    }
+    if (resourceConflicts.list().length) {
+      updateContinuousMirrorState({ enabled: true, state: 'needs-review', message: 'Hay recursos con dos versiones. Elige cuál conservar.' });
       return;
     }
     clearPendingLocalState();
@@ -2509,36 +2888,107 @@ const runContinuousMirrorTick = async (quietMs) => {
       message: `La sincronizacion continua reintentara los cambios. ${error?.message || ''}`.trim(),
       lastErrorAt: new Date().toISOString(),
     });
+    return { success: false, message: continuousMirrorState.message };
   } finally {
     continuousMirrorTickRunning = false;
+    if (continuousMirrorRerunRequested) {
+      continuousMirrorRerunRequested = false;
+      requestContinuousMirrorSync({ delayMs: 100 });
+    }
   }
 };
 
+const continuousWriteQueue = createContinuousSyncQueue(() => runContinuousMirrorTick(0));
 export const requestContinuousMirrorSync = ({ delayMs = 1_000 } = {}) => {
-  if (continuousMirrorKickTimer) clearTimeout(continuousMirrorKickTimer);
-  continuousMirrorKickTimer = setTimeout(() => {
-    continuousMirrorKickTimer = null;
-    void runContinuousMirrorTick(0);
-  }, Math.max(100, Number(delayMs) || 1_000));
-  continuousMirrorKickTimer.unref?.();
+  continuousWriteQueue.request(delayMs);
+  if (!dataMirrorWriteTimer) {
+    dataMirrorWriteTimer = setTimeout(() => {
+      dataMirrorWriteTimer = null;
+      void runDataMirrorTick().catch(() => {});
+    }, Math.min(250, delayMs));
+    dataMirrorWriteTimer.unref?.();
+  }
 };
 
-export const startContinuousMirrorSync = ({ intervalMs = 30_000, quietMs = 12_000 } = {}) => {
+export const startContinuousMirrorSync = ({ intervalMs = 30_000, quietMs = 12_000, initialDelayMs = 2_000 } = {}) => {
   if (continuousMirrorTimer) return () => {};
   updateContinuousMirrorState({ enabled: true, state: 'starting', message: 'Iniciando vigilancia continua de la carpeta espejo.' });
   continuousMirrorTimer = setInterval(() => runContinuousMirrorTick(quietMs), intervalMs);
   continuousMirrorTimer.unref?.();
-  setTimeout(() => runContinuousMirrorTick(quietMs), 2_000).unref?.();
+  dataMirrorTimer = setInterval(() => { void runDataMirrorTick().catch(() => {}); }, 5_000);
+  dataMirrorTimer.unref?.();
+  continuousMirrorInitialTimer = setTimeout(() => runContinuousMirrorTick(quietMs), Math.max(500, Number(initialDelayMs) || 2_000));
+  continuousMirrorInitialTimer.unref?.();
   return () => {
     if (continuousMirrorTimer) clearInterval(continuousMirrorTimer);
-    if (continuousMirrorKickTimer) clearTimeout(continuousMirrorKickTimer);
+    incrementalMirrorSync.stopMaintenance();
+    continuousWriteQueue.stop();
+    clearInterval(dataMirrorTimer);
+    clearTimeout(dataMirrorWriteTimer);
+    dataMirrorTimer = null;
+    dataMirrorWriteTimer = null;
+    clearTimeout(continuousMirrorInitialTimer);
+    stopContinuousMirrorWatchers();
     continuousMirrorTimer = null;
-    continuousMirrorKickTimer = null;
+    continuousMirrorInitialTimer = null;
     updateContinuousMirrorState({ enabled: false, state: 'stopped', message: 'La vigilancia continua se detuvo.' });
   };
 };
 
+export const bootstrapPortableState = async (localKeys = {}) => {
+  const config = readConfig();
+  const mirror = resolveEffectiveMirrorPath(config).mirrorPath;
+  const mirrorEnabled = config.mode === 'drive_mirror' && Boolean(mirror);
+  const mirrorAvailable = mirrorEnabled && fs.existsSync(mirror);
+
+  let recoveryPending = false;
+  if (mirrorAvailable) {
+    // Recover small row events independently of media and Drive health. A slow
+    // placeholder must never keep the teacher behind the startup screen.
+    const recovery = (async () => {
+      const result = await runDataMirrorTick();
+      if (!result?.success || result.data?.pendingOperations) return result;
+      frontendStateStore.importMissing({ keys: localKeys });
+      frontendStateStore.snapshot();
+      requestContinuousMirrorSync({ delayMs: 250 });
+      return result;
+    })().catch(error => ({ success: false, message: error.message }));
+    let timeout;
+    const result = await Promise.race([
+      recovery,
+      new Promise(resolve => { timeout = setTimeout(() => resolve(null), 2_500); }),
+    ]);
+    clearTimeout(timeout);
+    recoveryPending = !result?.success || Boolean(result.data?.pendingOperations);
+  } else {
+    frontendStateStore.observe(localKeys);
+  }
+
+  const stored = frontendStateStore.snapshot();
+  const frontendState = recoveryPending
+    ? { ...stored, keys: { ...localKeys, ...stored.keys } }
+    : stored;
+  frontendStateStore.acknowledge(frontendState.keys);
+
+  // New local settings still publish through the shared continuous queue.
+  if (mirrorEnabled) {
+    requestContinuousMirrorSync({ delayMs: 250 });
+  }
+
+  return {
+    success: true,
+    data: {
+      frontendState,
+      continuousSync: { ...continuousMirrorState },
+      recoveryPending,
+      mirrorAvailable,
+    },
+  };
+};
+
 export const getContinuousMirrorSyncState = () => ({ ...continuousMirrorState });
+
+export const isContinuousMirrorSyncBusy = () => continuousMirrorTickRunning;
 
 export const updateSyncConfig = async (payload = {}) => {
   const mode = payload.mode === 'drive_mirror'

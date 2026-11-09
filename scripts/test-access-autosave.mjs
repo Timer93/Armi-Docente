@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {mergeAccessConfig} from '../services/accessAutosave.ts';
+const base={version:1,groups:[],devices:[{id:'pc1',name:'PC 1',groupId:null}],rules:[]};
+const draft=structuredClone(base);draft.devices[0].name='PC-01';
+const remote=structuredClone(base);remote.devices.push({id:'pc25',name:'DESKTOP-3ITH621',groupId:null});
+const merged=mergeAccessConfig(base,draft,remote);
+assert.equal(merged.devices.length,2);assert.equal(merged.devices[0].name,'PC-01');assert.equal(merged.devices[1].name,'DESKTOP-3ITH621');
+const next=structuredClone(draft);next.devices[0].groupId='aula';next.groups.push({id:'aula',name:'Aula'});
+assert.equal(mergeAccessConfig(draft,next,merged).devices[0].groupId,'aula','Edits made while saving must survive its response');
+const conflict=structuredClone(base);conflict.devices[0].name='Otro nombre';assert.throws(()=>mergeAccessConfig(base,draft,conflict),/otra ventana/);
+const removed=structuredClone(base);removed.devices=[];assert.deepEqual(mergeAccessConfig(base,removed,remote).devices.map(d=>d.id),['pc25']);
+assert.equal(base.devices[0].name,'PC 1');
+console.log('OK: autosave merges new pairings, preserves edits made during a save, detects conflicting edits and keeps unrelated records.');

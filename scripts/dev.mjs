@@ -1,4 +1,8 @@
 import { spawn } from 'child_process';
+import { resolveDevDataRoot } from './dev-data-root.mjs';
+
+process.env.ARMI_DATA_ROOT = resolveDevDataRoot(process.cwd());
+process.stdout.write(`[dev] Carpeta de datos: ${process.env.ARMI_DATA_ROOT}\n`);
 
 const backendPort = 3000;
 const backendHealthUrl = `http://127.0.0.1:${backendPort}/api/health`;

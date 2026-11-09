@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import { recoverLegacySessionPlanning } from '../backend/shared/sessionPlanningRecovery.js';
+
+const name = 'Se desenvuelve en los entornos virtuales generados por las TIC';
+const original = { competenciasTrans: [{ comp: name, cap: 'Personaliza entornos virtuales', des: '<p>Configura su entorno</p>', evidence: '<p>Portafolio</p>' }], sessionAssessmentModel: { rows: [{ id: 'transversal-7', source: 'transversal', competencyName: name, capacityName: 'Personaliza entornos virtuales', criterionText: 'Configura su entorno', evidenceText: '<p>Portafolio</p>', performanceText: '<p>Configura su entorno</p>', levelDescriptors: { c: 'Descriptor conservado' } }] } };
+const blank = { comp: name, cap: '', des: '<p></p>', evidence: '<p></p>' };
+const plan = { competenciasTrans: [blank] };
+const saved = { competenciasTrans: [blank], unitPlanningSnapshot: plan, sessionAssessmentModel: { rows: [{ id: 'primary-1', source: 'primary', criterionText: 'Nuevo criterio del área' }] }, instrumento: [{ id: 'transversal-7', c: 'Descriptor actual' }], purpose: 'Propósito nuevo', learningResources: { file: 'actual.png' } };
+const untouched = structuredClone(saved);
+const result = recoverLegacySessionPlanning(saved, original, plan);
+assert.deepEqual(saved, untouched, 'No mutar los datos originales');
+assert.equal(result.fields.length, 3);
+assert.deepEqual(result.data.competenciasTrans, original.competenciasTrans);
+assert.deepEqual(result.data.sessionAssessmentModel.rows[1], original.sessionAssessmentModel.rows[0], 'Recuperar la identidad y descriptores originales');
+assert.equal(result.data.sessionAssessmentModel.rows[0].criterionText, 'Nuevo criterio del área');
+for (const field of ['instrumento', 'purpose', 'learningResources', 'unitPlanningSnapshot']) assert.deepEqual(result.data[field], saved[field]);
+assert.equal(recoverLegacySessionPlanning(result.data, original, plan).fields.length, 0, 'Idempotencia');
+const edited = structuredClone(saved); edited.competenciasTrans[0].cap = 'Capacidad editada por el docente';
+assert.equal(recoverLegacySessionPlanning(edited, original, plan).data.competenciasTrans[0].cap, 'Capacidad editada por el docente');
+const trackedDeletion = { ...original, unitPlanningSnapshot: plan };
+assert.equal(recoverLegacySessionPlanning(saved, trackedDeletion, plan).fields.length, 0, 'No deshacer eliminaciones de sesiones previamente vinculadas');
+const changedUnit = structuredClone(plan); changedUnit.competenciasTrans[0].des = '<p>Criterio nuevo en unidad</p>';
+assert.ok(!recoverLegacySessionPlanning(saved, original, changedUnit).fields.some(field => field.field === 'des'), 'El respaldo no sustituye una nueva planificación');
+const collision = structuredClone(saved); collision.sessionAssessmentModel.rows.push({ id: 'transversal-7', source: 'primary', competencyName: 'Otra competencia' });
+assert.throws(() => recoverLegacySessionPlanning(collision, original, plan), /incompatible/);
+console.log('OK: recuperación selectiva, identidad de criterios, descriptores, idempotencia, ediciones nuevas y eliminaciones intencionales.');

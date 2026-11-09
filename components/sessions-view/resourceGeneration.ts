@@ -6,6 +6,7 @@ import type {
 } from './SessionLearningResources';
 import { createSessionLearningResourceDefaults } from './SessionLearningResources';
 import type { SessionResourceAiContext } from './resource-prompts/buildResourcePlanPrompt';
+import { getSessionResourceCurriculum } from './resource-prompts/sessionResourceCurriculum';
 import { classifyAiIssue } from '../../utils/aiErrors';
 import { fetchGeminiImageCapability } from '../../utils/aiModels';
 
@@ -28,7 +29,8 @@ export type NormalizedSessionResourcePlan = {
 
 export const normalizeSessionResourcePlan = (
     raw: any,
-    sessionContext: SessionResourceAiContext
+    sessionContext: SessionResourceAiContext,
+    key?: SessionResourceKey
 ): NormalizedSessionResourcePlan => {
     const sections = (Array.isArray(raw?.sections) ? raw.sections : [])
         .map((section: any) => ({
@@ -41,7 +43,7 @@ export const normalizeSessionResourcePlan = (
                 : 'concept'
         }))
         .filter((section: any) => section.label && section.body)
-        .slice(0, 7);
+        .slice(0, key === 'annex2' ? Math.max(7, getSessionResourceCurriculum(sessionContext).evidences.length + 5) : 7);
 
     const heading = String(raw?.heading || raw?.title || '').trim();
     if (!heading || sections.length < 3) {
@@ -86,7 +88,8 @@ export const normalizeSessionResourcePlan = (
                 ).trim(),
                 evidence: String(
                     sessionContext.evidence || sessionInfoRaw.evidence || ''
-                ).trim()
+                ).trim(),
+                curricularRows: getSessionResourceCurriculum(sessionContext).rows
             },
             visualBrief: {
                 layoutIdea: String(visualBriefRaw.layoutIdea || '').trim(),

@@ -1,5 +1,7 @@
 import React from 'react';
 
+import { sessionPlainText } from '../../backend/shared/sessionPlainText.js';
+
 type SessionSupportingMaterialsPanelProps = {
     themeColor: string;
     sessionData: any;
@@ -34,7 +36,7 @@ export const SessionSupportingMaterialsPanel: React.FC<SessionSupportingMaterial
                             <textarea
                                 data-session-field="extension"
                                 className="w-full min-h-[140px] resize-none rounded-[1.8rem] border border-slate-200 bg-slate-50 px-5 py-5 outline-none text-[11px] leading-relaxed font-medium italic text-slate-700 focus:border-violet-300 focus:bg-white transition-all"
-                                value={sessionData.extension || ''}
+                                value={sessionPlainText(sessionData.extension)}
                                 onChange={e => handleInputChange('extension', e.target.value)}
                                 placeholder="Escribe aquí las actividades de extensión..."
                             />

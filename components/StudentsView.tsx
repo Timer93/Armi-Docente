@@ -4,9 +4,11 @@ import * as XLSX from 'xlsx';
 import { Student, GeneralData, TeachingAssignment } from '../types';
 import { Input } from './Input';
 import { Select } from './Select';
-import { getDatosGenerales, updateModuleStatus, getEstudiantes, saveEstudiante, deleteEstudiante, getEgresados, egresarEstudiantes, resetStudentPortalPassword, openStudentPortalTestSession } from '../services/apiService';
+import { getDatosGenerales, updateModuleStatus, getEstudiantes, saveEstudiante, deleteEstudiante, getEgresados, egresarEstudiantes, resetStudentPortalPassword, getStudentPortalPassword, openStudentPortalTestSession } from '../services/apiService';
 import { INITIAL_GENERAL_DATA } from '../constants';
 import { AttendanceSection } from './students/AttendanceSection';
+import { openStudentPhoto } from './students/studentPhotoViewer';
+import { readStoredViewSelection, writeStoredViewSelection } from '../utils/viewSelectionStorage';
 
 interface Props {
   activeSection: string;
@@ -41,10 +43,13 @@ const NIVEL_OPTIONS = [
 
 const GRADE_ORDER = ['1ro', '2do', '3ro', '4to', '5to'];
 
-type StudentTableColumn = 'number' | 'nivel' | 'estado' | 'name' | 'sexo' | 'dni' | 'email' | 'microsoft' | 'birthDate' | 'group' | 'age' | 'password';
+type StudentTableColumn = 'number' | 'photo' | 'nivel' | 'estado' | 'name' | 'sexo' | 'dni' | 'email' | 'microsoft' | 'birthDate' | 'group' | 'age' | 'password';
+const STUDENT_SELECTION_STORAGE_KEY = 'armi_students_list_selection_v1';
+const EMPTY_STUDENT_FILTERS = { name: '', estado: '', group: '', email: '', microsoft: '', dni: '', nivel: '', sexo: '', edad: '', fechaNacimiento: '' };
+
 const STUDENT_COLUMN_STORAGE_KEY = 'armi_students_hidden_columns_v1';
 const STUDENT_TABLE_COLUMNS: Array<{ key: StudentTableColumn; label: string }> = [
-    { key: 'number', label: 'N°' }, { key: 'nivel', label: 'Nivel' }, { key: 'estado', label: 'Estado' },
+    { key: 'number', label: 'N°' }, { key: 'photo', label: 'Foto' }, { key: 'nivel', label: 'Nivel' }, { key: 'estado', label: 'Estado' },
     { key: 'name', label: 'Estudiante' }, { key: 'sexo', label: 'Sexo' }, { key: 'dni', label: 'DNI' },
     { key: 'email', label: 'Gmail' }, { key: 'microsoft', label: 'Microsoft' }, { key: 'birthDate', label: 'F. nacimiento' },
     { key: 'group', label: 'Grupo' }, { key: 'age', label: 'Edad' }, { key: 'password', label: 'Clave portal' },
@@ -77,6 +82,21 @@ const calculateAgeFromBirthDate = (birthDate?: string | null) => {
     return age >= 0 ? String(age) : '';
 };
 
+const PortalLockIcon = ({ configured }: { configured: boolean }) => (
+    <svg viewBox="0 0 24 24" className={`h-3.5 w-3.5 ${configured ? 'fill-current opacity-45' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="5" y="10" width="14" height="10" rx="2" />
+        <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+    </svg>
+);
+
+const PortalTestIcon = () => (
+    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="14" rx="2" />
+        <path d="m10 8 5 3-5 3z" />
+        <path d="M8 21h8" />
+    </svg>
+);
+
 export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [students, setStudents] = useState<Student[]>([]);
     const [graduates, setGraduates] = useState<Student[]>([]);
@@ -84,25 +104,36 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [savingStudentIds, setSavingStudentIds] = useState<Array<string | number>>([]);
     const [resettingPasswordIds, setResettingPasswordIds] = useState<Array<string | number>>([]);
     const [testingPortalIds, setTestingPortalIds] = useState<Array<string | number>>([]);
-    const [visiblePasswordIds, setVisiblePasswordIds] = useState<Array<string | number>>([]);
+    const [loadingPasswordIds, setLoadingPasswordIds] = useState<Array<string | number>>([]);
+    const [revealedPortalPassword, setRevealedPortalPassword] = useState<null | { studentName: string; password: string; isInitialPassword: boolean }>(null);
     const [hiddenColumns, setHiddenColumns] = useState<StudentTableColumn[]>(readHiddenStudentColumns);
     const [generalData, setGeneralData] = useState<GeneralData>(INITIAL_GENERAL_DATA);
     const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
     
+    const [savedListSelection] = useState(() => readStoredViewSelection(STUDENT_SELECTION_STORAGE_KEY));
+    const savedString = (key: string, fallback = '') => typeof savedListSelection[key] === 'string' ? savedListSelection[key] : fallback;
     const [selectedStudentId, setSelectedStudentId] = useState<string | number | null>(null);
-    const [formNivel, setFormNivel] = useState('Secundaria');
-    const [formGrade, setFormGrade] = useState('');
-    const [formSection, setFormSection] = useState('');
+    const [formNivel, setFormNivel] = useState(() => NIVEL_OPTIONS.some(option => option.value === savedString('nivel')) ? savedString('nivel') : 'Secundaria');
+    const [formGrade, setFormGrade] = useState(() => savedString('grade'));
+    const [formSection, setFormSection] = useState(() => savedString('section'));
     const [formName, setFormName] = useState('');
     const [formDni, setFormDni] = useState('');
     const [formEmail, setFormEmail] = useState('');
     const [formMicrosoft, setFormMicrosoft] = useState('');
     const [formGroup, setFormGroup] = useState('');
-    const [formSexo, setFormSexo] = useState('M');
+    const [formSexo, setFormSexo] = useState(() => savedString('sexo') === 'F' ? 'F' : 'M');
     const [formBirthDate, setFormBirthDate] = useState('');
     const [formEdad, setFormEdad] = useState('');
 
-    const [filters, setFilters] = useState({ name: '', estado: '', group: '', email: '', microsoft: '', dni: '', nivel: '', sexo: '', edad: '' });
+    const [filters, setFilters] = useState(() => Object.fromEntries(Object.keys(EMPTY_STUDENT_FILTERS).map(key => [key, savedString(`filter_${key}`)])) as typeof EMPTY_STUDENT_FILTERS);
+    const [studentSearch, setStudentSearch] = useState(() => savedString('search'));
+
+    useEffect(() => {
+        writeStoredViewSelection(STUDENT_SELECTION_STORAGE_KEY, {
+            nivel: formNivel, grade: formGrade, section: formSection, sexo: formSexo, search: studentSearch,
+            ...Object.fromEntries(Object.entries(filters).map(([key, value]) => [`filter_${key}`, value])),
+        });
+    }, [formNivel, formGrade, formSection, formSexo, studentSearch, filters]);
     const [activeFilterField, setActiveFilterField] = useState<string | null>(null);
     const tableContainerRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -131,7 +162,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const setColumnHidden = (column: StudentTableColumn, hidden: boolean) => {
         setHiddenColumns((current) => {
             const next = hidden ? (current.includes(column) ? current : [...current, column]) : current.filter((item) => item !== column);
-            window.localStorage.setItem(STUDENT_COLUMN_STORAGE_KEY, JSON.stringify(next));
+            try { window.localStorage.setItem(STUDENT_COLUMN_STORAGE_KEY, JSON.stringify(next)); } catch {}
             return next;
         });
     };
@@ -150,6 +181,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     // Estados para Toast y Confirmación
     const [toast, setToast] = useState<{msg: string, type: 'error' | 'success'} | null>(null);
     const [confirmDeleteStudentId, setConfirmDeleteStudentId] = useState<string | number | null>(null);
+    const [isDeletingStudent, setIsDeletingStudent] = useState(false);
     const [graduateSearch, setGraduateSearch] = useState('');
 
     const normalizeText = (value: string | number | undefined | null) => String(value ?? '').trim().toUpperCase();
@@ -184,7 +216,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     useEffect(() => {
         getDatosGenerales().then(data => {
             setGeneralData(data);
-            if (data?.level) setFormNivel(data.level);
+            if (data?.level && !NIVEL_OPTIONS.some(option => option.value === savedString('nivel'))) setFormNivel(data.level);
         });
         
         const savedAssign = localStorage.getItem('armi_assignments');
@@ -193,8 +225,8 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                 const parsedAssign = JSON.parse(savedAssign) as TeachingAssignment[];
                 setAssignments(parsedAssign);
                 if (parsedAssign.length > 0) {
-                    setFormGrade(parsedAssign[0].grade);
-                    setFormSection(parsedAssign[0].section);
+                    if (!Object.prototype.hasOwnProperty.call(savedListSelection, 'grade')) setFormGrade(parsedAssign[0].grade);
+                    if (!Object.prototype.hasOwnProperty.call(savedListSelection, 'section')) setFormSection(parsedAssign[0].section);
                     setRtGrade(parsedAssign[0].grade);
                     setRtSection(parsedAssign[0].section);
                 }
@@ -467,8 +499,8 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
     useEffect(() => {
         const handleClickOutside = (e: MouseEvent) => {
+            const target = e.target as HTMLElement;
             if (activeFilterField && tableContainerRef.current) {
-                const target = e.target as HTMLElement;
                 if (!target.closest('.filter-popup') && !target.closest('.filter-trigger')) {
                     setActiveFilterField(null);
                 }
@@ -697,19 +729,38 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const handleDeleteRequest = (id: string | number) => {
+        if (savingStudentIds.includes(id)) {
+            showToast('Espere a que termine de guardarse el estudiante', 'error');
+            return;
+        }
         setConfirmDeleteStudentId(id);
     };
 
-    const handleResetPortalPassword = async (student: Student) => {
+    useEffect(() => {
+        if (!window.armiApp?.onDeleteStudentFromContextMenu) return undefined;
+        return window.armiApp.onDeleteStudentFromContextMenu((target) => {
+            const student = students.find((item) => String(item.id) === String(target?.id));
+            if (!student) {
+                showToast('El estudiante seleccionado ya no está disponible', 'error');
+                return;
+            }
+            setSelectedStudentId(student.id);
+            handleDeleteRequest(student.id);
+        });
+    }, [students, savingStudentIds]);
+
+    const handleResetPortalPassword = async (student: Student, options: { askConfirmation?: boolean; revealAfterReset?: boolean } = {}) => {
         const dni = String(student.dni || '').replace(/\D+/g, '');
         if (!dni) {
             showToast('Registra primero el DNI del estudiante', 'error');
             return;
         }
-        const accepted = window.confirm(
-            `La clave de ${student.name} volverá a ser su DNI (${dni}). También se cerrarán sus sesiones abiertas. ¿Continuar?`
-        );
-        if (!accepted) return;
+        if (options.askConfirmation !== false) {
+            const accepted = window.confirm(
+                `La clave de ${student.name} volverá a ser su DNI (${dni}). También se cerrarán sus sesiones abiertas. ¿Continuar?`
+            );
+            if (!accepted) return;
+        }
         setResettingPasswordIds((current) => current.includes(student.id) ? current : [...current, student.id]);
         const result = await resetStudentPortalPassword(student.id);
         setResettingPasswordIds((current) => current.filter((id) => id !== student.id));
@@ -723,8 +774,39 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         setOriginalStudents((current) => current.map((item) => item.id === student.id
             ? { ...item, portalPasswordConfigured: false }
             : item));
-        setVisiblePasswordIds((current) => current.includes(student.id) ? current : [...current, student.id]);
+        if (options.revealAfterReset) {
+            setRevealedPortalPassword({
+                studentName: student.name || 'Estudiante',
+                password: dni,
+                isInitialPassword: true,
+            });
+        }
         showToast(`Clave restablecida: ${dni}. El estudiante deberá cambiarla al ingresar.`, 'success');
+    };
+
+    const handleRevealPortalPassword = async (student: Student) => {
+        if (loadingPasswordIds.includes(student.id)) return;
+        setLoadingPasswordIds((current) => current.includes(student.id) ? current : [...current, student.id]);
+        const result = await getStudentPortalPassword(student.id);
+        setLoadingPasswordIds((current) => current.filter((id) => id !== student.id));
+        if (!result.success || !result.data?.password) {
+            if ((result as any).code === 'PASSWORD_NOT_RECOVERABLE') {
+                const accepted = window.confirm(
+                    `La clave actual de ${student.name} fue creada antes de habilitar la consulta y solo existe como hash irreversible. Para mostrar una clave válida es necesario restablecerla a su DNI (${student.dni || 'sin DNI'}). ¿Restablecer y mostrar ahora?`
+                );
+                if (accepted) {
+                    await handleResetPortalPassword(student, { askConfirmation: false, revealAfterReset: true });
+                }
+                return;
+            }
+            showToast(result.message || 'No se pudo consultar la contraseña', 'error');
+            return;
+        }
+        setRevealedPortalPassword({
+            studentName: student.name || 'Estudiante',
+            password: result.data.password,
+            isInitialPassword: Boolean(result.data.isInitialPassword),
+        });
     };
 
     const handleOpenStudentPortalTest = async (student: Student) => {
@@ -745,15 +827,29 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const confirmDelete = async () => {
-        if (!confirmDeleteStudentId) return;
-        const res = await deleteEstudiante(confirmDeleteStudentId);
-        if (res.success) {
-            loadStudents();
-            if (selectedStudentId === confirmDeleteStudentId) setSelectedStudentId(null);
-            setConfirmDeleteStudentId(null);
-            showToast('Estudiante eliminado permanentemente', 'success');
-        } else {
-            showToast('Error al eliminar registro', 'error');
+        if (confirmDeleteStudentId === null || isDeletingStudent) return;
+        if (savingStudentIds.includes(confirmDeleteStudentId)) {
+            showToast('Espere a que termine de guardarse el estudiante', 'error');
+            return;
+        }
+        const pendingSaveTimer = autoSaveTimersRef.current[String(confirmDeleteStudentId)];
+        if (pendingSaveTimer) {
+            clearTimeout(pendingSaveTimer);
+            delete autoSaveTimersRef.current[String(confirmDeleteStudentId)];
+        }
+        setIsDeletingStudent(true);
+        try {
+            const res = await deleteEstudiante(confirmDeleteStudentId);
+            if (res.success) {
+                await loadStudents();
+                if (selectedStudentId === confirmDeleteStudentId) setSelectedStudentId(null);
+                setConfirmDeleteStudentId(null);
+                showToast('Estudiante eliminado permanentemente', 'success');
+            } else {
+                showToast('Error al eliminar registro', 'error');
+            }
+        } finally {
+            setIsDeletingStudent(false);
         }
     };
 
@@ -762,6 +858,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     const filteredStudents = useMemo(() => {
+        const normalizedSearch = studentSearch.trim().toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
         return students.filter(s => {
             const gradeOk = !formGrade || s.grade === formGrade;
             const sectionOk = !formSection || s.section === formSection;
@@ -774,10 +871,15 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             const nivelOk = (s.nivel || '').toLowerCase().includes(filters.nivel.toLowerCase());
             const sexoOk = (s.sexo || '').toLowerCase().includes(filters.sexo.toLowerCase());
             const edadOk = String(s.edad ?? '').toLowerCase().includes(filters.edad.toLowerCase());
-            
-            return gradeOk && sectionOk && nameOk && estadoOk && groupOk && emailOk && microOk && dniOk && nivelOk && sexoOk && edadOk;
+            const birthDateOk = String(s.fechaNacimiento ?? '').toLowerCase().includes(filters.fechaNacimiento.toLowerCase());
+            const generalSearchOk = !normalizedSearch || [
+                s.name, s.dni, s.email, s.microsoft, s.nivel, s.grade, s.section,
+                s.estado, s.group, s.sexo, s.edad, s.fechaNacimiento,
+            ].some((value) => String(value ?? '').toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g, '').includes(normalizedSearch));
+
+            return gradeOk && sectionOk && nameOk && estadoOk && groupOk && emailOk && microOk && dniOk && nivelOk && sexoOk && edadOk && birthDateOk && generalSearchOk;
         });
-    }, [students, formGrade, formSection, filters]);
+    }, [students, formGrade, formSection, filters, studentSearch]);
 
     const getGroupColor = (groupName?: string) => {
         if (!groupName) return 'bg-slate-100 text-slate-400 border-slate-200';
@@ -1064,7 +1166,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
              )}
 
              {/* Toast de Confirmación de Eliminación */}
-             {confirmDeleteStudentId && (
+             {confirmDeleteStudentId !== null && (
                 <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm animate-fade-in p-4">
                     <div className="bg-white rounded-[2.5rem] shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-slate-200 w-full max-w-md overflow-hidden animate-scale-in">
                         <div className="bg-rose-50 p-8 flex flex-col items-center text-center">
@@ -1077,7 +1179,25 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                         </div>
                         <div className="p-6 bg-slate-50 flex gap-3 border-t border-slate-100">
                             <button onClick={cancelDelete} className="flex-1 py-4 rounded-2xl bg-white border border-slate-200 text-slate-400 font-black text-[10px] uppercase tracking-widest hover:bg-slate-100 hover:text-slate-600 transition-all">Cancelar</button>
-                            <button onClick={confirmDelete} className="flex-1 py-4 rounded-2xl bg-rose-600 text-white font-black text-[10px] uppercase tracking-widest shadow-lg shadow-rose-200 hover:bg-rose-700 active:scale-95 transition-all">Sí, Eliminar</button>
+                            <button disabled={isDeletingStudent} onClick={confirmDelete} className="flex-1 py-4 rounded-2xl bg-rose-600 text-white font-black text-[10px] uppercase tracking-widest shadow-lg shadow-rose-200 hover:bg-rose-700 active:scale-95 transition-all disabled:cursor-wait disabled:opacity-60">{isDeletingStudent ? 'Eliminando…' : 'Sí, Eliminar'}</button>
+                        </div>
+                    </div>
+                </div>
+             )}
+
+             {revealedPortalPassword && (
+                <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-fade-in">
+                    <div className="w-full max-w-sm overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-2xl">
+                        <div className="bg-blue-50 p-7 text-center">
+                            <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-full bg-blue-100 text-blue-700"><PortalLockIcon configured /></div>
+                            <h3 className="text-lg font-black text-slate-800">Clave del portal</h3>
+                            <p className="mt-1 truncate text-xs font-bold text-slate-500">{revealedPortalPassword.studentName}</p>
+                            <code className="mt-5 block select-all rounded-2xl border border-blue-200 bg-white px-4 py-3 text-lg font-black tracking-wider text-blue-800 shadow-inner">{revealedPortalPassword.password}</code>
+                            <p className="mt-2 text-[9px] font-black uppercase tracking-widest text-slate-400">{revealedPortalPassword.isInitialPassword ? 'Clave inicial: DNI' : 'Clave personal cifrada'}</p>
+                        </div>
+                        <div className="flex gap-3 border-t border-slate-100 bg-slate-50 p-5">
+                            <button type="button" onClick={() => setRevealedPortalPassword(null)} className="flex-1 rounded-xl border border-slate-200 bg-white py-3 text-[10px] font-black uppercase text-slate-500 hover:bg-slate-100">Cerrar</button>
+                            <button type="button" onClick={() => { void navigator.clipboard.writeText(revealedPortalPassword.password); showToast('Contraseña copiada', 'success'); }} className="flex-1 rounded-xl bg-blue-600 py-3 text-[10px] font-black uppercase text-white hover:bg-blue-700">Copiar clave</button>
                         </div>
                     </div>
                 </div>
@@ -1357,7 +1477,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                  </div>
                  <div className="flex items-center gap-3">
                     {isAnyFilterActive && (
-                        <button onClick={() => setFilters({ name: '', estado: '', group: '', email: '', microsoft: '', dni: '', nivel: '', sexo: '', edad: '' })} className="px-4 py-1.5 bg-red-500/20 text-red-400 border border-red-500/30 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-red-500 hover:text-white transition-all shadow-lg animate-pulse">Limpiar Filtros ×</button>
+                        <button onClick={() => setFilters({ name: '', estado: '', group: '', email: '', microsoft: '', dni: '', nivel: '', sexo: '', edad: '', fechaNacimiento: '' })} className="px-4 py-1.5 bg-red-500/20 text-red-400 border border-red-500/30 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-red-500 hover:text-white transition-all shadow-lg animate-pulse">Limpiar Filtros ×</button>
                     )}
                     <div className="text-right text-[10px] font-black uppercase text-slate-500 tracking-widest leading-none">Viendo: {filteredStudents.length} de {students.length}</div>
                  </div>
@@ -1449,6 +1569,29 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
              </div>
 
              <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 overflow-hidden" ref={tableContainerRef}>
+                 <div className="flex flex-col gap-2 border-b border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                     <label className="relative block w-full max-w-xl">
+                         <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm text-slate-400" aria-hidden="true">🔍</span>
+                         <input
+                             type="search"
+                             value={studentSearch}
+                             onChange={(event) => setStudentSearch(event.target.value)}
+                             placeholder="Buscar por nombre, DNI, correo, grado, sección..."
+                             className="h-9 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-9 text-[11px] font-bold text-slate-700 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-100"
+                             aria-label="Buscar estudiantes"
+                         />
+                         {studentSearch ? (
+                             <button
+                                 type="button"
+                                 onClick={() => setStudentSearch('')}
+                                 className="absolute inset-y-0 right-2 grid w-7 place-items-center text-sm font-black text-slate-400 hover:text-slate-700"
+                                 title="Limpiar búsqueda"
+                                 aria-label="Limpiar búsqueda"
+                             >×</button>
+                         ) : null}
+                     </label>
+                     <span className="shrink-0 text-[8px] font-black uppercase tracking-widest text-slate-400">Clic derecho: opciones de fila</span>
+                 </div>
                  {hiddenColumns.length > 0 ? (
                      <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[8px] font-black uppercase tracking-wide text-slate-500">
                          <span className="mr-1">Columnas ocultas:</span>
@@ -1465,6 +1608,7 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                      <thead className="bg-slate-900 text-white text-[10px] uppercase font-black tracking-widest">
                          <tr className="divide-x divide-white">
                              <th className={`py-1 px-3 w-10 text-center relative ${columnClass('number')}`}>N°<HideColumnButton column="number" /></th>
+                             <th className={`py-1 px-1 w-10 text-center relative ${columnClass('photo')}`}>Foto<HideColumnButton column="photo" /></th>
                              <th className={`py-1 px-3 w-20 text-center relative filter-trigger ${columnClass('nivel')}`}>
                                  <HideColumnButton column="nivel" />
                                  <div className="flex items-center justify-center gap-1 cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'nivel' ? null : 'nivel'); }}>
@@ -1521,10 +1665,28 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                  </div>
                                  {activeFilterField === 'microsoft' && <FilterInput field="microsoft" placeholder="Outlook..." />}
                              </th>
-                             <th className={`py-1 px-3 w-32 text-center relative ${columnClass('birthDate')}`}>F. NAC.<HideColumnButton column="birthDate" /></th>
-                             <th className={`py-1 px-3 w-16 text-center relative ${columnClass('group')}`}>GRUPO<HideColumnButton column="group" /></th>
-                             <th className={`py-1 px-2 w-12 text-center relative ${columnClass('age')}`}>EDAD<HideColumnButton column="age" /></th>
-                             <th className={`py-1 px-2 w-32 text-center relative ${columnClass('password')}`}>CLAVE PORTAL<HideColumnButton column="password" /></th>
+                             <th className={`py-1 px-3 w-32 text-center relative filter-trigger ${columnClass('birthDate')}`}>
+                                 <HideColumnButton column="birthDate" />
+                                 <div className="flex items-center justify-center gap-1 cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'fechaNacimiento' ? null : 'fechaNacimiento'); }}>
+                                     <span>F. NAC.</span><span className={`text-[8px] ${filters.fechaNacimiento ? 'text-blue-400' : 'opacity-40'}`}>🔍</span>
+                                 </div>
+                                 {activeFilterField === 'fechaNacimiento' && <FilterInput field="fechaNacimiento" placeholder="AAAA-MM-DD..." />}
+                             </th>
+                             <th className={`py-1 px-3 w-16 text-center relative filter-trigger ${columnClass('group')}`}>
+                                 <HideColumnButton column="group" />
+                                 <div className="flex items-center justify-center gap-1 cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'group' ? null : 'group'); }}>
+                                     <span>GRUPO</span><span className={`text-[8px] ${filters.group ? 'text-blue-400' : 'opacity-40'}`}>🔍</span>
+                                 </div>
+                                 {activeFilterField === 'group' && <FilterInput field="group" placeholder="Grupo..." />}
+                             </th>
+                             <th className={`py-1 px-2 w-12 text-center relative filter-trigger ${columnClass('age')}`}>
+                                 <HideColumnButton column="age" />
+                                 <div className="flex items-center justify-center gap-1 cursor-pointer hover:text-blue-400 transition-colors" onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === 'edad' ? null : 'edad'); }}>
+                                     <span>EDAD</span><span className={`text-[8px] ${filters.edad ? 'text-blue-400' : 'opacity-40'}`}>🔍</span>
+                                 </div>
+                                 {activeFilterField === 'edad' && <FilterInput field="edad" placeholder="Edad..." />}
+                             </th>
+                             <th className={`py-1 px-2 w-24 text-center relative ${columnClass('password')}`}>CLAVE PORTAL<HideColumnButton column="password" /></th>
                          </tr>
                      </thead>
                      <tbody className="divide-y divide-slate-100">
@@ -1534,7 +1696,15 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                              filteredStudents.map((student, index) => {
                                  const isSaving = savingStudentIds.includes(student.id);
                                  return (
-                                     <tr key={student.id} onClick={() => setSelectedStudentId(student.id)} className={getRowStyle(student) + " h-[18px]"}>
+                                     <tr
+                                         key={student.id}
+                                         onClick={() => setSelectedStudentId(student.id)}
+                                         onContextMenu={(event) => {
+                                             setSelectedStudentId(student.id);
+                                             window.armiApp?.setStudentContextMenuTarget?.({ id: student.id, name: student.name || 'Estudiante' });
+                                         }}
+                                         className={getRowStyle(student) + " h-[18px]"}
+                                     >
                                          {/* 
                                              -------------------------------------------------------------------------
                                              🛠️ CONTROL DE ALTURA DE FILAS (ULTRA-COMPACTO):
@@ -1549,6 +1719,12 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                                  {isSaving ? <span className="text-[8px] text-amber-500">●</span> : null}
                                              </span>
                                          </td>
+                                         <td className={`py-0 px-1 text-center border-r border-slate-100/10 ${columnClass('photo')}`}>
+                                             {!hiddenColumns.includes('photo') && <button type="button" className="relative mx-auto block h-6 w-6 overflow-hidden rounded-full bg-slate-200 text-[9px] font-bold text-slate-600 ring-1 ring-slate-300 hover:ring-blue-500 focus-visible:outline focus-visible:outline-blue-600" title={`Ver foto de ${student.name}`} aria-label={`Ver foto de ${student.name}`} onClick={event => { event.stopPropagation(); void openStudentPhoto(student.id, student.name); }}>
+                                                 <span aria-hidden="true">{(student.name || '?').trim().charAt(0)}</span>
+                                                 <img data-student-photo-id={student.id} src={`/api/student-forum/teacher/profiles/${encodeURIComponent(String(student.id))}`} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover" onError={event => { event.currentTarget.style.visibility = 'hidden'; }} />
+                                             </button>}
+                                         </td>
                                          <td className={`py-0 px-2 border-r border-slate-100/10 h-[18px] ${columnClass('nivel')}`}>
                                              <select className="w-full bg-transparent border-0 font-bold outline-none text-[9px] py-0 h-full leading-none m-0 appearance-none" value={student.nivel || 'Secundaria'} onChange={e => handleStudentUpdate(student.id, 'nivel', e.target.value)}>
                                                 {NIVEL_OPTIONS.map(n => <option key={n.value} value={n.value}>{n.label}</option>)}
@@ -1559,8 +1735,8 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                                  {student.estado || '-'}
                                              </span>
                                          </td>
-                                         <td className={`py-0 px-3 border-r border-slate-100/10 h-[18px] ${columnClass('name')}`}>
-                                             <input className={`w-full bg-transparent border-0 font-bold outline-none focus:bg-white/60 rounded px-1 transition-all py-0 h-full leading-none m-0`} value={student.name || ''} onChange={e => handleStudentUpdate(student.id, 'name', e.target.value)} />
+                                         <td className={`relative py-0 px-3 border-r border-slate-100/10 h-[18px] ${columnClass('name')}`}>
+                                             <input className="w-full bg-transparent border-0 font-bold outline-none focus:bg-white/60 rounded px-1 transition-all py-0 h-full leading-none m-0" value={student.name || ''} onChange={e => handleStudentUpdate(student.id, 'name', e.target.value)} />
                                          </td>
                                          <td className={`py-0 px-1 border-r border-slate-100/10 text-center h-[18px] ${columnClass('sexo')}`}>
                                              <select className="w-full bg-transparent border-0 font-black outline-none text-center text-[10px] py-0 h-full leading-none m-0 appearance-none" value={student.sexo || 'M'} onChange={e => handleStudentUpdate(student.id, 'sexo', e.target.value)}>
@@ -1587,33 +1763,25 @@ export const StudentsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                                          </td>
                                          <td className={`py-0 px-1 text-center h-[18px] ${columnClass('password')}`} onClick={(event) => event.stopPropagation()}>
                                              <div className="flex items-center justify-center gap-1">
-                                                 {student.portalPasswordConfigured ? (
-                                                     <span className="text-[8px] font-black text-slate-500" title="La contraseña personal está protegida y no puede descifrarse.">Protegida</span>
-                                                 ) : (
-                                                     <code className="min-w-[58px] text-[9px] font-black tracking-wide">
-                                                         {visiblePasswordIds.includes(student.id) ? (student.dni || 'Sin DNI') : '••••••••'}
-                                                     </code>
-                                                 )}
-                                                 {!student.portalPasswordConfigured ? (
-                                                     <button
-                                                         type="button"
-                                                         onClick={() => setVisiblePasswordIds((current) => current.includes(student.id)
-                                                             ? current.filter((id) => id !== student.id)
-                                                             : [...current, student.id])}
-                                                         className="rounded border border-slate-200 bg-white/80 px-1.5 py-0.5 text-[7px] font-black uppercase text-slate-600 hover:bg-white"
-                                                         title={visiblePasswordIds.includes(student.id) ? 'Ocultar clave inicial' : 'Ver clave inicial'}
-                                                     >
-                                                         {visiblePasswordIds.includes(student.id) ? 'Ocultar' : 'Ver'}
-                                                     </button>
-                                                 ) : null}
+                                                 <button
+                                                     type="button"
+                                                     disabled={loadingPasswordIds.includes(student.id)}
+                                                     onClick={() => { void handleRevealPortalPassword(student); }}
+                                                     className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border transition disabled:cursor-wait disabled:opacity-50 ${student.portalPasswordConfigured ? 'border-slate-300 bg-slate-100 text-slate-600' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}
+                                                     title={student.portalPasswordConfigured ? 'Mostrar contraseña personal' : 'Mostrar clave inicial (DNI)'}
+                                                     aria-label={student.portalPasswordConfigured ? 'Mostrar contraseña personal' : 'Mostrar clave inicial'}
+                                                 >
+                                                     {loadingPasswordIds.includes(student.id) ? <span className="text-[8px]">…</span> : <PortalLockIcon configured={Boolean(student.portalPasswordConfigured)} />}
+                                                 </button>
                                                  <button
                                                      type="button"
                                                      disabled={testingPortalIds.includes(student.id)}
                                                      onClick={() => { void handleOpenStudentPortalTest(student); }}
-                                                     className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[7px] font-black uppercase text-blue-700 hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60"
+                                                     className="grid h-5 w-5 shrink-0 place-items-center rounded-full border border-blue-200 bg-blue-50 text-blue-700 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60"
                                                      title="Abrir el portal como este estudiante durante diez minutos, sin cambiar su contraseña"
+                                                     aria-label="Probar portal como estudiante"
                                                  >
-                                                     {testingPortalIds.includes(student.id) ? '…' : 'Probar'}
+                                                     {testingPortalIds.includes(student.id) ? <span className="text-[8px]">…</span> : <PortalTestIcon />}
                                                  </button>
                                                  <button
                                                      type="button"

@@ -2,6 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import os from 'os';
+import { pathToFileURL } from 'node:url';
 
 const buildStamp = new Date().toISOString().replace(/[:.]/g, '-');
 const outputDir = path.join('dist_electron', `build-${buildStamp}`);
@@ -14,7 +15,10 @@ const requiresSymlinkPrivilege = process.platform === 'win32' && packageJson?.bu
 
 const stages = [
   { label: 'Cerrando procesos de desarrollo ARMI', command: npmCmd, args: ['run', 'dev:stop'] },
+  { label: 'Preparando SQLite para la copia de instalacion', command: npmCmd, args: ['run', 'rebuild:native:node'] },
+  { label: 'Preparando base de instalacion consistente', command: process.execPath, args: ['scripts/prepare-installer-database.mjs'] },
   { label: 'Preparando icono Windows', command: npmCmd, args: ['run', 'prepare:win-icon'] },
+  { label: 'Compilando agente ARMI Estudiante', command: npmCmd, args: ['run', 'build:student-agent'] },
   { label: 'Preparando Cloudflare Quick Tunnel', command: npmCmd, args: ['run', 'prepare:cloudflared'] },
   {
     label: 'Recompilando better-sqlite3 para Electron',
@@ -43,12 +47,16 @@ const renderBar = (completed) => {
   if (completed === total) process.stdout.write('\n');
 };
 
-const runStage = (stage, index) => new Promise((resolve, reject) => {
+export const runStage = (stage, index) => new Promise((resolve, reject) => {
   console.log(`\n${index + 1}. ${stage.label}`);
   const child = spawn(stage.command, stage.args, {
     stdio: 'inherit',
-    shell: true,
+    // Only Windows command wrappers need a shell. Launch node.exe directly so
+    // paths such as C:\Program Files\nodejs\node.exe remain a single executable.
+    shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(stage.command),
   });
+
+  child.once('error', (error) => reject(new Error(`No se pudo iniciar la etapa: ${stage.label}. ${error.message}`)));
 
   child.on('exit', (code) => {
     if (code === 0) {
@@ -58,7 +66,7 @@ const runStage = (stage, index) => new Promise((resolve, reject) => {
     }
 
     const hint = stage.label.includes('better-sqlite3 para Electron')
-      ? '\nCierra antes cualquier instancia de ARMI, Electron, npm run dev o backend abierto, y vuelve a intentar.'
+      ? '\nRevisa el error anterior de SQLite. Si node-gyp no encuentra Visual Studio, se necesitan sus herramientas de desarrollo de escritorio con C++.'
       : '';
 
     reject(new Error(`Fallo la etapa: ${stage.label}${hint}`));
@@ -140,7 +148,9 @@ const main = async () => {
   console.log(`\nInstalable generado en ${outputDir}`);
 };
 
-main().catch((error) => {
-  console.error(`\n${error.message}`);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(`\n${error.message}`);
+    process.exit(1);
+  });
+}

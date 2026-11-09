@@ -6,6 +6,7 @@ import {
   restartRemoteAccess,
   startRemoteAccess,
   stopRemoteAccess,
+  validateRemoteAccessExpiry,
 } from '../remote-access/remoteAccessService.js';
 import { getStudentPresenceSummary } from '../remote-access/studentPresenceService.js';
 
@@ -55,8 +56,13 @@ router.post('/remote-access/config', requireLocalTeacherRequest, (req, res) => (
   respond(res, () => configureRemoteAccess(req.body || {}))
 ));
 
-router.post('/remote-access/start', requireLocalTeacherRequest, (_req, res) => {
-  acceptBackgroundOperation(res, startRemoteAccess, 'ARMI esta creando y verificando el enlace por Internet.');
+router.post('/remote-access/start', requireLocalTeacherRequest, (req, res) => {
+  try {
+    const accessEndsAt = validateRemoteAccessExpiry(req.body?.accessEndsAt);
+    acceptBackgroundOperation(res, () => startRemoteAccess(accessEndsAt), 'ARMI esta creando y verificando el enlace por Internet.');
+  } catch (error) {
+    res.status(Number(error?.statusCode) || 400).json({ success: false, message: error?.message });
+  }
 });
 
 router.post('/remote-access/restart', requireLocalTeacherRequest, (_req, res) => {

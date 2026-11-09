@@ -1,9 +1,14 @@
+import { startVisiblePanelPolling } from '../utils/panelPolling';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   applyCloudArtifact,
   CloudSyncStatusData,
   clearCloudVersionHistory,
   getCloudSyncStatus,
+  getInternetConnectivity,
+  getLocalCloudSyncStatus,
+  type InternetConnectivityData,
+  openGoogleDriveDesktop,
   mergeAttendanceFromCloudArtifact,
   mergeStudentsFromCloudArtifact,
   pickCloudSyncFolder,
@@ -17,6 +22,9 @@ import {
 import { useAuth } from './auth/AuthContext';
 import { applyArmiLocalState, CLOUD_SYNC_EVENT, collectArmiLocalState, emitCloudSyncUpdated } from '../utils/cloudSyncState';
 import driveIcon from '../src/Google_Drive_icon.svg';
+import { getDriveDetectionState } from '../utils/driveDetection';
+import { getSyncIndicatorTone } from '../utils/backgroundSyncStatus';
+import { SyncDeliveryDetails } from './SyncDeliveryDetails';
 
 type SyncAction = 'push' | 'pull' | null;
 
@@ -63,6 +71,7 @@ const comparisonMeta: Record<CloudSyncStatusData['comparison'], { label: string;
   'mirror-newer': { label: 'Drive mas reciente', tone: 'text-blue-800 bg-blue-50 border-blue-200', dot: 'bg-sky-500' },
   'local-newer': { label: 'PC mas reciente', tone: 'text-emerald-800 bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500' },
   'in-sync': { label: 'Sincronizado', tone: 'text-emerald-800 bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500' },
+  'incremental-pending': { label: 'Actualizando en segundo plano', tone: 'text-blue-800 bg-blue-50 border-blue-200', dot: 'bg-sky-500' },
   'diverged': { label: 'Diferencias detectadas', tone: 'text-rose-800 bg-rose-50 border-rose-200', dot: 'bg-rose-500' },
   'mirror-incomplete': { label: 'Copia danada', tone: 'text-rose-800 bg-rose-50 border-rose-200', dot: 'bg-rose-500' },
 };
@@ -251,6 +260,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   const [status, setStatus] = useState<CloudSyncStatusData | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [savingConfig, setSavingConfig] = useState(false);
+  const [openingDrive, setOpeningDrive] = useState(false);
   const [activeAction, setActiveAction] = useState<SyncAction>(null);
   const [modalMessage, setModalMessage] = useState('Preparando sincronizacion...');
   const [modalOpen, setModalOpen] = useState(false);
@@ -269,6 +279,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   const [syncUserLabel, setSyncUserLabel] = useState('Usuario local');
   const [mirrorPath, setMirrorPath] = useState('');
   const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine);
+  const [connectivity, setConnectivity] = useState<InternetConnectivityData | null>(null);
   const autoBoundIdentityRef = useRef('');
   const rootRef = useRef<HTMLDivElement | null>(null);
   const detailsBodyRef = useRef<HTMLDivElement | null>(null);
@@ -276,10 +287,6 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   const refreshStatus = async () => {
     setLoadingStatus(true);
     setErrorMessage(null);
-    const frontendStateResult = await saveCloudFrontendState(collectArmiLocalState());
-    if (!frontendStateResult.success) {
-      setErrorMessage(frontendStateResult.message || 'No pude comunicarme con el backend de sincronizacion.');
-    }
     const response = await getCloudSyncStatus();
     if (response.success && response.data) {
       setStatus(response.data);
@@ -292,6 +299,16 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
       setErrorMessage(response.message || 'No pude consultar el estado de sincronizacion.');
     }
     setLoadingStatus(false);
+  };
+
+  const handleOpenDrive = async () => {
+    if (openingDrive) return;
+    setOpeningDrive(true);
+    try {
+      const result = await openGoogleDriveDesktop();
+      setToast({ type: result.success ? 'success' : 'warning', text: result.message || 'Consulta de Google Drive completada.' });
+      await refreshStatus();
+    } finally { setOpeningDrive(false); }
   };
 
   const runArtifactAction = async (
@@ -367,19 +384,32 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   }, []);
 
   useEffect(() => {
+    const stopConnection = startVisiblePanelPolling(async signal => {
+      const response = await getInternetConnectivity(false, signal);
+      if (!signal.aborted && response.success && response.data) setConnectivity(response.data);
+    }, 10_000, ['online', 'offline']);
     const updateOnlineState = () => setBrowserOnline(navigator.onLine);
     window.addEventListener('online', updateOnlineState);
     window.addEventListener('offline', updateOnlineState);
-    const timer = window.setInterval(async () => {
+    // The initial/manual read owns the full diagnostic. Background refreshes
+    // are serial and infrequent; transfer progress uses the lightweight lane.
+    let first = true;
+    const stopDiagnostic = startVisiblePanelPolling(async signal => {
+      if (first) { first = false; return; }
       const response = await getCloudSyncStatus();
-      if (response.success && response.data) setStatus(response.data);
-    }, 15000);
-    return () => {
-      window.removeEventListener('online', updateOnlineState);
-      window.removeEventListener('offline', updateOnlineState);
-      window.clearInterval(timer);
-    };
+      if (!signal.aborted && response.success && response.data) setStatus(response.data);
+    }, 60_000);
+    return () => { stopConnection(); stopDiagnostic(); window.removeEventListener('online', updateOnlineState); window.removeEventListener('offline', updateOnlineState); };
   }, []);
+
+  useEffect(() => startVisiblePanelPolling(async signal => {
+    const response = await getLocalCloudSyncStatus({ lightweight: true, signal });
+    if (!signal.aborted && response.success && response.data) setStatus(current => current ? {
+      ...current, incrementalSync: response.data!.incrementalSync, continuousSync: response.data!.continuousSync,
+      downloadProgress: response.data!.downloadProgress, activeTransfers: response.data!.activeTransfers,
+      receivedChanges: response.data!.receivedChanges, mirrorTransfer: response.data!.mirrorTransfer,
+    } : current);
+  }, 2000), []);
 
   useEffect(() => {
     const handleExternalRefresh = () => {
@@ -687,12 +717,16 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
     });
   };
 
-  const badge = comparisonMeta[status?.comparison || 'local-mode'] || comparisonMeta['no-data'];
+  const badge = status
+    ? comparisonMeta[status.comparison] || comparisonMeta['no-data']
+    : { ...comparisonMeta['no-data'], label: loadingStatus ? 'Consultando estado...' : 'Estado no disponible' };
+  const driveDetection = getDriveDetectionState(status?.driveDesktop);
   const isDriveMode = configMode === 'drive_mirror';
   const isMirrorMode = configMode === 'drive_mirror';
   const remoteFolderName = status?.config.remoteUser?.folderName || sessionSyncProfile.driveFolderName;
   const remoteFolderUrl = status?.config.remoteUser?.folderUrl || sessionSyncProfile.driveFolderUrl;
   const conflictsSummary = status?.config.remoteActivity?.conflicts;
+  const incrementalConflicts = Number(status?.incrementalSync?.conflicts || 0);
   const versionsSummary = status?.config.remoteActivity?.versions;
   const latestConflict = conflictsSummary?.items?.[0] || null;
   const localEntitySummary = formatEntitySummary(status?.localManifest?.summary);
@@ -732,21 +766,22 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
   const incrementalState = status?.incrementalSync?.state || status?.continuousSync?.state || 'inactive';
   const synchronizationTone = !isDriveMode
     ? 'local'
-    : !browserOnline
-      || status?.driveDesktop?.state !== 'ready'
-      || ['error', 'unavailable', 'pending', 'waiting-for-drive', 'waiting-for-folder', 'protected-conflict'].includes(incrementalState)
-      ? 'error'
-      : loadingStatus || activeAction !== null || ['starting', 'syncing', 'waiting-for-quiet', 'needs-review'].includes(incrementalState)
-        ? 'syncing'
-        : 'ready';
+    : activeAction !== null ? 'syncing' : getSyncIndicatorTone(status ? { ...status, internetConnectivity: connectivity || status.internetConnectivity } : null, browserOnline);
   const synchronizationTitle = synchronizationTone === 'ready'
     ? 'Sincronizado: los cambios visibles estan en la carpeta espejo y Google Drive esta activo.'
+    : synchronizationTone === 'waiting'
+      ? status?.incrementalSync?.state === 'pending'
+        ? status.incrementalSync.message
+        : status?.driveDesktop?.message || status?.continuousSync?.message || 'Esperando a Drive; los datos locales siguen seguros.'
     : synchronizationTone === 'syncing'
       ? incrementalState === 'needs-review'
         ? 'Sincronizado con un cambio concurrente registrado para revision.'
         : 'Sincronizando cambios en segundo plano.'
       : synchronizationTone === 'error'
-        ? (!browserOnline ? 'No sincronizado: esta PC no tiene internet.' : status?.driveDesktop?.message || status?.incrementalSync?.message || 'No sincronizado; los datos locales siguen seguros.')
+        ? (connectivity?.online === false ? 'Sin conexion a Internet; comprobado desde esta PC.'
+          : status?.incrementalSync?.state === 'error' ? status.incrementalSync.message
+          : status?.continuousSync?.state === 'error' ? status.continuousSync.message
+          : status?.driveDesktop?.message || 'No sincronizado; los datos locales siguen seguros.')
         : 'Modo local: Google Drive no esta activo.';
   const toggleButtonClass = `
     relative group ${compact ? '-mr-[12rem] origin-left scale-[0.34]' : ''} flex h-[4.4rem] w-[18.5rem] items-center overflow-hidden rounded-full border
@@ -879,7 +914,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
             className={`absolute -right-0.5 -top-1 z-30 h-2.5 w-2.5 rounded-full border-2 border-white shadow-sm ${
               synchronizationTone === 'ready'
                 ? 'bg-emerald-500'
-                : synchronizationTone === 'syncing'
+                : synchronizationTone === 'syncing' || synchronizationTone === 'waiting'
                   ? 'animate-pulse bg-amber-400'
                   : synchronizationTone === 'error'
                     ? 'bg-rose-500'
@@ -941,11 +976,13 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                 <div className="rounded-2xl border border-sky-100 bg-sky-50 px-3 py-3 text-xs text-sky-800">
                   <p className="font-black uppercase tracking-[0.14em] text-sky-500">Google Drive gratuito</p>
                   <p className="mt-1 leading-relaxed">
-                    {status?.driveDesktop?.detected
+                    {driveDetection === 'detected'
                       ? 'Google Drive para escritorio fue detectado. Puedes vincular la carpeta que corresponda a esta cuenta.'
-                      : 'Google Drive para escritorio no fue detectado en esta PC.'}
+                      : driveDetection === 'not-detected'
+                        ? 'Google Drive para escritorio no fue detectado en esta PC.'
+                        : 'No se ha podido comprobar el estado de Google Drive. Esto no significa que no este instalado.'}
                   </p>
-                  {status?.driveDesktop?.detected ? (
+                  {driveDetection === 'detected' ? (
                     <button
                       type="button"
                       onClick={chooseMirrorFolder}
@@ -953,7 +990,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                     >
                       Elegir carpeta y activar
                     </button>
-                  ) : (
+                  ) : driveDetection === 'not-detected' ? (
                     <a
                       href="https://support.google.com/drive/answer/10838124"
                       target="_blank"
@@ -962,7 +999,7 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                     >
                       Descargar Google Drive
                     </a>
-                  )}
+                  ) : null}
                 </div>
               ) : null}
 
@@ -989,7 +1026,14 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                       >
                         Cambiar carpeta
                       </button>
-                      {!status?.driveDesktop?.detected ? (
+                      {status?.driveDesktop?.installed && status.driveDesktop.processRunning !== true ? (
+                        <button type="button" onClick={handleOpenDrive}
+                          disabled={openingDrive || status.driveDesktop.state === 'starting'}
+                          className="ml-2 mt-2 rounded-xl border border-sky-200 bg-white px-3 py-2 font-bold text-sky-700 disabled:opacity-50">
+                          {openingDrive || status.driveDesktop.state === 'starting' ? 'Iniciando Google Drive...' : 'Abrir Google Drive'}
+                        </button>
+                      ) : null}
+                      {driveDetection === 'not-detected' ? (
                         <a
                           href="https://support.google.com/drive/answer/10838124"
                           target="_blank"
@@ -1000,20 +1044,22 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
                         </a>
                       ) : null}
                       <p className="mt-2 leading-relaxed text-slate-500">
-                        ARMI comprueba la instalacion, abre Google Drive automaticamente cuando es posible y revisa la conexion a internet. Si Drive se pausa, los cambios permanecen seguros y se reintentan al reanudarlo.
+                        ARMI intenta iniciar Drive una sola vez por sesión. Si lo cierras, puedes abrirlo con el botón. Los cambios se guardan en esta PC y se copian automáticamente al espejo cuando la carpeta está disponible; Drive debe completar el envío para que lleguen a otra PC.
                       </p>
                       {status?.incrementalSync || status?.continuousSync ? (
                         <div className={`mt-2 rounded-xl border px-3 py-2 ${
                           synchronizationTone === 'ready'
                             ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                            : synchronizationTone === 'syncing'
+                            : synchronizationTone === 'syncing' || synchronizationTone === 'waiting'
                               ? 'border-amber-200 bg-amber-50 text-amber-800'
                               : 'border-rose-200 bg-rose-50 text-rose-800'
                         }`}>
                           <p className="font-black uppercase tracking-[0.12em]">Sincronizacion incremental</p>
+                          <SyncDeliveryDetails status={status} />
                           <p className="mt-1 leading-relaxed">{status.incrementalSync?.message || status.continuousSync?.message}</p>
                           <p className="mt-1 font-semibold">
-                            Internet: {status.driveDesktop?.internetOnline === false ? 'sin conexion; trabajando localmente' : 'disponible'}
+                            Internet: {(connectivity || status.internetConnectivity)?.online === true ? 'disponible'
+                              : (connectivity || status.internetConnectivity)?.online === false ? 'sin conexión' : 'comprobando conexión'}
                           </p>
                         </div>
                       ) : null}
@@ -1090,27 +1136,36 @@ export const CloudSyncPanel: React.FC<{ compact?: boolean }> = ({ compact = fals
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <div className="rounded-2xl bg-slate-50 px-3 py-3 text-slate-500">
                   <p className="font-black uppercase tracking-[0.14em] text-slate-400">Local</p>
-                  <p className="mt-1 leading-relaxed">{localDate}</p>
-                  <p className="mt-2 leading-relaxed text-slate-600">{localEntitySummary}</p>
+                  <p className="mt-1 leading-relaxed">{status ? localDate : 'Pendiente de consulta'}</p>
+                  <p className="mt-2 leading-relaxed text-slate-600">{status ? localEntitySummary : 'No se pudo consultar el resumen local.'}</p>
                 </div>
                 <div className="rounded-2xl bg-slate-50 px-3 py-3 text-slate-500">
-                  <p className="font-black uppercase tracking-[0.14em] text-slate-400">Drive</p>
-                  <p className="mt-1 leading-relaxed">{mirrorDate}</p>
+                  <p className="font-black uppercase tracking-[0.14em] text-slate-400">Copia base en Drive</p>
+                  <p className="mt-1 leading-relaxed">{status ? mirrorDate : 'Pendiente de consulta'}</p>
                   <p className="mt-2 leading-relaxed text-slate-600">
-                    {status?.mirrorManifest?.summary
+                    {!status ? 'Estado de la copia sin verificar.' : status?.mirrorManifest?.summary
                       ? driveEntitySummary
                       : remoteLookupMessage || 'Esta copia aun no trae resumen detallado.'}
                   </p>
+                  {status?.mirrorManifest?.generatedAt ? (
+                    <p className="mt-2 leading-relaxed text-sky-700">
+                      Es una referencia histórica. Los cambios posteriores viajan por sincronización incremental.
+                    </p>
+                  ) : null}
                 </div>
               </div>
 
               {isDriveMode ? (
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <div className="rounded-2xl bg-slate-50 px-3 py-3 text-slate-500">
-                    <p className="font-black uppercase tracking-[0.14em] text-slate-400">Conflictos</p>
-                    <p className="mt-1 text-sm font-semibold text-slate-800">{conflictsSummary?.count || 0}</p>
+                    <p className="font-black uppercase tracking-[0.14em] text-slate-400">
+                      {incrementalConflicts ? 'Cambios simultáneos resueltos' : 'Conflictos'}
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-slate-800">{incrementalConflicts || conflictsSummary?.count || 0}</p>
                     <p className="mt-1 leading-relaxed">
-                      {conflictsSummary?.latestAt ? new Date(conflictsSummary.latestAt).toLocaleString() : 'Sin conflictos pendientes'}
+                      {incrementalConflicts
+                        ? 'Cambios simultáneos resueltos y registrados; no representan filas perdidas.'
+                        : conflictsSummary?.latestAt ? new Date(conflictsSummary.latestAt).toLocaleString() : 'Sin conflictos pendientes'}
                     </p>
                     {conflictsSummary?.latestUrl ? (
                       <a

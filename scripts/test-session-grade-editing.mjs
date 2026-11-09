@@ -1,0 +1,67 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import express from 'express';
+import Database from 'better-sqlite3';
+import {parseHTML} from 'linkedom';
+import {createDataEpochFence} from '../backend/dataEpochFence.js';
+import {hybridGradeIssue} from '../backend/shared/hybridGradeIntegrity.js';
+
+const db=new Database(':memory:');
+db.exec(`CREATE TABLE armi_sync_migration_log(migration_id TEXT,applied_at TEXT);
+  INSERT INTO armi_sync_migration_log VALUES('verified-v4','2026-10-19');
+  CREATE TABLE evaluacion_registros(student_id TEXT,session_id TEXT,criteria_id TEXT,level TEXT,numeric_score REAL,observation TEXT,grading_mode TEXT,unit_id TEXT,instrument_id INTEGER);`);
+const row={student_id:'141',session_id:'2026-ept-5to-A-U6-S7',criteria_id:'primary-1',level:'a',numeric_score:15,observation:'Comentario que debe conservarse',grading_mode:'hybrid_vigesimal',unit_id:'U6',instrument_id:null};
+db.prepare('INSERT INTO evaluacion_registros VALUES(?,?,?,?,?,?,?,?,?)').run(...Object.values(row));
+const app=express();app.use(express.json());app.use('/api',createDataEpochFence(db));
+let rejectSave=false,writes=0,modeWrites=0;
+app.get('/api/evaluacion/registros',(req,res)=>res.json({success:true,data:db.prepare('SELECT * FROM evaluacion_registros WHERE session_id=?').all(req.query.sessionId)}));
+app.post('/api/evaluacion/registros',(req,res)=>{
+  if(rejectSave)return res.status(500).json({success:false,message:'No se pudo escribir en la base de prueba.'});
+  db.transaction(()=>{for(const r of req.body.records){assert.equal(hybridGradeIssue(r,r.grading_mode),'');
+    db.prepare('UPDATE evaluacion_registros SET level=?,numeric_score=?,observation=? WHERE student_id=? AND session_id=? AND criteria_id=?').run(r.level,r.numeric_score,r.observation,r.student_id,r.session_id,r.criteria_id);}})();writes++;res.json({success:true});
+});
+app.post('/api/evaluacion/modo-calificacion',(_req,res)=>{modeWrites++;res.json({success:true});});
+const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));}),origin=`http://127.0.0.1:${server.address().port}`;
+const nativeFetch=globalThis.fetch;
+const {window:domWindow,document}=parseHTML('<html><body><table><thead><tr>'+['C','B','A','AD'].map(level=>`<th title="Aplicar ${level}">${level}</th>`).join('')+'</tr></thead><tbody><tr>'+['c','b','a','ad'].map(level=>`<td><label><input type="radio" name="session-register-141-primary-1" value="${level}"></label></td>`).join('')+'</tr></tbody></table></body></html>');
+const window={HTMLInputElement:domWindow.HTMLInputElement,Element:domWindow.Element,Event:domWindow.Event};
+const cache=new Map([['armi_active_grading_mode_v1','hybrid_vigesimal']]);
+window.fetch=(url,init)=>nativeFetch(new URL(url,origin),init);window.location={origin,reload(){}};window.setTimeout=()=>0;
+window.innerWidth=1000;window.innerHeight=800;
+window.HTMLInputElement.prototype.focus=function(){};window.HTMLInputElement.prototype.select=function(){};
+document.getElementsByName=name=>[...document.querySelectorAll('input')].filter(input=>input.name===name);
+const storage={getItem:key=>cache.get(key)??null,setItem:(key,value)=>cache.set(key,value)};
+const context=vm.createContext({window,document,localStorage:storage,HTMLInputElement:window.HTMLInputElement,Element:window.Element,MutationObserver:class{observe(){}},URL,Response,Headers,console});
+const input=document.querySelector('input[value="a"]');input.checked=true;input.getBoundingClientRect=()=>({left:10,bottom:20});
+const original=()=>db.prepare('SELECT * FROM evaluacion_registros').get();
+const key=`${row.session_id}::141::primary-1`;
+const wait=async predicate=>{for(let i=0;i<200;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,10));}throw Error('Timed out waiting for a grade result');};
+const open=()=>{input.dispatchEvent(new window.Event('click',{bubbles:true,cancelable:true}));assert.ok(document.querySelector('[data-score-input]'));};
+try{
+  // Reproduce the installed failure without touching any real academic data.
+  const denied=await window.fetch('/api/evaluacion/registros',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({records:[row]})});
+  assert.equal(denied.status,409);assert.equal(writes,0);
+  vm.runInContext(fs.readFileSync('public/grading-modes-runtime.js','utf8'),context);
+  await window.fetch('/api/evaluacion/registros?sessionId='+row.session_id);
+  open();document.querySelector('[data-score-input]').value='16';document.querySelector('[data-save]').click();
+  await wait(()=>!document.querySelector('[data-score-input]'));
+  assert.equal(original().numeric_score,16,'An already selected A must allow changing 15 to 16');assert.equal(original().level,'a');assert.equal(original().observation,row.observation);
+  rejectSave=true;open();document.querySelector('[data-score-input]').value='19';document.querySelector('[data-save]').click();
+  await wait(()=>document.querySelector('[data-error]')?.textContent.includes('base de prueba'));
+  assert.equal(original().numeric_score,16);assert.equal(JSON.parse(cache.get('armi_hybrid_numeric_scores_v1'))[key],16,'A failed save must not change the displayed score cache');
+  rejectSave=false;document.querySelector('[data-save]').click();await wait(()=>!document.querySelector('[data-score-input]'));
+  assert.equal(original().numeric_score,19);assert.equal(original().level,'ad');assert.equal(original().observation,row.observation);
+  const bulk=document.querySelectorAll('th')[3];bulk.getBoundingClientRect=()=>({left:20,bottom:30});
+  bulk.dispatchEvent(new window.Event('click',{bubbles:true,cancelable:true}));document.querySelector('[data-score-input]').value='18,5';document.querySelector('[data-save]').click();await wait(()=>!document.querySelector('[data-score-input]'));
+  assert.equal(original().numeric_score,18.5,'A bulk change within the same literal level must reach the database');assert.equal(original().level,'ad');assert.equal(original().observation,row.observation);
+  assert.equal((await window.fetch('/api/evaluacion/modo-calificacion',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,200);assert.equal(modeWrites,1,'The grading-mode control must use the same verified epoch');
+  const before=JSON.stringify(original());open();document.querySelector('[data-score-input]').value='10';document.querySelector('[data-cancel]').click();assert.equal(JSON.stringify(original()),before);
+  open();await window.fetch('/api/evaluacion/registros?sessionId=another-session');document.querySelector('[data-score-input]').value='3';document.querySelector('[data-save]').click();
+  assert.match(document.querySelector('[data-error]').textContent,/cambiaron/);assert.equal(JSON.stringify(original()),before,'An open editor must not save into another session');document.querySelector('[data-cancel]').click();
+  await window.fetch('/api/evaluacion/registros?sessionId='+row.session_id);open();
+  db.prepare('INSERT INTO armi_sync_migration_log VALUES(?,?)').run('verified-v5','2026-10-29');await window.fetch('/api/evaluacion/registros?sessionId='+row.session_id);
+  document.querySelector('[data-score-input]').value='11';document.querySelector('[data-save]').click();assert.match(document.querySelector('[data-error]').textContent,/cambiaron/);assert.equal(JSON.stringify(original()),before,'A changed epoch must remain protected');
+  assert.equal(writes,3);
+  console.log('OK: reproduced stale-epoch rejection; existing same-letter and changed-letter edits persist, observations survive, failed/cancelled edits roll back, and changed-session/epoch writes remain blocked.');
+}finally{await new Promise(resolve=>server.close(resolve));db.close();}

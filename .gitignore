@@ -13,6 +13,7 @@ dist/
 dist-ssr/
 build/*
 !build/installer.nsh
+!build/check-install-processes.ps1
 out/
 release/
 

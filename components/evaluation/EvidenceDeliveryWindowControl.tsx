@@ -10,11 +10,12 @@ const toLocalInput = (value?: string) => {
 };
 
 type Props = {
+  section?: string;
   sessionId: string;
   sessionLabel: string;
 };
 
-export const EvidenceDeliveryWindowControl: React.FC<Props> = ({ sessionId, sessionLabel }) => {
+export const EvidenceDeliveryWindowControl: React.FC<Props> = ({ sessionId, sessionLabel, section = '' }) => {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [enabled, setEnabled] = useState(true);
@@ -24,13 +25,14 @@ export const EvidenceDeliveryWindowControl: React.FC<Props> = ({ sessionId, sess
   const [closeAt, setCloseAt] = useState('');
   const [message, setMessage] = useState('');
   const [configured, setConfigured] = useState(false);
+  const [loadRevision, setLoadRevision] = useState(0);
 
   useEffect(() => {
     let active = true;
     if (!sessionId) return;
     setLoading(true);
     setMessage('');
-    getEvidenceDeliveryWindow(sessionId).then((result) => {
+    getEvidenceDeliveryWindow(sessionId, section).then((result) => {
       if (!active) return;
       if (result.success) {
         setConfigured(!!result.data?.explicit);
@@ -44,12 +46,13 @@ export const EvidenceDeliveryWindowControl: React.FC<Props> = ({ sessionId, sess
       }
     }).finally(() => active && setLoading(false));
     return () => { active = false; };
-  }, [sessionId]);
+  }, [sessionId, section, loadRevision]);
 
   const save = async () => {
     setSaving(true);
     setMessage('');
     const result = await saveEvidenceDeliveryWindow(sessionId, {
+      section,
       enabled,
       exceptional: true,
       openFrom,
@@ -59,16 +62,17 @@ export const EvidenceDeliveryWindowControl: React.FC<Props> = ({ sessionId, sess
     setMessage(result.success
       ? (enabled ? 'Plazo excepcional guardado. Ya se refleja en el portal del estudiante.' : 'La recepción de esta sesión quedó cerrada.')
       : (result.message || 'No se pudo guardar el plazo.'));
-    if (result.success) setConfigured(true);
+    if (result.success) { setConfigured(true); setLoadRevision(value => value + 1); }
   };
 
   const reset = async () => {
     setSaving(true);
-    const result = await resetEvidenceDeliveryWindow(sessionId);
+    const result = await resetEvidenceDeliveryWindow(sessionId, section);
     setSaving(false);
     if (result.success) {
       setConfigured(false);
       setEnabled(true);
+      setLoadRevision(value => value + 1);
       setMessage('Se restauraron los plazos automáticos calculados desde la fecha de la sesión.');
     } else {
       setMessage(result.message || 'No se pudo restaurar la disponibilidad automática.');
@@ -81,6 +85,7 @@ export const EvidenceDeliveryWindowControl: React.FC<Props> = ({ sessionId, sess
         <div>
           <p className="text-[9px] font-black uppercase tracking-[0.16em] text-violet-600">Disponibilidad excepcional</p>
           <h3 className="mt-1 text-xs font-black text-slate-800">{sessionLabel}</h3>
+          {section && <p className="mt-1 text-xs font-bold text-violet-700">Sección {section}</p>}
           <p className="mt-1 text-[10px] font-semibold leading-relaxed text-slate-500">El plazo normal se calcula desde la fecha de la sesión. Aquí solo puedes ampliar la recepción tardía o cerrarla excepcionalmente.</p>
         </div>
         <label className="m-0 flex items-center gap-2 rounded-full border border-violet-100 bg-white px-3 py-2 text-[9px] font-black uppercase tracking-widest text-violet-700">

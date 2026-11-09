@@ -746,7 +746,7 @@ export const GeneralNotesFloatingButton: React.FC<{ onClick: () => void }> = ({ 
   <button
     type="button"
     onClick={onClick}
-    className="fixed bottom-5 right-[4.25rem] z-40 flex h-9 w-9 items-center justify-center rounded-full border border-violet-200 bg-white/95 text-violet-700 shadow-[0_16px_40px_rgba(15,23,42,0.16)] backdrop-blur transition hover:-translate-y-0.5 hover:bg-violet-50 hover:border-violet-300 print:hidden"
+    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-violet-200 bg-white/95 text-violet-700 shadow-[0_16px_40px_rgba(15,23,42,0.16)] backdrop-blur transition hover:bg-violet-50 hover:border-violet-300 print:hidden"
     title="Abrir notas"
     aria-label="Abrir notas"
   >

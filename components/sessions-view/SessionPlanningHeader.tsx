@@ -1,5 +1,7 @@
-import React from 'react';
+import React, { useRef } from 'react';
+import { SessionActions } from './SessionActions';
 import { Select } from '../Select';
+import { SessionGlassButton } from './SessionGlassButton';
 import {
     CustomDatePicker,
     cloneInitialSessionData
@@ -42,6 +44,7 @@ type SessionPlanningHeaderProps = {
     setIsDatePickerOpen: (value: boolean) => void;
     triggerDateChange: (value: string) => void;
     sessionMode: string;
+    activeGradingSection?: string;
     setSessionMode: (value: 'planificacion' | 'calificacion') => void;
 };
 
@@ -80,67 +83,30 @@ export const SessionPlanningHeader: React.FC<SessionPlanningHeaderProps> = ({
     setIsDatePickerOpen,
     triggerDateChange,
     sessionMode,
+    activeGradingSection,
     setSessionMode
-}) => (
+}) => {
+const headerRef = useRef<HTMLDivElement>(null);
+return (
 <>
-            <div className="absolute top-6 right-12 z-[300] print:hidden">
-                <div 
-                    className="w-10 h-10 rounded-full border-2 border-white/40 shadow-lg cursor-pointer overflow-hidden transition-transform hover:scale-110 active:scale-95 flex items-center justify-center bg-white/20 backdrop-blur-md"
-                    title="Personalizar color del apartado"
-                >
-                    <span className="text-xl">🎨</span>
-                    <input 
-                        type="color" 
-                        value={themeColor} 
-                        onChange={(e) => {
-                            setThemeColor(e.target.value);
-                            localStorage.setItem('armi_sessions_theme', e.target.value);
-                        }}
-                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                    />
-                </div>
-            </div>
-
-            <div className="p-6 rounded-[2.5rem] shadow-xl relative overflow-visible text-white transition-colors duration-500 print:hidden" style={{ backgroundColor: themeColor }}>
+            <div ref={headerRef} className="p-5 rounded-[2rem] shadow-xl relative overflow-visible text-white transition-colors duration-500 print:hidden" style={{ backgroundColor: themeColor, backgroundImage: 'radial-gradient(ellipse at 84% -35%, rgba(255,255,255,.24), transparent 52%)' }}>
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-white/30 to-transparent"></div>
-                <div className="flex flex-col lg:flex-row justify-between items-center gap-6">
-                    <div className="flex items-center gap-4">
-                        <div className="bg-white/20 p-3 rounded-2xl border border-white/30 shadow-inner">
-                        <span className="text-3xl">📘</span></div>
-                        <div className="flex flex-col">
-                            <h1 className="text-3xl font-black italic font-serif tracking-tight uppercase leading-none">Sesiones de Aprendizaje {year}</h1><span className="text-xs font-bold text-white/70 uppercase tracking-widest mt-1">Planificación de sesiones - {bimesterLabel} Bimestre</span></div>
+                <div className="session-header-top">
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
+                        <div className="bg-white/10 p-2 rounded-xl border border-white/20">
+                        <span className="text-2xl">📘</span></div>
+                        <div className="flex min-w-0 flex-col">
+                            <h1 className="text-xl xl:text-2xl font-black italic font-serif tracking-tight uppercase leading-tight">Sesiones de Aprendizaje {year}</h1><span className="text-[10px] font-bold text-white/70 uppercase tracking-widest mt-1">Planificación de sesiones - {bimesterLabel} Bimestre</span></div>
                     </div>
                     
-                    <div className="bg-white/20 p-3 rounded-[3rem] border border-white/30 shadow-inner backdrop-blur-md flex gap-3 ml-auto lg:mr-16">
-                        <div className="relative shrink-0">
-                            <button onClick={handleGenerateAI} disabled={!headerFilled || isGeneratingIA} className={`btn-3d-purple scale-90 ${!headerFilled ? 'opacity-40 grayscale cursor-not-allowed' : (isGeneratingIA ? 'animate-pulse' : '')}`} title={`Completar con IA Armi\n${aiUsageProgress.tokenLabel}`}>
-                                {isGeneratingIA ? <span className="text-xl">✨</span> : <span>🤖</span>}
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setShowAuthScreen(true)}
-                                className="absolute -top-1 -right-1 flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-[10px] font-black text-slate-700 shadow-lg transition hover:bg-slate-50"
-                                title="Configuración de IA"
-                            >
-                                ⚙
-                            </button>
-                        </div>
-                        <button onClick={() => { void handleSave(); }} className="btn-3d-plus scale-90" title="Guardar Sesión">
-                            <span>+</span>
-                        </button>
-                        <button onClick={() => setSessionData(cloneInitialSessionData())} className="btn-3d-clear scale-90" title="Limpiar Formulario">
-                            <span>🧹</span>
-                        </button>
-                        <button onClick={handleOpenManager} className="btn-3d-purple scale-90" title="Ver Database">
-                            <span>🗄️</span>
-                        </button>
-                        <button onClick={() => { void handleOpenTemplateMode(); }} className="btn-3d-blue scale-90" title="Ver Plantilla">
-                            <span>📄</span>
-                        </button>
-                    </div>
+                    <SessionActions headerRef={headerRef} themeColor={themeColor} setThemeColor={setThemeColor}
+                        contextLabel={`${selGrade || 'Grado'} ${sessionMode === 'calificacion' ? activeGradingSection || selSection : selSection} · U${unitNumber} · S${sessionNumber}`}
+                        headerFilled={headerFilled} isGeneratingIA={isGeneratingIA} aiTokenLabel={aiUsageProgress.tokenLabel}
+                        onAI={handleGenerateAI} onAISettings={() => setShowAuthScreen(true)} onSave={handleSave}
+                        onClear={() => setSessionData(cloneInitialSessionData())} onManager={handleOpenManager} onTemplate={handleOpenTemplateMode} />
                 </div>
 
-                <div className="mt-8 grid grid-cols-1 md:grid-cols-12 gap-4 bg-black/10 p-5 rounded-[2.5rem] border border-white/10 backdrop-blur-md relative z-[200] overflow-visible">
+                <div className="mt-5 grid grid-cols-1 md:grid-cols-12 gap-3 bg-black/10 p-4 rounded-[1.5rem] border border-white/10 backdrop-blur-md relative z-[200] overflow-visible">
                     <div className="absolute -top-3 right-8 z-30 pointer-events-none">
                         <div className="bg-slate-900/80 backdrop-blur-xl px-4 py-1.5 rounded-full border border-white/20 shadow-2xl flex items-center gap-2.5 ring-4 ring-black/5">
                             <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></div>
@@ -229,23 +195,24 @@ export const SessionPlanningHeader: React.FC<SessionPlanningHeaderProps> = ({
                     </div>
                 </div>
 
-                <div className="mt-5 flex gap-2">
-                    <button
+                <div className="session-glass-modes" data-mode={sessionMode} role="group" aria-label="Modo de sesión">
+                    <SessionGlassButton
                         onClick={() => setSessionMode('planificacion')}
-                        className={`px-5 py-2 rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all ${sessionMode === 'planificacion' ? 'bg-white text-slate-900 shadow-lg' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                        className="session-glass-mode" aria-pressed={sessionMode === 'planificacion'}
                     >
                         Planificación
-                    </button>
-                    <button
+                    </SessionGlassButton>
+                    <SessionGlassButton
                         onClick={() => setSessionMode('calificacion')}
-                        className={`px-5 py-2 rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all ${sessionMode === 'calificacion' ? 'bg-white text-slate-900 shadow-lg' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                        className="session-glass-mode" aria-pressed={sessionMode === 'calificacion'}
                     >
                         Calificación
-                    </button>
+                    </SessionGlassButton>
                 </div>
             </div>
 
 
 </>
 );
+};
 

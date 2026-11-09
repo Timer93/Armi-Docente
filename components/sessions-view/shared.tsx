@@ -1,5 +1,8 @@
 ﻿import React from 'react';
 import { CustomDatePicker, InternalToast, AuthOverlay } from './overlays';
+import { normalizeSessionPlainFields } from '../../backend/shared/sessionPlainText.js';
+import { reconcileSessionCapacities } from '../../backend/shared/sessionCapacityReconciliation.js';
+import { findSessionInstrumentRow, sessionCriterionScopeMatches } from '../../backend/shared/sessionCriterionIdentity.js';
 import type { SessionAssessmentModel, SessionAssessmentCriterionRow, SessionAssessmentLevelCode, SessionAssessmentRowType } from '../../types';
 
 const ENFOQUE_DETAILS: Record<string, any> = {
@@ -929,6 +932,7 @@ const splitCriteriaAcrossCapacityNames = (criteria: any[], capacities: string[])
 };
 
 const buildAssessmentModelFromData = (data: any, source: 'unit' | 'sql' | 'ai' | 'system' = 'system') => {
+    data = reconcileSessionCapacities(data);
     const existing = data?.assessmentModel && typeof data.assessmentModel === 'object' ? data.assessmentModel : {};
     const directCompetencia = String(data?.competenciaPrio?.comp || '').trim();
     const existingCompetencia = String(existing?.competencia || '').trim();
@@ -1081,7 +1085,7 @@ const buildSessionAssessmentModel = (data: any, meta: any = {}): SessionAssessme
 });
 
 const ensureSessionAssessmentModel = (data: any, meta: any = {}) => {
-    const base = data && typeof data === 'object' ? data : {};
+    const base = reconcileSessionCapacities(normalizeSessionPlainFields(data && typeof data === 'object' ? data : {}));
     const sessionAssessmentModel = buildSessionAssessmentModel(base, meta);
     const instrumentRows = Array.isArray(base?.instrumento) ? base.instrumento : [];
     const canonicalRows = Array.isArray(sessionAssessmentModel?.rows) ? sessionAssessmentModel.rows : [];
@@ -1141,10 +1145,6 @@ const buildSessionInstrumentRows = (template: any, sessionAssessmentModel: Sessi
 
     if (sourceRows.length === 0) return fallbackCurrent;
 
-    const byCriterion = new Map(
-        fallbackCurrent.map((row: any) => [`${normalizeLoose(row.criterio)}::${normalizeLoose(row.capacidad)}::${normalizeLoose(row.competencia)}`, row])
-    );
-
     const seenKeys = new Set<string>();
     const preferRowLabel = (currentValue: any, canonicalValue: any, prefix: 'competencia' | 'capacidad') => {
         const currentText = String(currentValue || '').trim();
@@ -1152,21 +1152,25 @@ const buildSessionInstrumentRows = (template: any, sessionAssessmentModel: Sessi
         if (!canonicalText) return currentText;
         if (!currentText) return canonicalText;
         if (isGenericCurricularLabel(currentText, prefix) && !isGenericCurricularLabel(canonicalText, prefix)) return canonicalText;
-        return currentText;
+        return prefix === 'capacidad' ? canonicalText : currentText;
     };
 
     return sourceRows.reduce((acc: any[], row, idx) => {
         const key = `${normalizeLoose(row.criterionText)}::${normalizeLoose(row.capacityName)}::${normalizeLoose(row.competencyName)}::${normalizeLoose(row.source || '')}`;
         if (!normalizeLoose(row.criterionText) || seenKeys.has(key)) return acc;
         seenKeys.add(key);
-        const current = byCriterion.get(`${normalizeLoose(row.criterionText)}::${normalizeLoose(row.capacityName)}::${normalizeLoose(row.competencyName)}`) || fallbackCurrent[idx] || {};
+        const current = findSessionInstrumentRow(row, currentRows, idx, sourceRows) || {};
+        const fallbackId = String(row?.id || acc.length + 1);
+        const idConflict = currentRows.some((item: any) => String(item?.id) === fallbackId && !sessionCriterionScopeMatches(row, item));
+        // A regenerated row must not inherit the ID/grade of another competency.
+        const identityHash = Array.from(key).reduce((hash, char) => Math.imul(hash ^ char.charCodeAt(0), 16777619), 2166136261) >>> 0;
         const rowLevelDescriptors = SESSION_LEVEL_KEYS.reduce((acc, levelKey) => {
             const value = String(current?.[levelKey] || row?.levelDescriptors?.[levelKey] || '').trim();
             if (value) acc[levelKey] = value;
             return acc;
         }, {} as Partial<Record<SessionAssessmentLevelCode, string>>);
         acc.push({
-            id: String(current?.id || row?.id || acc.length + 1),
+            id: String(current?.id || (idConflict ? `criterion-${identityHash.toString(16)}` : fallbackId)),
             competencia: preferRowLabel(current?.competencia, row?.competencyName, 'competencia'),
             capacidad: preferRowLabel(current?.capacidad, row?.capacityName, 'capacidad'),
             criterio: String(row?.criterionText || current?.criterio || '').trim(),

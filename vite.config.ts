@@ -24,6 +24,11 @@ export default defineConfig(({ mode }) => {
         ],
       },
       proxy: {
+        '/estudiante-assets': {
+          target: 'http://127.0.0.1:3000',
+          changeOrigin: true,
+          secure: false,
+        },
         '/estudiante': {
           target: 'http://127.0.0.1:3001',
           changeOrigin: true,
@@ -32,6 +37,7 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: 'http://127.0.0.1:3000',
           changeOrigin: true,
+          xfwd: true,
           secure: false,
           // No usamos rewrite para que el backend reciba el prefijo /api tal como está configurado
         },

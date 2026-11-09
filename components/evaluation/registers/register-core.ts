@@ -1,5 +1,7 @@
 import type { Student } from '../../../types';
-import { buildSessionAssessmentModel, extractCapacidades, normalizeLoose, TRANSVERSAL_CAPACITY_MAP } from '../../sessions-view/shared';
+import { teacherGradeRecords } from '../../../backend/shared/teacherGradeSource.js';
+import { resolveSessionCriterionRows } from '../../../backend/shared/sessionCriterionIdentity.js';
+import { buildSessionAssessmentModel, ensureSessionAssessmentModel, extractCapacidades, normalizeLoose, TRANSVERSAL_CAPACITY_MAP } from '../../sessions-view/shared';
 import type {
   AggregatedCompetencySummary,
   AggregatedRegisterResult,
@@ -15,23 +17,27 @@ import type {
   UnitRegisterSnapshot
 } from './register-types';
 
+export const createRegisterAggregation = (gradingMode?: string) => {
+
 const SESSION_LEVEL_ORDER: Array<Exclude<RegisterLevelCode, 'ne'>> = ['c', 'b', 'a', 'ad'];
 const OVERALL_SCORE_MAP: Record<Exclude<RegisterLevelCode, 'ne'>, number> = { c: 0, b: 1, a: 2, ad: 3 };
 
-const isPredominanceMode = () => (globalThis as any)?.window?.__armiActiveGradingMode === 'criterial_predominance';
-const isHybridMode = () => (globalThis as any)?.window?.__armiActiveGradingMode === 'hybrid_vigesimal';
+const isPredominanceMode = () => (gradingMode ?? (globalThis as any)?.window?.__armiActiveGradingMode) === 'criterial_predominance';
+const isHybridMode = () => (gradingMode ?? (globalThis as any)?.window?.__armiActiveGradingMode) === 'hybrid_vigesimal';
 
 type ScoredResult = {
   code: RegisterLevelCode;
   numericScore: number | null;
   pending: boolean;
+  rawNumericScore?: number | null;
+  roundAverage?: boolean;
 };
 const normalizeNumericScore = (value: unknown): number | null => {
   if (value === null || value === undefined || value === '') return null;
   const score = Number(value);
   return Number.isFinite(score) && score >= 0 && score <= 20 ? score : null;
 };
-export const numericScoreToRegisterLevel = (score: number): Exclude<RegisterLevelCode, 'ne'> => {
+const numericScoreToRegisterLevel = (score: number): Exclude<RegisterLevelCode, 'ne'> => {
   if (score >= 18) return 'ad';
   if (score >= 14) return 'a';
   if (score >= 11) return 'b';
@@ -39,19 +45,22 @@ export const numericScoreToRegisterLevel = (score: number): Exclude<RegisterLeve
 };
 
 const aggregateResults = (
-  values: Array<{ code?: RegisterLevelCode | ''; numericScore?: number | null; pending?: boolean }>,
+  values: Array<{ code?: RegisterLevelCode | ''; numericScore?: number | null; rawNumericScore?: number | null; roundAverage?: boolean; pending?: boolean }>,
   inactiveCode: RegisterLevelCode | null = null,
   literalStrategy: 'session' | 'average' = 'average'
 ): ScoredResult => {
   if (inactiveCode) return { code: inactiveCode, numericScore: null, pending: false };
 
   if (isHybridMode()) {
-    const scores = values.map((value) => normalizeNumericScore(value.numericScore));
+    const scores = values.map((value) => normalizeNumericScore(value.rawNumericScore ?? value.numericScore));
+    const roundAverage = values.length > 0 && values.every(value => value.roundAverage === true);
     if (!values.length || values.some((value, index) => value.pending || scores[index] === null)) {
-      return { code: 'ne', numericScore: null, pending: true };
+      return { code: 'ne', numericScore: null, pending: true, roundAverage };
     }
-    const numericScore = scores.reduce<number>((sum, score) => sum + (score as number), 0) / scores.length;
-    return { code: numericScoreToRegisterLevel(numericScore), numericScore, pending: false };
+    const rawNumericScore = scores.reduce<number>((sum, score) => sum + (score as number), 0) / scores.length;
+    // Rounding chooses the achievement level only; retain the actual average.
+    const scoreForLevel = roundAverage ? Math.round(rawNumericScore) : rawNumericScore;
+    return { code: numericScoreToRegisterLevel(scoreForLevel), numericScore: rawNumericScore, rawNumericScore, roundAverage, pending: false };
   }
 
   const codes = values.map((value) => value.code || '');
@@ -87,7 +96,7 @@ const getStudentInactiveCode = (student: Student | undefined): RegisterLevelCode
   return null;
 };
 
-export const inferBimesterLabelFromUnitNumber = (unitNumber: string | number) => {
+const inferBimesterLabelFromUnitNumber = (unitNumber: string | number) => {
   const parsed = Number(unitNumber || 0);
   if (parsed <= 2) return 'I';
   if (parsed <= 4) return 'II';
@@ -95,7 +104,7 @@ export const inferBimesterLabelFromUnitNumber = (unitNumber: string | number) =>
   return 'IV';
 };
 
-export const normalizeRegisterLevelCode = (rawLevel: any): RegisterLevelCode | '' => {
+const normalizeRegisterLevelCode = (rawLevel: any): RegisterLevelCode | '' => {
   const normalized = normalizeLoose(String(rawLevel || ''));
   if (!normalized) return '';
   if (normalized === 'ad' || normalized === 'destacado') return 'ad';
@@ -168,7 +177,7 @@ const buildCompetenciesFromCapacities = (
 
 const getRecordMap = (records: EvaluationRecordRow[]) => {
   const map = new Map<string, EvaluationRecordRow>();
-  records.forEach((record) => {
+  teacherGradeRecords(records).forEach((record) => {
     map.set(`${String(record.student_id)}::${String(record.session_id)}::${String(record.criteria_id)}`, record);
   });
   return map;
@@ -242,16 +251,28 @@ const sanitizeSessionAssessmentRows = (rows: any[], sessionData: any) => {
 };
 
 const getSessionRows = (session: SessionDetailEntry) => {
-  const model = session?.sessionData?.sessionAssessmentModel || buildSessionAssessmentModel(session?.sessionData || {}, {
-    areaId: session.areaId,
-    grade: session.grade,
-    section: session.section,
-    unitNumber: session.unitNumber,
-    sessionNumber: session.sessionNumber,
-    bimester: session.bimesterLabel
+  const stored = session?.sessionData || {};
+  const meta = {
+    areaId: session.areaId, grade: session.grade, section: session.section,
+    unitNumber: session.unitNumber, sessionNumber: session.sessionNumber, bimester: session.bimesterLabel
+  };
+  // The session screen hydrates legacy instruments before rendering them.
+  // Resolve the same projection here: raw snapshots may still contain five
+  // evidence rows while the actual grading screen has three criteria.
+  // Preserve snapshot-only sessions that have no planning to regenerate from.
+  const model = stored.sessionAssessmentModel || buildSessionAssessmentModel(stored, meta);
+  const canonical = resolveSessionCriterionRows(stored, sanitizeSessionAssessmentRows(Array.isArray(model?.rows) ? model.rows : [], stored));
+  const projected = ensureSessionAssessmentModel(stored, meta);
+  const projectedRows = resolveSessionCriterionRows(projected, projected.sessionAssessmentModel?.rows || []);
+  const identity = (row: any) => [row.source || 'primary', row.competencyName, row.capacityName, row.criterionText].map(value => normalizeLoose(String(value || ''))).join('::');
+  // Keep current stored IDs first. The display projection supplies secondary
+  // references only for an identical criterion and never steals another row's ID.
+  return canonical.map((row: any, index: number) => {
+    const matches = projectedRows.filter((candidate: any) => identity(candidate) === identity(row));
+    if (matches.length !== 1) return row;
+    const aliases = (matches[0].recordIds || []).filter((id: string) => !canonical.some((other: any, otherIndex: number) => otherIndex !== index && other.recordIds.includes(id)));
+    return { ...row, recordIds: [...new Set([...(row.recordIds || []), ...aliases])] };
   });
-
-  return sanitizeSessionAssessmentRows(Array.isArray(model?.rows) ? model.rows : [], session?.sessionData || {});
 };
 
 const getSessionRecord = (
@@ -261,11 +282,7 @@ const getSessionRecord = (
   row: any,
   rowIndex: number
 ): EvaluationRecordRow | undefined => {
-  const keysToTry = [
-    String(row?.id || '').trim(),
-    String(rowIndex + 1),
-    String((Array.isArray(session?.sessionData?.instrumento) ? session.sessionData.instrumento[rowIndex]?.id : '') || '').trim()
-  ].filter(Boolean);
+  const keysToTry = Array.isArray(row?.recordIds) ? row.recordIds : [String(row?.id || '').trim()].filter(Boolean);
 
   for (const criteriaId of keysToTry) {
     const stored = recordMap.get(`${String(studentId)}::${session.id}::${criteriaId}`);
@@ -275,7 +292,7 @@ const getSessionRecord = (
   return undefined;
 };
 
-export const buildSessionRegisterSnapshots = ({ sessions, students, records }: RegisterSourceBundle): SessionRegisterSnapshot[] => {
+const buildSessionRegisterSnapshots = ({ sessions, students, records }: RegisterSourceBundle): SessionRegisterSnapshot[] => {
   const recordMap = getRecordMap(records);
 
   return sessions.map((session) => {
@@ -319,6 +336,7 @@ export const buildSessionRegisterSnapshots = ({ sessions, students, records }: R
           return {
             code: normalizeRegisterLevelCode(record?.level),
             numericScore: normalizeNumericScore(record?.numeric_score),
+            roundAverage: session?.sessionData?.numericAverageRounding === 'nearest_integer',
             pending: !record
           };
         }),
@@ -439,7 +457,7 @@ const buildUnitSnapshotsFromSessionSnapshots = (
     });
 };
 
-export const buildUnitRegisterAggregation = ({ sessions, students, records }: RegisterSourceBundle): AggregatedRegisterResult => {
+const buildUnitRegisterAggregation = ({ sessions, students, records }: RegisterSourceBundle): AggregatedRegisterResult => {
   const sessionSnapshots = buildSessionRegisterSnapshots({ sessions, students, records });
   const unitSnapshots = buildUnitSnapshotsFromSessionSnapshots(sessionSnapshots, students);
 
@@ -500,7 +518,7 @@ export const buildUnitRegisterAggregation = ({ sessions, students, records }: Re
   };
 };
 
-export const buildBimesterRegisterAggregation = ({ sessions, students, records }: RegisterSourceBundle): AggregatedRegisterResult => {
+const buildBimesterRegisterAggregation = ({ sessions, students, records }: RegisterSourceBundle): AggregatedRegisterResult => {
   const sessionSnapshots = buildSessionRegisterSnapshots({ sessions, students, records });
   const sessionsByUnit = new Map<string, SessionDetailEntry[]>();
   sessions.forEach((session) => {
@@ -593,3 +611,14 @@ export const buildBimesterRegisterAggregation = ({ sessions, students, records }
     units: Array.from(sessionsByUnit.keys()).sort((left, right) => Number(left) - Number(right))
   };
 };
+
+return { numericScoreToRegisterLevel, inferBimesterLabelFromUnitNumber, normalizeRegisterLevelCode, buildSessionRegisterSnapshots, buildUnitRegisterAggregation, buildBimesterRegisterAggregation };
+};
+
+const defaultAggregation = createRegisterAggregation();
+export const numericScoreToRegisterLevel = defaultAggregation.numericScoreToRegisterLevel;
+export const inferBimesterLabelFromUnitNumber = defaultAggregation.inferBimesterLabelFromUnitNumber;
+export const normalizeRegisterLevelCode = defaultAggregation.normalizeRegisterLevelCode;
+export const buildSessionRegisterSnapshots = defaultAggregation.buildSessionRegisterSnapshots;
+export const buildUnitRegisterAggregation = defaultAggregation.buildUnitRegisterAggregation;
+export const buildBimesterRegisterAggregation = defaultAggregation.buildBimesterRegisterAggregation;

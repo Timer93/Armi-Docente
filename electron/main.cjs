@@ -3,6 +3,11 @@ const fs = require('fs');
 const { app, BrowserWindow, Menu, dialog, ipcMain, utilityProcess } = require('electron');
 const { createUpdaterController } = require('./updater.cjs');
 const { ensureLanAccess } = require('./lan-access.cjs');
+const { waitForServer } = require('./backend-readiness.cjs');
+const { createCloseHandshake } = require('./close-handshake.cjs');
+const { loadStartupPage } = require('./startup-navigation.cjs');
+const { createPrintPreviewController } = require('./print-preview.cjs');
+const { stopUtilityBackend } = require('./backend-shutdown.cjs');
 
 const appRoot = path.resolve(__dirname, '..');
 const isDev = !app.isPackaged;
@@ -37,9 +42,29 @@ let backendProcess = null;
 let mainWindowRef = null;
 let splashWindowRef = null;
 let allowWindowClose = false;
-let closeHandshakePending = false;
+let closeHandshake = null;
 let remoteShutdownPromise = null;
+let printPreviewController = null;
+let backendStopExpected = false;
+let backendRestartTimer = null;
+let backendRestartInFlight = false;
+let backendRestartAttempts = 0;
+let backendRestartAfterExpectedStop = false;
+const MAX_BACKEND_RESTART_ATTEMPTS = 5;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+const stopBackendImmediately = async () => {
+  const processToStop = backendProcess;
+  backendProcess = null;
+  if (!processToStop?.pid) return;
+  backendStopExpected = true;
+  try {
+    await stopUtilityBackend(processToStop, { timeoutMs: 1000 });
+    logLine('Backend detenido después de un inicio fallido', { pid: processToStop.pid });
+  } catch (error) {
+    logLine('No se pudo detener el backend después del fallo', { message: String(error?.message || error) });
+  }
+};
 
 if (!hasSingleInstanceLock) {
   app.quit();
@@ -186,21 +211,14 @@ const createSplashWindow = async (appIconPath) => {
 
 const shutdownRemoteAccess = async () => {
   if (remoteShutdownPromise) return remoteShutdownPromise;
+  backendStopExpected = true;
+  backendRestartAfterExpectedStop = false;
+  clearTimeout(backendRestartTimer);
+  backendRestartTimer = null;
   remoteShutdownPromise = Promise.resolve()
     .then(async () => {
       if (!backendProcess?.pid) return;
-      try {
-        await fetch('http://127.0.0.1:3000/api/remote-access/stop', {
-          method: 'POST',
-          signal: AbortSignal.timeout(12_000),
-        });
-      } catch (error) {
-        logLine('El backend no confirmo el cierre del acceso remoto', {
-          message: String(error?.message || error),
-        });
-      } finally {
-        if (backendProcess?.pid) backendProcess.kill();
-      }
+      await stopUtilityBackend(backendProcess);
     })
     .catch((error) => {
       logLine('No se pudo detener limpiamente el acceso remoto', {
@@ -210,22 +228,7 @@ const shutdownRemoteAccess = async () => {
   return remoteShutdownPromise;
 };
 
-const waitForServer = async (url, timeoutMs = 30000) => {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) return true;
-    } catch {}
-
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  return false;
-};
-
-const showEditableContextMenu = (mainWindow, params) => {
+const showEditableContextMenu = (mainWindow, params, studentContext = null) => {
   const template = [];
   const suggestions = Array.isArray(params?.dictionarySuggestions)
     ? params.dictionarySuggestions.filter(Boolean).slice(0, 6)
@@ -269,6 +272,20 @@ const showEditableContextMenu = (mainWindow, params) => {
     { role: 'selectAll' }
   );
 
+  if (studentContext?.id !== undefined && studentContext?.id !== null) {
+    template.push(
+      { type: 'separator' },
+      {
+        label: `Eliminar estudiante${studentContext.name ? `: ${studentContext.name}` : ''}`,
+        click: () => {
+          if (!mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('students:delete-from-context-menu', studentContext);
+          }
+        },
+      }
+    );
+  }
+
   Menu.buildFromTemplate(template).popup({ window: mainWindow });
 };
 
@@ -300,8 +317,42 @@ const createMainWindow = async () => {
   }
 
   mainWindowRef = mainWindow;
+  printPreviewController?.attach(mainWindow);
   allowWindowClose = false;
-  closeHandshakePending = false;
+  closeHandshake?.dispose();
+  const closeWindowLocally = async () => {
+    logLine('Cierre local sin esperar la interfaz de sincronizacion');
+    closeHandshake?.cancel();
+    await shutdownRemoteAccess();
+    allowWindowClose = true;
+    if (!mainWindow.isDestroyed()) mainWindow.close();
+  };
+  closeHandshake = createCloseHandshake({
+    sendRequest: () => mainWindow.webContents.send('app:before-close'),
+    closeWithoutRenderer: closeWindowLocally,
+    onUnresponsive: async () => {
+      if (mainWindow.isDestroyed() || allowWindowClose) return;
+      logLine('La interfaz no confirmo la solicitud de cierre');
+      const result = await dialog.showMessageBox(mainWindow, {
+        type: 'warning', title: 'Cerrar ARMI Docente',
+        message: 'La interfaz no responde a la solicitud de cierre.',
+        detail: 'Puedes cerrar ARMI. Los datos ya guardados se conservarán; los cambios aún sin guardar o sincronizar pueden quedar pendientes.',
+        buttons: ['Seguir esperando', 'Cerrar ARMI'], defaultId: 0, cancelId: 0,
+      });
+      if (result.response === 1) await closeWindowLocally();
+      else closeHandshake?.cancel();
+    },
+  });
+  const handleCloseHandlerReady = (event, ready) => {
+    if (event.sender === mainWindow.webContents) closeHandshake?.setReady(ready);
+  };
+  const handleCloseRequestReceived = event => {
+    if (event.sender === mainWindow.webContents) closeHandshake?.acknowledge();
+  };
+  ipcMain.on('app:close-handler-ready', handleCloseHandlerReady);
+  ipcMain.on('app:close-request-received', handleCloseRequestReceived);
+  mainWindow.webContents.on('did-start-loading', () => closeHandshake?.setReady(false));
+  mainWindow.webContents.on('render-process-gone', () => closeHandshake?.setReady(false));
 
   logLine('Ventana principal creada');
 
@@ -323,9 +374,21 @@ const createMainWindow = async () => {
   };
   ipcMain.on('app:startup-ready', handleRendererReady);
 
+  let pendingStudentContextMenuTarget = null;
+  const handleStudentContextMenuTarget = (event, student) => {
+    if (event.sender !== mainWindow.webContents) return;
+    pendingStudentContextMenuTarget = student && student.id !== undefined
+      ? { id: student.id, name: String(student.name || '').slice(0, 120) }
+      : null;
+    event.returnValue = true;
+  };
+  ipcMain.on('students:set-context-menu-target', handleStudentContextMenuTarget);
+
   mainWindow.webContents.on('context-menu', (_event, params) => {
-    if (!params?.isEditable) return;
-    showEditableContextMenu(mainWindow, params);
+    const studentContext = pendingStudentContextMenuTarget;
+    pendingStudentContextMenuTarget = null;
+    if (!params?.isEditable && !studentContext) return;
+    showEditableContextMenu(mainWindow, params, studentContext);
   });
 
   mainWindow.on('close', (event) => {
@@ -333,20 +396,7 @@ const createMainWindow = async () => {
 
     event.preventDefault();
 
-    if (closeHandshakePending) return;
-
-    closeHandshakePending = true;
-    logLine('Solicitando cierre protegido al renderer');
-
-    try {
-      mainWindow.webContents.send('app:before-close');
-    } catch (error) {
-      logLine('No pude enviar evento de cierre protegido', {
-        message: String(error?.message || error),
-      });
-
-      closeHandshakePending = false;
-    }
+    closeHandshake?.request();
   });
 
   mainWindow.on('session-end', () => {
@@ -354,6 +404,10 @@ const createMainWindow = async () => {
   });
 
   mainWindow.on('closed', () => {
+    closeHandshake?.dispose();
+    ipcMain.removeListener('app:close-handler-ready', handleCloseHandlerReady);
+    ipcMain.removeListener('app:close-request-received', handleCloseRequestReceived);
+    ipcMain.removeListener('students:set-context-menu-target', handleStudentContextMenuTarget);
     ipcMain.removeListener('app:startup-ready', handleRendererReady);
     if (mainWindowRef === mainWindow) mainWindowRef = null;
   });
@@ -364,39 +418,41 @@ const createMainWindow = async () => {
 
   const serverReady = await waitForServer(
     'http://127.0.0.1:3000/api/health',
-    40000
+    90_000
   );
 
   if (!serverReady) {
     logLine('El backend no respondió a tiempo');
+    await stopBackendImmediately();
+    allowWindowClose = true;
+    if (splashWindowRef && !splashWindowRef.isDestroyed()) splashWindowRef.destroy();
 
-    dialog.showErrorBox(
-      'ARMI Docente',
-      `No se pudo iniciar el servidor interno del aplicativo.\n\nRevisa el archivo de log en:\n${path.join(app.getPath('userData'), 'launcher.log')}`
-    );
-
-    mainWindow.loadURL(
+    await mainWindow.loadURL(
       'data:text/html;charset=utf-8,' +
         encodeURIComponent(`
           <html>
-            <body style="margin:0;font-family:Segoe UI,Arial,sans-serif;background:#fff7ed;display:flex;align-items:center;justify-content:center;height:100vh;">
-              <div style="background:#fff;border:1px solid #fdba74;border-radius:24px;padding:28px 32px;box-shadow:0 18px 50px rgba(15,23,42,.14);max-width:540px;">
+            <body style="margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;color:#0f172a;">
+              <div style="background:#fff;border:1px solid #fecaca;border-radius:24px;padding:30px 34px;box-shadow:0 18px 50px rgba(15,23,42,.14);max-width:590px;text-align:center;">
                 <div style="font-size:12px;font-weight:700;letter-spacing:.18em;color:#9a3412;text-transform:uppercase;">ARMI Docente</div>
-                <h1 style="margin:10px 0 8px;font-size:28px;color:#7c2d12;">No se pudo iniciar</h1>
-                <p style="margin:0;color:#7c2d12;line-height:1.5;">Revisa el archivo <b>launcher.log</b> en la carpeta de datos del usuario.</p>
+                <h1 style="margin:10px 0 8px;font-size:28px;color:#991b1b;">El inicio tardó demasiado</h1>
+                <p style="margin:0;color:#475569;line-height:1.55;">ARMI detuvo el intento para evitar que la ventana quede bloqueada. Puedes reintentar con seguridad o cerrar la aplicación.</p>
+                <div style="display:flex;gap:10px;justify-content:center;margin-top:22px;">
+                  <button onclick="window.armiApp.restartApplication()" style="border:0;border-radius:12px;padding:12px 18px;background:#7c3aed;color:white;font-weight:800;cursor:pointer;">Reintentar inicio</button>
+                  <button onclick="window.armiApp.exitApplication()" style="border:1px solid #cbd5e1;border-radius:12px;padding:12px 18px;background:white;color:#334155;font-weight:800;cursor:pointer;">Cerrar ARMI</button>
+                </div>
+                <p style="margin:18px 0 0;color:#94a3b8;font-size:11px;">Diagnóstico: ${path.join(app.getPath('userData'), 'launcher.log').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>
               </div>
             </body>
           </html>
         `)
-    ).catch(() => {});
-
-    app.quit();
+    );
+    revealMainWindow('startup-error');
     return;
   }
 
   logLine('Backend listo, cargando URL principal');
 
-  await mainWindow.loadURL('http://127.0.0.1:3000');
+  if (!await loadStartupPage(mainWindow, 'http://127.0.0.1:3000', { log: logLine })) return;
 
   await ensureLanAccess(mainWindow, logLine);
 
@@ -412,6 +468,7 @@ const createMainWindow = async () => {
 };
 
 const startBackend = async () => {
+  if (backendProcess?.pid) return backendProcess;
   const backendEntryPath = path.join(appRoot, 'backend', 'server.js');
   const serverPath = isDev
     ? path.join(appRoot, 'electron', 'backend-process.cjs')
@@ -421,6 +478,11 @@ const startBackend = async () => {
     NODE_ENV: isDev ? 'development' : 'production',
     ARMI_USE_VITE_MIDDLEWARE: '0',
     ARMI_BACKEND_ENTRY: backendEntryPath,
+    ARMI_BACKEND_OWNER_PID: String(process.pid),
+    ARMI_RESOURCES_PATH: isDev ? appRoot : process.resourcesPath,
+    ARMI_CLOUDFLARED_PATH: isDev
+      ? path.join(appRoot, 'build', 'cloudflared', 'cloudflared.exe')
+      : path.join(process.resourcesPath, 'cloudflared', 'cloudflared.exe'),
   };
   if (!isDev) backendEnv.ARMI_DATA_ROOT = app.getPath('userData');
 
@@ -431,6 +493,7 @@ const startBackend = async () => {
     dataRoot: backendEnv.ARMI_DATA_ROOT || appRoot,
   });
 
+  backendStopExpected = false;
   backendProcess = utilityProcess.fork(serverPath, [], {
     cwd: isDev ? appRoot : process.resourcesPath,
     env: backendEnv,
@@ -445,24 +508,65 @@ const startBackend = async () => {
     logLine('Error fatal del backend aislado', { type, location, report });
   });
   launchedProcess.once('exit', (code) => {
-    logLine('Backend aislado finalizado', { code });
+    const expected = backendStopExpected || allowWindowClose;
+    const restartAfterExpectedStop = backendRestartAfterExpectedStop;
+    logLine('Backend aislado finalizado', { code, expected });
     if (backendProcess === launchedProcess) backendProcess = null;
+    backendStopExpected = false;
+    backendRestartAfterExpectedStop = false;
+    if (!expected || restartAfterExpectedStop) scheduleBackendRestart({ code });
   });
   launchedProcess.stderr?.on('data', (chunk) => {
     const message = String(chunk || '').trim();
     if (message) logLine('Backend stderr', { message: message.slice(0, 4000) });
   });
+  return launchedProcess;
+};
+
+const scheduleBackendRestart = (details = {}) => {
+  if (remoteShutdownPromise || allowWindowClose || backendStopExpected || backendRestartTimer || backendRestartInFlight || backendProcess?.pid) return;
+  if (backendRestartAttempts >= MAX_BACKEND_RESTART_ATTEMPTS) {
+    logLine('Backend sin recuperacion automatica tras varios intentos', details);
+    return;
+  }
+  const delayMs = Math.min(8_000, 1_000 * (backendRestartAttempts + 1));
+  logLine('Programando recuperacion automatica del backend', { ...details, attempt: backendRestartAttempts + 1, delayMs });
+  backendRestartTimer = setTimeout(async () => {
+    backendRestartTimer = null;
+    if (remoteShutdownPromise || allowWindowClose || backendProcess?.pid) return;
+    backendRestartInFlight = true;
+    backendRestartAttempts += 1;
+    try {
+      await startBackend();
+      const ready = await waitForServer('http://127.0.0.1:3000/api/health', 90_000);
+      if (!ready) throw new Error('El backend reiniciado no respondio a tiempo.');
+      backendRestartAttempts = 0;
+      logLine('Backend recuperado automaticamente');
+      if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+        mainWindowRef.webContents.send('app:backend-recovered');
+      }
+    } catch (error) {
+      logLine('Fallo la recuperacion automatica del backend', { message: String(error?.message || error) });
+      backendRestartAfterExpectedStop = true;
+      await stopBackendImmediately();
+    } finally {
+      backendRestartInFlight = false;
+    }
+  }, delayMs);
 };
 
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   try {
     logLine('Electron listo');
+    printPreviewController = createPrintPreviewController({ app, BrowserWindow, ipcMain, getMainWindow: () => mainWindowRef, log: logLine });
+    printPreviewController.register();
+    app.once('will-quit', () => printPreviewController?.dispose());
 
     ipcMain.handle('app:continue-close', async () => {
+      closeHandshake?.cancel();
       await shutdownRemoteAccess();
       allowWindowClose = true;
-      closeHandshakePending = false;
 
       if (mainWindowRef && !mainWindowRef.isDestroyed()) {
         mainWindowRef.close();
@@ -474,17 +578,33 @@ app.whenReady().then(async () => {
     });
 
     ipcMain.handle('app:cancel-close', async () => {
-      closeHandshakePending = false;
+      closeHandshake?.cancel();
       return { success: true };
     });
 
     ipcMain.handle('app:request-close', async () => {
+      closeHandshake?.cancel();
       if (mainWindowRef && !mainWindowRef.isDestroyed()) {
         mainWindowRef.close();
       } else {
         app.quit();
       }
 
+      return { success: true };
+    });
+
+    ipcMain.handle('app:restart-application', async () => {
+      await stopBackendImmediately();
+      allowWindowClose = true;
+      app.relaunch();
+      app.exit(0);
+      return { success: true };
+    });
+
+    ipcMain.handle('app:exit-application', async () => {
+      await stopBackendImmediately();
+      allowWindowClose = true;
+      app.exit(0);
       return { success: true };
     });
 
@@ -497,10 +617,14 @@ app.whenReady().then(async () => {
       stack: String(error?.stack || ''),
     });
 
+    await stopBackendImmediately();
+    allowWindowClose = true;
+    if (splashWindowRef && !splashWindowRef.isDestroyed()) splashWindowRef.destroy();
     dialog.showErrorBox(
       'ARMI Docente',
       `Ocurrió un error al iniciar.\n\nRevisa el log en:\n${path.join(app.getPath('userData'), 'launcher.log')}`
     );
+    app.quit();
   }
 
   app.on('activate', async () => {
@@ -511,17 +635,21 @@ app.whenReady().then(async () => {
   });
 });
 
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', async (error) => {
   logLine('uncaughtException', {
     message: String(error?.message || error),
     stack: String(error?.stack || ''),
   });
 
   try {
+    await stopBackendImmediately();
+    allowWindowClose = true;
+    if (splashWindowRef && !splashWindowRef.isDestroyed()) splashWindowRef.destroy();
     dialog.showErrorBox(
       'ARMI Docente',
       `Error no controlado al iniciar.\n\nRevisa el log en:\n${path.join(app.getPath('userData'), 'launcher.log')}`
     );
+    app.quit();
   } catch {}
 });
 
@@ -543,7 +671,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   void shutdownRemoteAccess().finally(() => {
     allowWindowClose = true;
-    closeHandshakePending = false;
+    closeHandshake?.cancel();
     app.quit();
   });
 });

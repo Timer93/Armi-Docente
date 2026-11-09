@@ -1,10 +1,22 @@
 {
-  "version": "11.2.9",
-  "releaseName": "Armi Docente 11.2.9",
-  "publishedAt": "2026-08-31",
+  "version": "11.4.16",
+  "releaseName": "Armi Docente 11.4.16",
+  "publishedAt": "2026-10-19",
   "assetName": "ARMI_DOCENTE_Setup.exe",
   "downloadUrl": "https://github.com/Timer93/Armi-Docente/releases/download/Armi_Docente_2026/ARMI_DOCENTE_Setup.exe",
   "changelog": [
+    "Los resultados de prácticas HTML se conservan separados de las calificaciones docentes y no marcan las entregas como revisadas ni participan en promedios.",
+    "El inicio tolera una recarga válida de la ventana sin detener el servidor; los cambios de identidad programan una sola recarga por documento.",
+    "Limpieza de etiquetas HTML en título, propósito, situación y extensión al generar o cargar sesiones, conservando el formato de criterios y actividades.",
+    "El portal muestra las notas con el mismo modo activo del registro docente, evitando que configuraciones antiguas oculten las calificaciones de un grado.",
+    "Reparación actualizada que conserva las notas recientes y reconoce automáticamente guardados internos equivalentes.",
+    "Lectura del historial de Drive sin bloquear el servidor local ni la creación del acceso remoto.",
+    "Reintento del enlace disponible después de errores del túnel y avisos separados para las tareas internas de reparación.",
+    "Barras compactas con cantidad de archivos, detalle al pasar el cursor o hacer clic, tamaños, pendientes y archivo actual.",
+    "Conteos separados de archivos revisados, copiados y cambios de datos para mostrar el progreso real de ARMI.",
+    "Identidades portables de estudiantes, notas y evidencias para sincronizar correctamente entre computadoras.",
+    "Migración verificada con respaldo automático, conservación del trabajo reciente y recuperación de referencias históricas.",
+    "Protección de guardados de vistas antiguas después de actualizar las identidades.",
     "Presentación de inicio transparente, sin paneles ni contornos, legible sobre fondos claros y oscuros.",
     "Inicio unificado con una sola presentación animada mientras ARMI prepara el servidor y la sesión.",
     "Los recursos visuales nuevos viajan de forma incremental a la carpeta espejo y se recuperan bajo demanda en las demás PC.",
@@ -22,8 +34,8 @@
   ],
   "history": [
     {
-      "version": "11.2.9",
-      "releaseName": "Armi Docente 11.2.9",
+      "version": "11.4.6",
+      "releaseName": "Armi Docente 11.4.6",
       "publishedAt": "2026-08-31",
       "changelog": [
         "Logo y mensajes de inicio flotantes sobre el escritorio, sin tarjeta exterior.",

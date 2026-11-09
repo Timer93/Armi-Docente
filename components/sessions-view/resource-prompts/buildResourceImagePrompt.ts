@@ -3,6 +3,8 @@ import type {
     SessionResourceAIContent,
     SessionResourceKey
 } from '../SessionLearningResources';
+import type { SessionResourceAiContext } from './buildResourcePlanPrompt';
+import { buildAnnex2CurricularContract } from './sessionResourceCurriculum';
 
 const buildResourceStructure = (
     key: SessionResourceKey,
@@ -141,7 +143,7 @@ Organiza el recurso como una secuencia de producción:
 5. PRODUCTO ENTREGABLE
    Indica claramente qué debe presentar en pocas lineas de texto viñetado según lo que se indica en la evidenciade esta sesión.
 6. CRITERIOS CLAVE
-   Incluye criterios breves que permitan al estudiante evaluar su trabajo.
+   Copia literalmente todos los criterios reales del área y transversales, sin resumirlos ni añadir otros.
 7. AUTOEVALUACIÓN
    Incluye una sección pequeña de comprobación o reflexión.
 
@@ -162,7 +164,8 @@ No debes agregar contenido adicional que no corresponda a las evidencias de la s
 export const buildSessionResourceImagePrompt = (
     key: SessionResourceKey,
     resource: SessionLearningResource,
-    content: SessionResourceAIContent
+    content: SessionResourceAIContent,
+    context?: SessionResourceAiContext
 ) => {
     const visualType =
         key === 'instructive'
@@ -228,6 +231,7 @@ Español.
 
 CONTENIDO PEDAGÓGICO OBLIGATORIO:
 ${JSON.stringify(content)}
+${key === 'annex2' && (context || content.sessionInfo) ? buildAnnex2CurricularContract(context || { competency: content.sessionInfo!.competency, capacity: content.sessionInfo!.capacities, criterion: content.sessionInfo!.criterion, evidence: content.sessionInfo!.evidence, curricularRows: content.sessionInfo!.curricularRows }) : ''}
 
 ${buildResourceStructure(key, resource)}
 

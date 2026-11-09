@@ -103,7 +103,6 @@ export const AreasGradosView: React.FC<Props> = ({ activeSection, onSuccess }) =
             setAreas(JSON.parse(savedAreas));
         } else {
             setAreas([]);
-            localStorage.setItem('armi_areas', JSON.stringify([]));
         }
 
         const savedAssign = localStorage.getItem('armi_assignments');

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ARMI Estudiantes</title><link rel="stylesheet" href="popup.css"></head>
+<body aria-busy="true"><main>
+  <header><img src="icons/48.png" alt=""><div><p>ARMI ESTUDIANTES</p><h1>Control de acceso</h1></div></header>
+  <section class="card"><span id="badge">Sin vincular</span><h2 id="device">Este navegador</h2><p id="description">Solicita un código al docente para vincular este equipo.</p><dl><dt>Dominios bloqueados</dt><dd id="count">0</dd><dt>Última sincronización</dt><dd id="last-sync">—</dd></dl><button id="sync" hidden>Sincronizar ahora</button></section>
+  <p id="message" role="status" hidden></p>
+  <details id="settings" open><summary>Vincular con ARMI</summary><form id="pair-form">
+    <label>Dirección de ARMI<input id="server" type="url" required placeholder="http://192.168.1.10:3001" autocomplete="off"></label>
+    <label>Código del docente<input id="code" required maxlength="16" placeholder="ABCD-1234-EF56" autocomplete="off" spellcheck="false"></label>
+    <button type="submit" id="pair">Vincular equipo</button>
+    <p class="hint">Permite la conexión únicamente a la dirección del docente cuando el navegador lo solicite.</p>
+  </form></details>
+  <footer>Las reglas se revisan aproximadamente cada 30 segundos mientras el navegador está activo. Si ARMI no está disponible, se conserva el último bloqueo. Esta extensión no envía el historial de navegación.</footer>
+</main><script type="module" src="popup.js"></script></body></html>

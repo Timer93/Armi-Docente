@@ -1,6 +1,7 @@
 ﻿
 export interface GeneralData {
   id?: number;
+  updated_at?: string;
   year: string;
   
   // Datos de la InstituciÃ³n

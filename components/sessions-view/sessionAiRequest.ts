@@ -283,6 +283,7 @@ REGLAS:
 2) Si ves placeholders tipo [ ... ], genera reemplazos concretos en "placeholderMap".
 3) Para campos HTML devuelve contenido en formato HTML simple (<p>, <ul>, <li>, <strong>, <em>, <span style='color: green;'>).
 3.1) Si usas atributos HTML dentro de strings JSON, usa comillas simples en el HTML para no romper el JSON.
+3.2) Los campos "title", "purpose", "situation" y "extension" son TEXTO PLANO: no incluyas etiquetas HTML, entidades HTML ni bloques markdown. Conserva HTML solamente en los campos definidos como "html".
 4) Respeta el instrumento actual del contexto: "${currentInstrumentName}" (tipo: "${currentTemplateType}").
 5) Devuelve "instrumentRows" con exactamente la misma cantidad de elementos que "FILAS DEL INSTRUMENTO A COMPLETAR", conservando todos sus índices.
 6) Cada fila de "instrumentRows" debe incluir: index, criterio, c, b, a, ad.

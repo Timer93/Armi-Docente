@@ -1,0 +1,85 @@
+{
+  "scope": "Propuesta III bimestre 2026, unidades 5 y 6; sin aplicar a la base de datos",
+  "activities": {
+    "html-1789364522704-i74ah2": {
+      "classification": "Conocimientos metodológicos complementarios",
+      "tasks": "Diez preguntas de selección sobre entrevista, patrones de necesidades y metas SMART; puntuación por primera respuesta.",
+      "demonstrates": "Reconocimiento de preguntas neutrales y procedimientos para organizar información.",
+      "doesNotDemonstrate": "No registra entrevistas reales ni organiza las respuestas de usuarios del proyecto. El resumen de fortalezas es genérico, no un diagnóstico individual de cada tarea."
+    },
+    "html-1789623527766-h8863u": {
+      "classification": "Simulación parcial; insuficiente para acreditar el producto",
+      "tasks": "Selección de decisiones sobre prototipado 3D, clasificación de respuestas en una malla y consideración de impactos.",
+      "demonstrates": "Decisiones y clasificación de información en un escenario de validación.",
+      "doesNotDemonstrate": "No acredita que el estudiante haya construido su prototipo, validado con sus usuarios o incorporado mejoras en una versión final propia."
+    },
+    "html-1789946427020-j737a8": {
+      "classification": "Demostración parcial directamente vinculada a planificación",
+      "tasks": "Cinco tareas: decisión ante retraso de suministro, ubicación de actividades en un Gantt, decisión presupuestaria, asociación de riesgos y contingencias, y priorización de pendientes.",
+      "demonstrates": "La interacción produce decisiones de gestión y una secuencia de actividades en un escenario delimitado, componentes expresos del criterio EPT.",
+      "doesNotDemonstrate": "El registro antiguo conserva el puntaje total, pero no el desglose por tarea: no permite afirmar que acertó específicamente todo el Gantt. Tampoco reemplaza el plan completo de su proyecto."
+    },
+    "html-1790563967371-oj9ze0": {
+      "classification": "Conocimientos técnicos y digitales complementarios",
+      "tasks": "Diez decisiones de selección sobre proceso, seguridad, higiene, sostenibilidad y configuración del entorno digital.",
+      "demonstrates": "Reconoce decisiones seguras y sostenibles en situaciones propuestas.",
+      "doesNotDemonstrate": "No ejecuta operaciones de producción ni demuestra pericia manual, uso real de herramientas o aplicación observada de seguridad durante la elaboración."
+    },
+    "html-1790653257512-5hnqy7": {
+      "classification": "Contenido complementario; correspondencia insuficiente con el criterio registrado",
+      "tasks": "Preguntas sobre filtros, consultas, análisis de ventas, control de datos y decisiones a partir de información.",
+      "demonstrates": "Reconoce operaciones y decisiones sobre datos de una feria.",
+      "doesNotDemonstrate": "El criterio EPT de estas candidatas exige ejecutar operaciones técnicas de producción, seguridad y sostenibilidad. Analizar datos no demuestra esa ejecución, aunque la actividad esté asignada al mismo ID de criterio."
+    },
+    "html-1791174795853-mj0uzp": {
+      "classification": "Demostración parcial directamente vinculada a decisiones cooperativas",
+      "tasks": "Diez escenarios sobre roles, prioridades, seguimiento, comunicación, resolución de conflictos y comunidad virtual; se conservan las respuestas individuales en el checkpoint.",
+      "demonstrates": "Permite verificar decisiones concretas sobre roles, prioridades, seguimiento y soluciones pacíficas, componentes del criterio de organización del equipo.",
+      "doesNotDemonstrate": "Elegir decisiones en escenarios no acredita por sí solo su ejecución y el acompañamiento sostenido de compañeros reales. No justifica convertir el resultado HTML a la nota EPT ni proponer 16 automáticamente."
+    },
+    "html-1791165299450-lw4ax5": {
+      "classification": "Demostración parcial de decisiones cooperativas y ordenación",
+      "tasks": "Diez retos sobre roles, diálogo, convivencia digital, clasificación y secuencia de resolución de conflictos; respuestas individuales conservadas.",
+      "demonstrates": "Identifica decisiones cooperativas y permite comprobar errores concretos en la secuencia de resolución de un conflicto.",
+      "doesNotDemonstrate": "No sustituye la ejecución y los registros del trabajo grupal real. Los intentos vencidos o los errores en una parte central del criterio limitan su uso para una subida."
+    },
+    "html-1791522978473-8567qf": {
+      "classification": "Conocimientos y decisiones complementarios a la aplicación de instrumentos",
+      "tasks": "Cinco elecciones de indicadores observables, eficiencia, lista de chequeo, mejora y autorregulación.",
+      "demonstrates": "Reconoce indicadores, conclusiones a partir de datos y la estructura adecuada de un instrumento.",
+      "doesNotDemonstrate": "No elabora ni aplica una lista propia al producto real, ni registra sus hallazgos y mejoras. No subsana la observación docente de falta de producto o mejoras aplicadas."
+    }
+  },
+  "cases": {
+    "178470": {"newScore":14,"reason":"Conservar: práctica vencida e incompleta (12/20), historial 12 y transversal 12; siguen las observaciones de publicaciones y formato. No hay demostración adicional suficiente para subir a 15/16."},
+    "178477": {"newScore":12,"reason":"Conservar: 18/20 y antecedente 14 son referencias positivas, pero el checkpoint muestra error en la secuencia de resolución del conflicto, componente central del respeto y diálogo, y el docente anotó evidencias incompletas. La transversal 12 no subsana esas limitaciones."},
+    "178529": {"newScore":12,"reason":"Conservar: el 20/20 comprueba elecciones sobre indicadores y calidad, no la elaboración y aplicación del instrumento al producto. Persiste la observación 'Sin evidencia del producto ni mejoras aplicadas'; el historial de la capacidad es 5 y la transversal 12."},
+    "178542": {"newScore":14,"reason":"Conservar sin reducir: práctica abandonada con 4/20 y observaciones pendientes; no sustenta una subida. Las reglas tampoco autorizan bajar la nota 14 ya registrada."},
+    "180277": {"newScore":12,"reason":"Conservar: 18/20 en metodología de entrevista no acredita recojo y organización de datos de usuarios. Falta la matriz/mapa según observación docente; historial 12, 11 y 12, y transversal 12, no corroboran un desempeño mayor en este criterio."},
+    "180493": {"newScore":12,"reason":"Conservar: el 18/20 es un cuestionario de decisiones técnicas, con sostenibilidad como aspecto a reforzar; no acredita ejecución con pericia. El docente cuestiona la autoría del diagrama y pide correcciones; historial 11 y transversal 12."},
+    "180574": {"newScore":12,"reason":"Conservar: aunque hay HTML 18, historial 13 y 14 y transversal 14, DataFeria analiza datos y no demuestra ejecutar operaciones de producción. Persisten evidencias corregidas/mejoradas faltantes. La convergencia de números no reemplaza la correspondencia con el criterio."},
+    "180583": {"newScore":14,"reason":"Conservar: HTML 20 en análisis de datos, no ejecución técnica; historial 11 y 11, transversal 13 y observaciones de evidencias faltantes y posible generación con IA. No hay sustento para 15/16."},
+    "180586": {"newScore":12,"reason":"Conservar: HTML 18 y transversal 14 no prueban ejecución técnica; la actividad trata de datos, el historial de la capacidad es 11 y 5 y faltan evidencias mejoradas. No se eleva por el puntaje global."},
+    "180652": {"newScore":14,"reason":"Conservar: el checkpoint permite ver que las dos respuestas incorrectas corresponden a priorización (r2) y seguimiento (r3), precisamente componentes centrales del criterio. Historial 14 y transversal 14 sostienen el A actual, sin justificar puntos adicionales por el 16/20 global."},
+    "180668": {
+      "newScore":15,
+      "recommendationType":"Recomendada con sustento convergente",
+      "reason":"Proponer solo 14 → 15: el checkpoint del resultado 152 verifica decisiones correctas en los diez retos, incluidos roles (r1), prioridad (r2), seguimiento (r3), comunicación (r4), solución pacífica (r5), reorganización (r8) y cierre coordinado (r10). Se suma a una valoración docente EPT ya en A (14), transversal 14, antecedente 13 en la misma capacidad y ausencia de observaciones adversas registradas en esta sesión. La propuesta reconoce evidencia específica y convergente dentro del mismo nivel A; no transforma el 20 HTML en la nota EPT. No se propone 16 porque falta observar la ejecución sostenida con el equipo real.",
+      "strength":"Sustento convergente para una propuesta prudente dentro de A; respuestas individuales verificables.",
+      "limitation":"La simulación demuestra decisiones, no seguimiento real sostenido. El antecedente 13 es una referencia de la capacidad, no una equivalencia de criterio."
+    },
+    "180758": {"newScore":14,"reason":"Conservar: 18/20 reconoce metodología, pero no acredita entrevistas aplicadas ni organización de respuestas del propio proyecto. Historial 13, 12 y 5, y transversal 13, no aportan convergencia suficiente para subir de 14."},
+    "180767": {"newScore":12,"reason":"Conservar: 18/20 en decisiones sobre prototipo, malla e impactos no prueba que haya diseñado y validado su propuesta real con usuarios. Historial irregular 5, 12, 13 y 5 y transversal 12; no hay valoración adicional de un prototipo propio mejorado."},
+    "180775": {
+      "newScore":13,
+      "recommendationType":"Condicionada a valoración docente por sustento moderado",
+      "reason":"Proponer solo 12 → 13: la práctica de planificación obtiene 16/20 resolviendo tareas alineadas con el criterio (Gantt, presupuesto, recursos y contingencias), no solo preguntas de vocabulario. Como referencia independiente, la sesión anterior de la misma capacidad tiene 13,5; la transversal 12 es coherente con permanecer en B. La observación 'No usa herramientas digitales' sigue pendiente respecto al producto/herramientas solicitadas, pero no describe un error concreto de secuenciación, presupuesto o contingencias que contradiga lo demostrado en la práctica. El respaldo conjunto permite proponer el incremento mínimo dentro de B, sin convertir 16 HTML en EPT 16 y sin borrar esa observación.",
+      "strength":"Sustento contextual moderado para una propuesta conservadora dentro de B; actividad aplicada al criterio y antecedente reciente 13,5.",
+      "limitation":"Solo se conserva el puntaje HTML agregado; no es posible afirmar que acertó una misión específica ni que elaboró correctamente el plan completo de su propio proyecto. El antecedente comparte capacidad, pero evalúa otro criterio."
+    },
+    "180779": {"newScore":14,"reason":"Conservar: el 20/20 comprueba decisiones de seguridad y entorno digital, no la ejecución de producción con pericia. Historial 13 y transversal 13 no aportan evidencia independiente de esa ejecución para elevar a 15/16."},
+    "180781": {"newScore":14,"reason":"Conservar: incluso con HTML 20, antecedente 14 y transversal 14, el cuestionario no demuestra una ejecución técnica adicional ni mejorada. La coincidencia de números y la ausencia de observaciones no justifican por sí solas sumar puntos al criterio práctico."},
+    "180839": {"newScore":12,"reason":"Conservar: la planificación HTML de 15/20 es pertinente, pero no hay desglose individual por tarea y los antecedentes recientes son 5 y 12; la transversal es 11. A diferencia de Evelin, no hay una referencia reciente superior que corrobore la mejora. El antecedente aislado 13 no basta para elevar automáticamente el desempeño de esta sesión."},
+    "180862": {"newScore":14,"reason":"Conservar: el HTML 20 reconoce procedimientos de entrevista, sin evidencia adicional de recoger y organizar respuestas reales. Historial 11, 11 y 13 y transversal 12: el puntaje alto aislado no justifica 15/16."}
+  }
+}

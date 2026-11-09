@@ -25,5 +25,9 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "node_modules", "dist", "dist_electron", "build", ".dotnet",
+    "artifacts", "temp", "tmp", "uploads", "database", "sync-runtime", "recovery-candidates"
+  ]
 }

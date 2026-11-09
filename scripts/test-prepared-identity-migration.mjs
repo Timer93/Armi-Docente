@@ -1,0 +1,96 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import {createIncrementalMirrorSync,exportPortableIdentitySnapshot} from '../backend/incrementalMirrorSync.js';
+import {identityDigest,identityFingerprints,legacyIdentityRowHash,IDENTITY_PARENT_TABLES,IDENTITY_REPLACED_TABLES} from '../backend/identityMigration.js';
+
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'armi-prepared-migration-'));
+const mirror=path.join(root,'mirror'),id='fixture-v4';fs.mkdirSync(mirror);
+const connections=[];
+const make=(name,swap)=>{
+  const db=new Database(path.join(root,name+'.db'));connections.push(db);
+  db.exec(`
+    CREATE TABLE db_estudiantes(id INTEGER PRIMARY KEY AUTOINCREMENT,dni TEXT,estudiantes TEXT,grado TEXT,secc TEXT,estado TEXT,password_hash TEXT,password_recovery_cipher TEXT);
+    CREATE TABLE evaluacion_instrumentos(id INTEGER PRIMARY KEY AUTOINCREMENT,year TEXT,area_id TEXT,grade TEXT,section TEXT,type TEXT,name TEXT);
+    CREATE TABLE sesiones(id INTEGER PRIMARY KEY,id_sesion TEXT,year TEXT,area_id TEXT,grade TEXT,section TEXT,unit_number TEXT,session_number TEXT,session_data TEXT);
+    CREATE TABLE evaluacion_registros(id INTEGER PRIMARY KEY AUTOINCREMENT,student_id TEXT,session_id TEXT,criteria_id TEXT,grading_mode TEXT,level TEXT,numeric_score REAL,instrument_id INTEGER,updated_at TEXT);
+    CREATE TABLE evaluacion_conclusiones(id INTEGER PRIMARY KEY AUTOINCREMENT,year TEXT,area_id TEXT,grade TEXT,section TEXT,scope_type TEXT,scope_value TEXT,student_id TEXT,competency_key TEXT,conclusion_text TEXT);
+    CREATE TABLE asistencia_registros(id INTEGER PRIMARY KEY AUTOINCREMENT,attendance_date TEXT,grade TEXT,section TEXT,student_id TEXT,student_name TEXT,dni TEXT,status TEXT);
+    CREATE TABLE db_egresados(id INTEGER PRIMARY KEY AUTOINCREMENT,estudiante_id_origen TEXT,dni TEXT,estudiantes TEXT,grado TEXT,secc TEXT);
+    CREATE TABLE evaluacion_evidencias(id INTEGER PRIMARY KEY,evidence_key TEXT,student_id TEXT,relative_path TEXT,student_ids TEXT);
+    CREATE TABLE armi_frontend_state(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT);
+    CREATE TABLE portal_sesiones_estudiantes(token TEXT PRIMARY KEY,student_id TEXT);
+    CREATE TABLE student_deletion_tombstones(student_id TEXT PRIMARY KEY,dni TEXT,student_name TEXT,deleted_at TEXT);
+  `);
+  const ana=swap?22:11,bruno=swap?11:22,carla=swap?44:33,instrument=swap?99:1;
+  const put=db.prepare('INSERT INTO db_estudiantes VALUES(?,?,?,?,?,?,?,?)');
+  put.run(ana,'70000011','ANA TEST','4to','U','A',swap?'old-password':'new-password',swap?'old-cipher':null);
+  put.run(bruno,'70000022','BRUNO TEST','4to','U','A',null,null);
+  put.run(carla,'','CARLA TEST','4to','U','A',null,null);
+  db.prepare("INSERT INTO evaluacion_instrumentos VALUES(?,'2026','ept','','','rubric','General')").run(instrument);
+  db.prepare("INSERT INTO evaluacion_instrumentos VALUES(7,NULL,NULL,NULL,NULL,'rubric','invalid old draft')").run();
+  db.prepare("INSERT INTO sesiones VALUES(1,'U6S1','2026','ept','4to','U','6','1','{}')").run();
+  // PC2 inherited a foreign numeric relationship: its id 11 belongs to Bruno.
+  db.prepare("INSERT INTO evaluacion_registros VALUES(1,'11','U6S1','c1','hybrid_vigesimal',?,?,?, '2026-10-19T00:00:00Z')").run(swap?'C':'A',swap?5:15,instrument);
+  db.prepare("INSERT INTO evaluacion_registros VALUES(2,?,'U6S1','c2','hybrid_vigesimal','B',13,?, '2026-10-19T00:00:00Z')").run(String(carla),instrument);
+  db.prepare("INSERT INTO evaluacion_conclusiones VALUES(1,'2026','ept','4to','U','bimester','III','11','ept',?)").run(swap?'Stale text':'Verified text');
+  db.prepare("INSERT INTO asistencia_registros VALUES(1,'2026-10-19','4to','U',?,'ANA TEST','70000011','P')").run(String(ana));
+  db.prepare("INSERT INTO db_egresados VALUES(1,?,'','EVE RETIRED','5to','U')").run(swap?'89':'88');
+  db.prepare("INSERT INTO asistencia_registros VALUES(2,'2025-10-19','5to','U',?,'EVE RETIRED','','P')").run(swap?'89':'88');
+  db.prepare("INSERT INTO armi_frontend_state VALUES('armi_hybrid_numeric_scores_v1',?, '2026-10-18')").run(JSON.stringify({'U6S1::11::c1':5}));
+  db.prepare("INSERT INTO portal_sesiones_estudiantes VALUES('old-token',?)").run(String(ana));
+  db.prepare("INSERT INTO student_deletion_tombstones VALUES(?,'','ANA TEST','2026-09-01')").run(swap?'11':'999');
+  const runtime=path.join(root,name);fs.mkdirSync(runtime);
+  return {db,runtime,name,ana,carla,instrument};
+};
+const tables=[...IDENTITY_PARENT_TABLES,...IDENTITY_REPLACED_TABLES];
+const legacyState=pc=>({initialized:true,identityRevision:3,baseline:Object.fromEntries(tables.flatMap(table=>{
+  if(!pc.db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table))return[];
+  return [[table,Object.fromEntries(pc.db.prepare('SELECT * FROM "'+table+'"').all().map((row,index)=>[String(index),legacyIdentityRowHash(table,row)]))]];
+})),appliedBatches:['old-b'],sequence:1});
+try {
+  const a=make('a',false),b=make('b',true),late=make('late',true);
+  const snapshot=await exportPortableIdentitySnapshot(a.db);
+  const policy={mode:'published-baseline',roster:b.db.prepare('SELECT * FROM db_estudiantes').all()};
+  const payload={format:1,id,coveredBatches:['old-a','old-b'],snapshot,devices:{
+    a:{mode:'exact',fingerprints:identityFingerprints(a.db,tables),roster:a.db.prepare('SELECT * FROM db_estudiantes').all()},b:policy,late:policy},summary:{fixture:true}};
+  const folder=path.join(mirror,'.armi-sync','identity-migrations',id);fs.mkdirSync(folder,{recursive:true});
+  fs.writeFileSync(path.join(folder,'payload.json'),JSON.stringify(payload));
+  const marker={format:1,id,payloadSha256:identityDigest(payload),payloadPath:`.armi-sync/identity-migrations/${id}/payload.json`};
+  fs.writeFileSync(path.join(mirror,'.armi-sync','identity-migration-v4.json'),JSON.stringify(marker));
+  for(const pc of [a,b,late]) fs.writeFileSync(path.join(pc.runtime,'incremental-mirror-state.json'),JSON.stringify(legacyState(pc)));
+  late.db.prepare('UPDATE evaluacion_registros SET numeric_score=17 WHERE id=1').run();
+  const engine=pc=>createIncrementalMirrorSync({db:pc.db,runtimeFolder:pc.runtime,getDeviceId:()=>pc.name,excludedTables:['portal_sesiones_estudiantes']});
+  const ea=engine(a),eb=engine(b),el=engine(late);
+  const failed=await el.run({mirrorPath:mirror});assert.equal(failed.success,false);assert.equal(failed.data.state,'pending');
+  assert.equal(late.db.prepare('SELECT numeric_score FROM evaluacion_registros WHERE id=1').get().numeric_score,17);
+  const first=await ea.run({mirrorPath:mirror});assert.equal(first.success,true,first.message);assert.equal(first.data.identityMigrationApplied,true);
+  const second=await eb.run({mirrorPath:mirror});assert.equal(second.success,true,second.message);assert.equal(second.data.identityPending,0);
+  const grade=b.db.prepare("SELECT * FROM evaluacion_registros WHERE student_id=? AND criteria_id='c1'").get(String(b.ana));
+  assert.equal(grade.numeric_score,15);assert.equal(grade.instrument_id,b.instrument);
+  assert.equal(b.db.prepare("SELECT COUNT(*) n FROM evaluacion_registros WHERE student_id='11' AND criteria_id='c1'").get().n,0,'Foreign numeric grade must leave Bruno');
+  assert.equal(b.db.prepare("SELECT numeric_score FROM evaluacion_registros WHERE student_id=? AND criteria_id='c2'").get(String(b.carla)).numeric_score,13);
+  assert.equal(b.db.prepare('SELECT conclusion_text FROM evaluacion_conclusiones WHERE student_id=?').get(String(b.ana)).conclusion_text,'Verified text');
+  const cache=JSON.parse(b.db.prepare("SELECT value FROM armi_frontend_state WHERE key='armi_hybrid_numeric_scores_v1'").get().value);
+  assert.equal(cache[`U6S1::${b.ana}::c1`],15);assert.equal(cache['U6S1::11::c1'],undefined);
+  assert.equal(b.db.prepare("SELECT COUNT(*) n FROM evaluacion_instrumentos WHERE year IS NULL").get().n,0,'Invalid draft retained in archive, not re-published');
+  const retired=b.db.prepare("SELECT student_id FROM asistencia_registros WHERE attendance_date='2025-10-19'").get().student_id;
+  assert.ok(retired.startsWith('@student:'));assert.equal(retired,b.db.prepare('SELECT estudiante_id_origen FROM db_egresados').get().estudiante_id_origen);
+  assert.equal(b.db.prepare('SELECT password_recovery_cipher FROM db_estudiantes WHERE id=?').get(b.ana).password_recovery_cipher,null);
+  assert.equal(b.db.prepare('SELECT COUNT(*) n FROM portal_sesiones_estudiantes').get().n,0);
+  assert.equal(b.db.prepare('SELECT COUNT(*) n FROM db_estudiantes').get().n,3,'Old duplicate-row tombstones must not delete a re-enrolled person');
+  assert.equal(b.db.prepare('SELECT COUNT(*) n FROM student_deletion_tombstones').get().n,0);
+  assert.ok(fs.existsSync(path.join(b.runtime,'identity-upgrade-backups',id,'before.db')));
+  assert.ok(b.db.prepare('SELECT COUNT(*) n FROM armi_sync_migration_archive').get().n>0);
+  b.db.prepare("UPDATE evaluacion_registros SET numeric_score=16 WHERE student_id=? AND criteria_id='c1'").run(String(b.ana));
+  assert.equal((await eb.run({mirrorPath:mirror})).success,true);
+  assert.equal(b.db.prepare("SELECT numeric_score FROM evaluacion_registros WHERE student_id=? AND criteria_id='c1'").get(String(b.ana)).numeric_score,16,'Rerun must not re-import the old payload');
+  assert.equal((await ea.run({mirrorPath:mirror})).success,true);
+  assert.equal(a.db.prepare("SELECT numeric_score FROM evaluacion_registros WHERE student_id=? AND criteria_id='c1'").get(String(a.ana)).numeric_score,16);
+  const before=b.db.prepare('SELECT COUNT(*) n FROM armi_sync_migration_log').get().n;
+  await eb.run({mirrorPath:mirror});assert.equal(b.db.prepare('SELECT COUNT(*) n FROM armi_sync_migration_log').get().n,before);
+  assert.equal((await eb.run({mirrorPath:mirror})).data.identityMigrationApplied,false,'The one-time migration must not be reported again');
+  console.log('OK: prepared migration, colliding students/instruments, global scope, missing DNI, retired references, backups, archives, cache repair, unpublished-work guard and idempotence.');
+} finally {connections.forEach(db=>db.close());fs.rmSync(root,{recursive:true,force:true});}

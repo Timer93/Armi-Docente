@@ -36,6 +36,8 @@ export interface RegisterCompetencyResult {
   competencyName: string;
   code: RegisterLevelCode;
   numericScore?: number | null;
+  rawNumericScore?: number | null;
+  roundAverage?: boolean;
   pending?: boolean;
 }
 
@@ -46,6 +48,8 @@ export interface RegisterCapacityResult {
   capacityName: string;
   code: RegisterLevelCode;
   numericScore?: number | null;
+  rawNumericScore?: number | null;
+  roundAverage?: boolean;
   pending?: boolean;
 }
 

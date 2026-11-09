@@ -1,0 +1,9 @@
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import {SessionEvidenceTemplates} from '/components/sessions-view/SessionEvidenceTemplates.tsx';
+import {SessionInteractiveHtml} from '/components/sessions-view/SessionInteractiveHtml.tsx';
+import '/index.css';
+const html=(window as any).fixtureHtml;
+const data={title:'Propuesta de valor',purpose:'Identificar necesidades y elaborar una solución.',competenciaPrio:{comp:'Gestiona proyectos',evidence:'Propuesta de valor'},competenciasTrans:[{comp:'Gestiona su aprendizaje',evidence:'Plan de trabajo'}]};
+const toast=t=>{(window as any).lastToast=t;};
+createRoot(document.getElementById('root')!).render(<main className="mx-auto max-w-[1400px] p-6"><h1 className="mb-5 text-xl font-black text-slate-800">Sesión · recursos para trabajar en el aula</h1><div className="grid items-start gap-5 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]"><SessionInteractiveHtml themeColor="#8806a4" currentSessionId="s" students={[]} activities={[{id:'practice',title:'Reto de necesidades',fileName:'practica.html',html,criterionId:'c',criterionText:'Identifica necesidades del usuario',mode:'individual',enabled:true,importedAt:'',validation:{valid:true,errors:[],warnings:[]}}]} assessmentModel={{rows:[{id:'c',source:'primary',criterionText:'Identifica necesidades del usuario'}]} as any} sessionData={data} context={{area:'EPT',grade:'5to',section:'B',sessionNumber:'1'}} onChange={()=>{}} onImport={async()=>{}} setToast={toast}/><SessionEvidenceTemplates currentSessionId="s" sessionData={data} grade="5to" themeColor="#8806a4" setToast={toast}/></div></main>);

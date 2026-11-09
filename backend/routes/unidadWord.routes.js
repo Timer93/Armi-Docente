@@ -8,6 +8,7 @@ import { exec, execFile } from 'child_process';
 import db from '../db.js';
 import { resolveTemplatePath, tempRoot } from '../paths.js';
 import { sanitizeDocxDrawingIds } from './wordDocxUtils.js';
+import { resolveUnitSessionEvidenceItems } from './unitSessionExportData.js';
 
 const router = express.Router();
 
@@ -1228,7 +1229,13 @@ router.post('/unidad-word/generate', async (req, res) => {
             });
 
             const sesionesList = Array.isArray(sesiones)
-                ? sesiones.map((sesion, index) => ({
+                ? sesiones.map((sesion, index) => {
+                    const sessionEvidenceItems = resolveUnitSessionEvidenceItems(sesion, evidencias, evidenciasTrans);
+                    const sessionEvidenceText = sessionEvidenceItems
+                        .map((item) => String(item?.text || item || '').trim())
+                        .filter(Boolean)
+                        .join('\n');
+                    return ({
                     sesion_numero: index + 1,
                     sesion_rotulo: `Sesión ${index + 1}`,
                     semana: Math.ceil((index + 1) / 2),
@@ -1245,12 +1252,15 @@ router.post('/unidad-word/generate', async (req, res) => {
                     desempeno_sesion: sesion.des || '',
                     con: sesion.con || '',
                     conocimiento_sesion: sesion.con || '',
-                    evi: sesion.evi || '',
-                    evidencia_sesion: sesion.evi || '',
+                    // La unidad puede haberse guardado antes de que la pantalla materializara
+                    // evidenceItems. En ese caso se recuperan desde sus criterios y se dejan
+                    // también en el texto plano que usa la plantilla Word.
+                    evi: sesion.evi || sessionEvidenceText,
+                    evidencia_sesion: sesion.evi || sessionEvidenceText,
                     eval: sesion.eval || '',
                     evaluacion_sesion: sesion.eval || '',
                     criteriaItems: Array.isArray(sesion.criteriaItems) ? sesion.criteriaItems : [],
-                    evidenceItems: Array.isArray(sesion.evidenceItems) ? sesion.evidenceItems : [],
+                    evidenceItems: sessionEvidenceItems,
                     capacidades_detalle: Array.isArray(sesion.capacidades)
                         ? sesion.capacidades
                             .map((value) => {
@@ -1281,7 +1291,8 @@ router.post('/unidad-word/generate', async (req, res) => {
                             };
                         })
                         : []
-                }))
+                    });
+                })
                 : [];
 
             const content = fs.readFileSync(templatePath);

@@ -3,6 +3,7 @@ import type {
     SessionResourceKey
 } from '../SessionLearningResources';
 import type { SessionResourceAiContext } from './buildResourcePlanPrompt';
+import { buildAnnex2CurricularContract } from './sessionResourceCurriculum';
 
 export const buildCopyableSessionResourcePrompt = (
     key: SessionResourceKey,
@@ -306,15 +307,11 @@ Su función es que el estudiante construya la evidencia.
 
 Incluye:
 - situación o necesidad;
-- usuario;
-- reto;
-- consigna precisa;
-- herramientas TIC pertinentes;
-- proceso de trabajo;
-- decisiones;
-- tablas, matrices, cuadros o espacios vacíos necesarios;
-- producto entregable;
-- criterios;
+- reto de la sesión (literalmente);
+- herramientas TIC pertinentes (ocupar poco espacio);
+- tablas, matrices, cuadros o espacios vacíos necesarios para producir la evidencia (ocupar la mayor parte del espacio);
+- producto entregable (ocupar poco espacio);
+- criterios de evaluación de la sesión (literalmente y ocupando poco espacio);
 - autoevaluación.
 
 NO resuelvas por el estudiante.
@@ -382,6 +379,7 @@ DATOS PEDAGÓGICOS COMUNES:
 ${identificationBlock}
 
 ${key !== 'annex1' ? curricularBlock : ''}
+${key === 'annex2' ? buildAnnex2CurricularContract(context) : ''}
 
 CONTEXTO PRIVADO PARA RAZONAR
 NO copies este bloque literalmente dentro de la imagen:

@@ -1,5 +1,7 @@
 import React from 'react';
 
+import { sessionPlainText } from '../../backend/shared/sessionPlainText.js';
+
 type SessionCoreDetailsPanelProps = {
     themeColor: string;
     sessionData: any;
@@ -25,7 +27,7 @@ export const SessionCoreDetailsPanel: React.FC<SessionCoreDetailsPanelProps> = (
                                     data-session-field={sec.field}
                                     className="w-full p-4 h-24 resize-none outline-none text-slate-700 font-medium italic text-[11px] leading-relaxed text-center focus:bg-slate-50 transition-all"
                                     placeholder="Escriba aquí..."
-                                    value={sessionData[sec.field as keyof typeof sessionData]}
+                                    value={sessionPlainText(sessionData[sec.field as keyof typeof sessionData])}
                                     onChange={e => handleInputChange(sec.field, e.target.value)}
                                 />
                             </div>
@@ -40,7 +42,7 @@ export const SessionCoreDetailsPanel: React.FC<SessionCoreDetailsPanelProps> = (
                             data-session-field="situation"
                             className="w-full p-6 h-32 resize-none outline-none text-slate-700 font-medium italic text-[11px] leading-relaxed text-justify focus:bg-slate-50 transition-all"
                             placeholder="Escriba la situación problemática aquí..."
-                            value={sessionData.situation}
+                            value={sessionPlainText(sessionData.situation)}
                             onChange={e => handleInputChange('situation', e.target.value)}
                         />
                     </div>

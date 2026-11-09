@@ -72,9 +72,10 @@ const buildSidebarDisplayName = (rawName?: string, session?: AuthSession | null)
 
 interface SidebarProps {
   status: ModuleStatus;
-  currentModule: ModuleKey;
+  currentModule: ModuleKey | 'database_admin';
   currentSection?: string;
-  onNavigate: (module: ModuleKey, section?: string) => void;
+  onNavigate: (module: ModuleKey | 'database_admin', section?: string) => void;
+  onPrepareNavigate?: (module: ModuleKey | 'database_admin', section?: string) => void;
   teacherName?: string;
   isCollapsed: boolean;
   toggleCollapse: () => void;
@@ -195,7 +196,7 @@ const MENU_ITEMS: MenuItem[] = [
   },
 ];
 
-export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, currentSection, onNavigate, teacherName, isCollapsed, toggleCollapse, moduleAccess, onLogout, userRoleLabel, profileSession }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, currentSection, onNavigate, onPrepareNavigate, teacherName, isCollapsed, toggleCollapse, moduleAccess, onLogout, userRoleLabel, profileSession }) => {
   const appVersion = __APP_VERSION__;
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['datos_generales']);
@@ -406,6 +407,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
                             )}
                             <button
                                 onClick={() => handleMenuClick(item, index)}
+                                onMouseEnter={() => { if (!locked) onPrepareNavigate?.(item.key); }}
+                                onFocus={() => { if (!locked) onPrepareNavigate?.(item.key); }}
                                 title={isCollapsed ? item.label : ''}
                                 className={`
                                     w-full flex items-center rounded-2xl text-sm font-medium transition-all duration-300 group relative
@@ -494,19 +497,39 @@ export const Sidebar: React.FC<SidebarProps> = ({ status, currentModule, current
                 })}
                  <div className="mt-4 pt-4 border-t border-slate-700/30">
                      <button
-                        onClick={() => onNavigate('database_admin' as any)}
+                        onMouseEnter={() => onPrepareNavigate?.('database_admin', 'bases_datos')}
+                        onFocus={() => onPrepareNavigate?.('database_admin', 'bases_datos')}
+                        onClick={() => {
+                            if (isCollapsed) toggleCollapse();
+                            toggleSubmenu('database_admin');
+                            if (currentModule !== 'database_admin') onNavigate('database_admin', 'bases_datos');
+                        }}
+                        aria-expanded={expandedMenus.includes('database_admin')}
                         className={`
                             w-full flex items-center rounded-2xl text-sm font-medium transition-all duration-300 group
                             ${isCollapsed ? 'justify-center py-3 px-0' : 'justify-start py-3 px-3 gap-3'}
                             ${isDarkMode ? 'text-slate-500 hover:text-red-400 hover:bg-white/5' : 'text-slate-400 hover:text-red-600 hover:bg-red-50'}
                         `}
-                        title="Administración BD"
+                        title="Administrador"
                      >
                          <span className="group-hover:scale-110 transition-transform">{Icons.Database}</span>
                          <span className={`transition-all duration-300 whitespace-nowrap ${isCollapsed ? 'w-0 opacity-0 overflow-hidden' : 'w-auto opacity-100'}`}>
-                            Administrar BD
+                            Administrador
                          </span>
                      </button>
+                     {!isCollapsed && expandedMenus.includes('database_admin') && (
+                         <div className="ml-5 mt-1 space-y-1 border-l border-slate-500/30 pl-3">
+                             {[{ id: 'bases_datos', label: 'Bases de Datos' }, { id: 'control_acceso', label: 'Control de acceso' }].map(section => (
+                                 <button key={section.id} onClick={() => onNavigate('database_admin', section.id)}
+                                    onMouseEnter={() => onPrepareNavigate?.('database_admin', section.id)}
+                                    onFocus={() => onPrepareNavigate?.('database_admin', section.id)}
+                                     aria-current={currentModule === 'database_admin' && currentSection === section.id ? 'page' : undefined}
+                                     className={`block w-full rounded-lg px-3 py-2 text-left text-xs transition-colors ${currentModule === 'database_admin' && currentSection === section.id ? 'bg-emerald-500/15 font-bold text-emerald-500' : 'text-slate-400 hover:bg-slate-500/10 hover:text-emerald-500'}`}>
+                                     {section.label}
+                                 </button>
+                             ))}
+                         </div>
+                     )}
                  </div>
             </div>
         </div>

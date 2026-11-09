@@ -1,6 +1,9 @@
 import fs from 'fs';
+import { readRequestedEvidence } from './shared/portalRequestedEvidences.js';
 import path from 'path';
 import crypto from 'crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { evidenceStudentResolverForDatabase, planEvidenceStudentRepairs, applyEvidenceStudentRepairs } from './evidenceStudentIdentity.js';
 
 const INDEX_FOLDER = '.armi-evidence-index';
 const RECORDS_FOLDER = 'records';
@@ -111,14 +114,17 @@ const metadataFromRow = (row, evidencePath) => {
     evidenceKey,
     relativePath,
     fileName: String(row?.file_name || path.basename(relativePath)),
+    renamedBy: String(row?.renamed_by || ''),
     fileSize: Number(row?.file_size || stats?.size || 0),
     fileType: String(row?.file_type || ''),
     studentId: String(row?.student_id || ''),
     studentDni: String(row?.student_dni || ''),
+    studentDnis: safeJsonArray(row?.student_dnis).map(String),
     studentIds: safeJsonArray(row?.student_ids).map(String),
     studentNames: safeJsonArray(row?.student_names).map(String),
     sessionId: String(row?.session_id || ''),
     criteriaId: String(row?.criteria_id || ''),
+    requestedEvidence: readRequestedEvidence(row?.requested_evidence),
     year: String(row?.year || ''),
     areaId: String(row?.area_id || ''),
     grade: String(row?.grade || ''),
@@ -127,14 +133,17 @@ const metadataFromRow = (row, evidencePath) => {
     unitNumber: String(row?.unit_number || ''),
     sessionNumber: String(row?.session_number || ''),
     observation: String(row?.observation || ''),
+    evidenceLink: String(row?.evidence_link || ''),
+    teacherComment: String(row?.teacher_comment || ''),
+    teacherCommentedAt: String(row?.teacher_commented_at || ''),
     source: String(row?.source || 'teacher'),
     versionGroupId: String(row?.version_group_id || evidenceKey),
     versionNumber: Math.max(1, Number(row?.version_number || 1)),
     isLatest: Number(row?.is_latest ?? 1) === 1,
-    submittedAt: String(row?.submitted_at || row?.updated_at || new Date().toISOString()),
+    submittedAt: String(row?.submitted_at || row?.updated_at || stats?.mtime.toISOString() || ''),
     submissionIp: String(row?.submission_ip || ''),
     submissionUserAgent: String(row?.submission_user_agent || ''),
-    updatedAt: String(row?.updated_at || row?.submitted_at || new Date().toISOString()),
+    updatedAt: String(row?.updated_at || row?.submitted_at || stats?.mtime.toISOString() || ''),
     indexedAt: new Date().toISOString(),
   };
 };
@@ -155,9 +164,14 @@ const writeEvidenceMetadata = ({ root, row, evidencePath }) => {
       const copy = { ...value };
       delete copy.indexedAt;
       delete copy.fileChecksum;
-      return JSON.stringify(copy);
+      // Older records omit this optional field. A schema upgrade must not
+      // upload every unchanged evidence record just to add a null value.
+      copy.requestedEvidence = readRequestedEvidence(copy.requestedEvidence);
+      // IDs belong to one database; changing PC must not rewrite the index.
+      if (copy.studentDni) { delete copy.studentId; delete copy.studentIds; }
+      return copy;
     };
-    if (withoutGeneratedFields(existing) === withoutGeneratedFields(metadata)) return null;
+    if (isDeepStrictEqual(withoutGeneratedFields(existing), withoutGeneratedFields(metadata))) return null;
   }
   if (evidencePath && fs.existsSync(evidencePath)) metadata.fileChecksum = hashFile(evidencePath);
   writeJsonAtomic(recordPath, metadata);
@@ -181,9 +195,39 @@ const writeEvidenceTombstone = ({ root, row }) => {
   return payload;
 };
 
+const listEvidenceTombstoneKeys = (root) => {
+  if (!root) return new Set();
+  const tombstonesRoot = indexPaths(root).tombstonesRoot;
+  if (!fs.existsSync(tombstonesRoot)) return new Set();
+  const keys = new Set();
+  fs.readdirSync(tombstonesRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .forEach((entry) => {
+      const tombstone = readJson(path.join(tombstonesRoot, entry.name));
+      if (tombstone?.evidenceKey) keys.add(String(tombstone.evidenceKey));
+    });
+  return keys;
+};
+
 const reconcileEvidenceMirrorIndex = ({ db, root }) => {
   if (!db || !root || !fs.existsSync(root)) {
     return { enabled: false, exported: 0, imported: 0, updated: 0, deletedLinks: 0, pendingFiles: 0, invalidRecords: 0 };
+  }
+  if (!db.prepare('PRAGMA table_info(evaluacion_evidencias)').all().some((column) => column.name === 'renamed_by')) {
+    db.exec('ALTER TABLE evaluacion_evidencias ADD COLUMN renamed_by TEXT');
+  }
+  const evidenceColumns = new Set(db.prepare('PRAGMA table_info(evaluacion_evidencias)').all().map((column) => column.name));
+  if (!evidenceColumns.has('evidence_link')) db.exec("ALTER TABLE evaluacion_evidencias ADD COLUMN evidence_link TEXT DEFAULT ''");
+  if (!evidenceColumns.has('teacher_comment')) db.exec("ALTER TABLE evaluacion_evidencias ADD COLUMN teacher_comment TEXT DEFAULT ''");
+  if (!evidenceColumns.has('teacher_commented_at')) db.exec('ALTER TABLE evaluacion_evidencias ADD COLUMN teacher_commented_at TEXT');
+  if (!evidenceColumns.has('student_dni')) db.exec('ALTER TABLE evaluacion_evidencias ADD COLUMN student_dni TEXT');
+  if (!evidenceColumns.has('student_dnis')) db.exec('ALTER TABLE evaluacion_evidencias ADD COLUMN student_dnis TEXT');
+  const resolveStudent = evidenceStudentResolverForDatabase(db);
+  const identityRepairs = planEvidenceStudentRepairs(db);
+  if (identityRepairs.length) {
+    const auditRoot = path.join(path.dirname(db.name === ':memory:' ? root : db.name), 'evidence-identity-repairs');
+    writeJsonAtomic(path.join(auditRoot, `${Date.now()}-${crypto.randomUUID()}.json`), identityRepairs);
+    applyEvidenceStudentRepairs(db, identityRepairs);
   }
   const locations = ensureIndex(root);
   let exported = 0;
@@ -196,7 +240,6 @@ const reconcileEvidenceMirrorIndex = ({ db, root }) => {
   const updateKey = db.prepare(`UPDATE evaluacion_evidencias SET evidence_key = ? WHERE id = ?`);
   const findKeyOwner = db.prepare('SELECT id FROM evaluacion_evidencias WHERE evidence_key = ? LIMIT 1');
   const findStudent = db.prepare('SELECT id, dni, grado, secc, estudiantes FROM db_estudiantes WHERE id = ?');
-  const findStudentByDni = db.prepare('SELECT id, dni, grado, secc, estudiantes FROM db_estudiantes WHERE dni = ? LIMIT 1');
   const normalizeStudentScope = db.prepare(`
     UPDATE evaluacion_evidencias
     SET grade = ?, section = ?, student_names = ?, updated_at = updated_at
@@ -204,18 +247,18 @@ const reconcileEvidenceMirrorIndex = ({ db, root }) => {
   `);
   const localRows = db.prepare('SELECT * FROM evaluacion_evidencias ORDER BY id').all();
   localRows.forEach((originalRow) => {
-    let row = originalRow;
+    let row = resolveStudent(originalRow);
     if (String(row.source || '') === 'student_portal' && String(row.student_id || '').trim()) {
       const student = findStudent.get(String(row.student_id));
-      const actualGrade = String(student?.grado || row.grade || '');
-      const actualSection = String(student?.secc || row.section || '');
+      const actualGrade = String(row.grade || student?.grado || '');
+      const actualSection = String(row.section || student?.secc || '');
       const names = safeJsonArray(row.student_names);
       const actualNames = names.length ? names : student?.estudiantes ? [String(student.estudiantes)] : [];
       if (actualGrade !== String(row.grade || '') || actualSection !== String(row.section || '') || names.length === 0) {
         normalizeStudentScope.run(actualGrade, actualSection, JSON.stringify(actualNames), row.id);
         row = { ...row, grade: actualGrade, section: actualSection, student_names: JSON.stringify(actualNames) };
       }
-      row = { ...row, student_dni: String(student?.dni || '') };
+      // The resolver verifies names/DNI before trusting a local numeric id.
     }
     const relativePath = normalizeRelativePath(row.relative_path);
     const evidenceKey = String(row.evidence_key || portableEvidenceKey(relativePath));
@@ -243,17 +286,19 @@ const reconcileEvidenceMirrorIndex = ({ db, root }) => {
   const insert = db.prepare(`
     INSERT INTO evaluacion_evidencias (
       evidence_key, student_id, session_id, criteria_id, file_path, file_type, observation,
+      evidence_link, teacher_comment, teacher_commented_at,
       year, area_id, grade, section, bimester, unit_number, session_number,
-      student_ids, student_names, file_name, file_size, relative_path, source,
+      student_ids, student_names, file_name, file_size, relative_path, source, renamed_by,
       version_group_id, version_number, is_latest, submitted_at, submission_ip,
       submission_user_agent, updated_at
-    ) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const update = db.prepare(`
     UPDATE evaluacion_evidencias SET
       student_id = ?, session_id = ?, criteria_id = ?, file_path = '', file_type = ?, observation = ?,
+      evidence_link = ?, teacher_comment = ?, teacher_commented_at = ?,
       year = ?, area_id = ?, grade = ?, section = ?, bimester = ?, unit_number = ?, session_number = ?,
-      student_ids = ?, student_names = ?, file_name = ?, file_size = ?, relative_path = ?, source = ?,
+      student_ids = ?, student_names = ?, file_name = ?, file_size = ?, relative_path = ?, source = ?, renamed_by = ?,
       version_group_id = ?, version_number = ?, is_latest = ?, submitted_at = ?, submission_ip = ?,
       submission_user_agent = ?, updated_at = ?
     WHERE id = ?
@@ -295,19 +340,22 @@ const reconcileEvidenceMirrorIndex = ({ db, root }) => {
         pendingFiles += 1;
         return;
       }
-      const matchedStudent = metadata.studentDni ? findStudentByDni.get(String(metadata.studentDni)) : null;
-      const resolvedStudentId = String(matchedStudent?.id || metadata.studentId);
-      const portableStudentIds = safeJsonArray(metadata.studentIds).map(String);
-      if (matchedStudent && portableStudentIds.length === 1) portableStudentIds[0] = resolvedStudentId;
+      const identity = resolveStudent({ student_id: metadata.studentId, student_dni: metadata.studentDni,
+        student_ids: JSON.stringify(metadata.studentIds || []), student_dnis: JSON.stringify(metadata.studentDnis || []),
+        student_names: JSON.stringify(metadata.studentNames || []), grade: metadata.grade, section: metadata.section,
+        relative_path: relativePath });
+      const resolvedStudentId = String(identity.student_id);
+      const portableStudentIds = safeJsonArray(identity.student_ids).map(String);
       const values = [
         resolvedStudentId, String(metadata.sessionId), String(metadata.criteriaId || ''),
-        String(metadata.fileType || ''), String(metadata.observation || ''), String(metadata.year),
-        String(metadata.areaId || ''), String(metadata.grade), String(metadata.section || ''),
+        String(metadata.fileType || ''), String(metadata.observation || ''), String(metadata.evidenceLink || ''),
+        String(metadata.teacherComment || ''), String(metadata.teacherCommentedAt || ''), String(metadata.year),
+        String(metadata.areaId || ''), String(identity.grade), String(identity.section || ''),
         String(metadata.bimester || ''), String(metadata.unitNumber), String(metadata.sessionNumber),
         JSON.stringify(portableStudentIds),
         JSON.stringify(safeJsonArray(metadata.studentNames).map(String)),
         String(metadata.fileName || path.basename(relativePath)), actualSize, relativePath,
-        String(metadata.source || 'student_portal'), String(metadata.versionGroupId || metadata.evidenceKey),
+        String(metadata.source || 'student_portal'), String(metadata.renamedBy || ''), String(metadata.versionGroupId || metadata.evidenceKey),
         Math.max(1, Number(metadata.versionNumber || 1)), metadata.isLatest === false ? 0 : 1,
         String(metadata.submittedAt || metadata.updatedAt || new Date().toISOString()),
         String(metadata.submissionIp || ''), String(metadata.submissionUserAgent || ''),
@@ -321,6 +369,18 @@ const reconcileEvidenceMirrorIndex = ({ db, root }) => {
         update.run(...values, existing.id);
         updated += 1;
       }
+      // Identity correction is independent of content timestamps. Preserve
+      // comments/review state even when the metadata is older or equally dated.
+      const owner = existing?.id || findKeyOwner.get(metadata.evidenceKey)?.id;
+      if (owner && incomingIsNewer && readRequestedEvidence(metadata.requestedEvidence)) {
+        const requested = readRequestedEvidence(metadata.requestedEvidence);
+        db.prepare('UPDATE evaluacion_evidencias SET requested_evidence = ? WHERE id = ?')
+          .run(requested ? JSON.stringify(requested) : '', owner);
+      }
+      if (owner) db.prepare(`UPDATE evaluacion_evidencias SET student_id = ?, student_ids = ?,
+        student_dni = ?, student_dnis = ?, grade = ?, section = ? WHERE id = ?`)
+        .run(resolvedStudentId, JSON.stringify(portableStudentIds), identity.student_dni || '',
+          identity.student_dnis || '[]', identity.grade, identity.section, owner);
     });
   });
   transaction();
@@ -329,6 +389,7 @@ const reconcileEvidenceMirrorIndex = ({ db, root }) => {
 };
 
 export {
+  listEvidenceTombstoneKeys,
   portableEvidenceKey,
   reconcileEvidenceMirrorIndex,
   resolveSafeEvidencePath,

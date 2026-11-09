@@ -1,15 +1,21 @@
 import fs from 'fs';
+import { readRequestedEvidence } from './shared/portalRequestedEvidences.js';
 import path from 'path';
 import crypto from 'crypto';
 import multer from 'multer';
 import sharp from 'sharp';
+import ffmpegStatic from 'ffmpeg-static';
+import { spawn } from 'child_process';
 import db from './db.js';
+import { evidenceStudentResolverForDatabase } from './evidenceStudentIdentity.js';
 import { uploadsRoot, tempRoot, ensureDir } from './paths.js';
 import { getDriveMirrorEvidenceStorage } from './sync.js';
 import { portableEvidenceKey, reconcileEvidenceMirrorIndex, writeEvidenceMetadata, writeEvidenceTombstone } from './evidenceMirrorIndex.js';
+import { canPreviewEvidence, evidencePreviewKind, safeEvidenceLink } from './evidenceFormats.js';
 
 const defaultEvidenceUploadsFolder = path.join(uploadsRoot, 'evaluacion-evidencias');
 const tempEvidenceUploadsFolder = path.join(tempRoot, 'evidence-uploads');
+const keepOriginalEvidenceFiles = /^(1|true|yes|si|sí)$/i.test(String(process.env.ARMI_KEEP_EVIDENCE_ORIGINALS || ''));
 ensureDir(defaultEvidenceUploadsFolder);
 ensureDir(tempEvidenceUploadsFolder);
 
@@ -73,6 +79,85 @@ const isImageMimeOrExt = (mimeType = '', ext = '') => {
   const cleanExt = String(ext || '').toLowerCase().replace(/^\./, '');
   const imageExts = new Set(['jpg', 'jpeg', 'png', 'webp', 'bmp', 'gif', 'tiff', 'svg']);
   return cleanMime.startsWith('image/') || imageExts.has(cleanExt);
+};
+
+const videoExtensions = new Set(['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v']);
+const isVideoMimeOrExt = (mimeType = '', ext = '') => String(mimeType || '').toLowerCase().startsWith('video/')
+  || videoExtensions.has(String(ext || '').toLowerCase());
+const isPdfMimeOrExt = (mimeType = '', ext = '') => String(mimeType || '').toLowerCase() === 'application/pdf'
+  || String(ext || '').toLowerCase() === '.pdf';
+
+const executablePath = (value) => {
+  const candidate = String(value || '').trim();
+  if (!candidate) return '';
+  const unpacked = candidate.replace(/app\.asar([\\/])/i, 'app.asar.unpacked$1');
+  return fs.existsSync(unpacked) ? unpacked : candidate;
+};
+
+const runConverter = (command, args, timeoutMs) => new Promise((resolve, reject) => {
+  const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  let errorOutput = '';
+  const timer = setTimeout(() => {
+    child.kill();
+    reject(new Error('La optimización superó el tiempo permitido.'));
+  }, timeoutMs);
+  child.stderr.on('data', (chunk) => { errorOutput = `${errorOutput}${chunk}`.slice(-4000); });
+  child.once('error', (error) => { clearTimeout(timer); reject(error); });
+  child.once('close', (code) => {
+    clearTimeout(timer);
+    if (code === 0) resolve();
+    else reject(new Error(errorOutput.trim() || `El conversor terminó con código ${code}.`));
+  });
+});
+
+const optimizeVideoFile = async (sourcePath, targetPath) => {
+  const ffmpegPath = executablePath(ffmpegStatic);
+  if (!ffmpegPath) throw new Error('FFmpeg no está disponible.');
+  await runConverter(ffmpegPath, [
+    '-hide_banner', '-loglevel', 'error', '-y', '-i', sourcePath,
+    '-map_metadata', '-1', '-vf', "scale='min(1920,iw)':-2:force_original_aspect_ratio=decrease",
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-f', 'mp4', targetPath,
+  ], 30 * 60_000);
+};
+
+const ghostscriptCandidates = process.platform === 'win32' ? ['gswin64c.exe', 'gswin32c.exe'] : ['gs'];
+const optimizePdfFile = async (sourcePath, targetPath) => {
+  let lastError = null;
+  for (const command of ghostscriptCandidates) {
+    try {
+      await runConverter(command, [
+        '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.6', '-dPDFSETTINGS=/ebook',
+        '-dNOPAUSE', '-dQUIET', '-dBATCH', '-dDetectDuplicateImages=true',
+        `-sOutputFile=${targetPath}`, sourcePath,
+      ], 10 * 60_000);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error('Ghostscript no está disponible.');
+};
+
+const preserveOriginalVariant = async (sourcePath, optimizedPath, originalExtension) => {
+  if (!keepOriginalEvidenceFiles) return '';
+  const extension = String(originalExtension || '').toLowerCase();
+  const backupPath = `${optimizedPath}.original${extension}`;
+  await fs.promises.copyFile(sourcePath, backupPath);
+  return backupPath;
+};
+
+export const removeEvidenceFileWithOriginals = (targetPath) => {
+  const resolved = String(targetPath || '').trim();
+  if (!resolved) return;
+  try { fs.rmSync(resolved, { force: true }); } catch {}
+  try {
+    const folder = path.dirname(resolved);
+    const prefix = `${path.basename(resolved)}.original`;
+    fs.readdirSync(folder).filter((name) => name.startsWith(prefix)).forEach((name) => {
+      try { fs.rmSync(path.join(folder, name), { force: true }); } catch {}
+    });
+  } catch {}
 };
 
 export const optimizeMediaBuffer = async (buffer, originalName, mimeType = '') => {
@@ -143,7 +228,7 @@ export const saveEvidenceFile = async ({
     throw new Error('El archivo de evidencia está vacío.');
   }
 
-  const { buffer: finalBuffer, fileName: finalFileName, mimeType: finalMime } = await optimizeMediaBuffer(
+  const { buffer: finalBuffer, fileName: finalFileName, mimeType: finalMime, optimized } = await optimizeMediaBuffer(
     fileBuffer,
     fileName || 'evidencia',
     mimeType
@@ -167,6 +252,9 @@ export const saveEvidenceFile = async ({
 
   ensureDir(path.dirname(absolutePath));
   fs.writeFileSync(absolutePath, finalBuffer);
+  if (optimized && keepOriginalEvidenceFiles) {
+    fs.writeFileSync(`${absolutePath}.original${path.extname(fileName || '')}`, fileBuffer);
+  }
 
   return {
     absolutePath,
@@ -234,18 +322,69 @@ export const saveEvidenceTempFile = async ({
         const optimizedSize = Number((await fs.promises.stat(target.partialPath)).size || 0);
         if (optimizedSize > 0 && optimizedSize < originalSize) {
           await fs.promises.rename(target.partialPath, target.absolutePath);
+          const originalBackupPath = await preserveOriginalVariant(sourcePath, target.absolutePath, originalExt);
           return {
             absolutePath: target.absolutePath,
             relativePath: target.relativePath,
             detectedMime: 'image/webp',
             size: optimizedSize,
             fileName: webpName,
+            originalBackupPath,
           };
         }
         await fs.promises.rm(target.partialPath, { force: true });
       } catch (error) {
         try { await fs.promises.rm(target.partialPath, { force: true }); } catch {}
         console.warn(`[compresion-webp] No se pudo convertir ${originalName}, conservando original:`, error.message);
+      }
+    }
+
+    if (isVideoMimeOrExt(mimeType, originalExt)) {
+      const mp4Name = `${path.basename(originalName, originalExt)}.mp4`;
+      target = createTarget(mp4Name);
+      try {
+        await optimizeVideoFile(sourcePath, target.partialPath);
+        const optimizedSize = Number((await fs.promises.stat(target.partialPath)).size || 0);
+        if (optimizedSize > 0 && optimizedSize < originalSize * 0.98) {
+          await fs.promises.rename(target.partialPath, target.absolutePath);
+          const originalBackupPath = await preserveOriginalVariant(sourcePath, target.absolutePath, originalExt);
+          return {
+            absolutePath: target.absolutePath,
+            relativePath: target.relativePath,
+            detectedMime: 'video/mp4',
+            size: optimizedSize,
+            fileName: mp4Name,
+            originalBackupPath,
+          };
+        }
+        await fs.promises.rm(target.partialPath, { force: true });
+      } catch (error) {
+        try { await fs.promises.rm(target.partialPath, { force: true }); } catch {}
+        console.warn(`[compresion-video] No se pudo optimizar ${originalName}, conservando original:`, error.message);
+      }
+    }
+
+    if (isPdfMimeOrExt(mimeType, originalExt)) {
+      target = createTarget(originalName);
+      try {
+        await optimizePdfFile(sourcePath, target.partialPath);
+        const optimizedSize = Number((await fs.promises.stat(target.partialPath)).size || 0);
+        if (optimizedSize > 0 && optimizedSize < originalSize * 0.95) {
+          await fs.promises.rename(target.partialPath, target.absolutePath);
+          const originalBackupPath = await preserveOriginalVariant(sourcePath, target.absolutePath, originalExt);
+          return {
+            absolutePath: target.absolutePath,
+            relativePath: target.relativePath,
+            detectedMime: 'application/pdf',
+            size: optimizedSize,
+            fileName: originalName,
+            originalBackupPath,
+          };
+        }
+        await fs.promises.rm(target.partialPath, { force: true });
+      } catch (error) {
+        try { await fs.promises.rm(target.partialPath, { force: true }); } catch {}
+        if (error?.code !== 'ENOENT') console.warn(`[compresion-pdf] No se pudo optimizar ${originalName}, conservando original:`, error.message);
       }
     }
 
@@ -367,19 +506,14 @@ export const persistEvidencePortableMetadata = (row) => {
     }
     const resolved = resolveEvidenceFilePathDetailed({ ...row, evidence_key: evidenceKey, relative_path: relativePath });
     if (!resolved.path) return null;
-    const student = String(row.student_id || '').trim()
-      ? db.prepare('SELECT dni, grado, secc, estudiantes FROM db_estudiantes WHERE id = ?').get(String(row.student_id))
-      : null;
+    const identity = evidenceStudentResolverForDatabase(db)({ ...row, relative_path: relativePath });
     return writeEvidenceMetadata({
       root: context.effectivePath,
       row: {
-        ...row,
+        ...identity,
         evidence_key: evidenceKey,
         relative_path: relativePath,
         file_path: '',
-        student_dni: String(student?.dni || ''),
-        grade: String(student?.grado || row.grade || ''),
-        section: String(student?.secc || row.section || ''),
       },
       evidencePath: resolved.path,
     });
@@ -423,14 +557,26 @@ export const mapEvidenceRow = (row, storageContext = null) => {
     sessionId: row.session_id || '',
     studentId: row.student_id || '',
     criteriaId: row.criteria_id || '',
+    requestedEvidence: readRequestedEvidence(row.requested_evidence),
     observation: row.observation || '',
+    evidenceLink: safeEvidenceLink(row.evidence_link),
+    teacherComment: row.teacher_comment || '',
+    teacherCommentedAt: row.teacher_commented_at || '',
     studentIds: JSON.parse(row.student_ids || '[]'),
     studentNames: JSON.parse(row.student_names || '[]'),
     fileName: row.file_name || path.basename(row.file_path || ''),
+    renamedBy: row.renamed_by || '',
     fileSize: Number(row.file_size || 0),
     fileType: row.file_type || '',
+    previewKind: evidencePreviewKind(row.file_name || row.relative_path, row.file_type),
     filePath: resolved.path,
     fileUrl: `/api/evaluacion/evidencias/${row.id}/file`,
+    previewUrl: canPreviewEvidence(row.file_name || row.relative_path, row.file_type)
+      ? `/api/evaluacion/evidencias/${row.id}/preview`
+      : '',
+    thumbnailUrl: ['image', 'video'].includes(evidencePreviewKind(row.file_name || row.relative_path, row.file_type))
+      ? `/api/evaluacion/evidencias/${row.id}/thumbnail`
+      : '',
     source: row.source || 'teacher',
     versionGroupId: row.version_group_id || `legacy-${row.id}`,
     versionNumber: Number(row.version_number || 1),

@@ -14,12 +14,15 @@ const bundledDatabaseRoot = process.resourcesPath
     ? path.join(process.resourcesPath, 'database')
     : path.join(appRoot, 'database');
 const bundledDbPath = path.join(bundledDatabaseRoot, 'armi.db');
+let seededDatabaseThisRun = false;
 
 const seedDatabaseFromBundleIfNeeded = () => {
     if (fs.existsSync(dbPath)) return;
     if (!fs.existsSync(bundledDbPath)) return;
 
     fs.copyFileSync(bundledDbPath, dbPath);
+    seededDatabaseThisRun = true;
+    fs.writeFileSync(path.join(databaseRoot, '.bundled-seed.json'), JSON.stringify({ seededAt: new Date().toISOString() }));
 
     const optionalCompanionFiles = ['armi.db-wal', 'armi.db-shm'];
     optionalCompanionFiles.forEach((filename) => {
@@ -86,6 +89,9 @@ const GENERAL_DATA_COLUMN_DEFINITIONS = {
 };
 
 const SYNC_EXCLUDED_TABLES = new Set([
+    'armi_sync_identity_map',
+    'armi_sync_migration_archive',
+    'armi_sync_migration_log',
     'padron_colegios',
     'db_areas',
     'db_competencias',
@@ -93,12 +99,15 @@ const SYNC_EXCLUDED_TABLES = new Set([
     'student_chat_groups',
     'student_chat_members',
     'student_chat_messages',
+    'student_teacher_messages',
+    'student_teacher_message_recipients',
     'portal_sesiones_estudiantes',
     'portal_evidence_uploads',
     'sync_change_clock',
 ]);
 
 let syncTrackingSchemaSignature = '';
+let syncTrackingSchemaVersion = -1;
 
 const quoteIdentifier = (value) => `"${String(value).replace(/"/g, '""')}"`;
 
@@ -112,6 +121,15 @@ const ensureSyncChangeTracking = () => {
         INSERT OR IGNORE INTO sync_change_clock (id, revision, updated_at)
         VALUES (1, 0, CURRENT_TIMESTAMP);
     `);
+
+    const currentSchemaVersion = Number(db.pragma('schema_version', { simple: true }) || 0);
+    if (syncTrackingSchemaSignature && currentSchemaVersion === syncTrackingSchemaVersion) {
+        const clock = db.prepare('SELECT revision FROM sync_change_clock WHERE id = 1').get();
+        return {
+            revision: Number(clock?.revision || 0),
+            schemaSignature: syncTrackingSchemaSignature,
+        };
+    }
 
     const trackedTables = db
         .prepare("SELECT name, COALESCE(sql, '') AS sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -148,6 +166,8 @@ const ensureSyncChangeTracking = () => {
             .forEach((name) => db.exec(`DROP TRIGGER IF EXISTS ${quoteIdentifier(name)}`));
         syncTrackingSchemaSignature = schemaSignature;
     }
+
+    syncTrackingSchemaVersion = Number(db.pragma('schema_version', { simple: true }) || currentSchemaVersion);
 
     const clock = db.prepare('SELECT revision FROM sync_change_clock WHERE id = 1').get();
     return {
@@ -388,6 +408,13 @@ const initDb = () => {
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS student_deletion_tombstones (
+                student_id TEXT PRIMARY KEY,
+                dni TEXT,
+                student_name TEXT,
+                deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS db_egresados (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 estudiante_id_origen TEXT,
@@ -564,6 +591,27 @@ const initDb = () => {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS interactive_activity_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                student_id TEXT,
+                group_name TEXT,
+                student_ids TEXT DEFAULT '[]',
+                attempt_number INTEGER NOT NULL DEFAULT 1,
+                score REAL,
+                level TEXT,
+                answers_summary TEXT,
+                completed_at DATETIME,
+                reset_at DATETIME,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(session_id, activity_id, scope_type, scope_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_interactive_results_session_activity
+            ON interactive_activity_results(session_id, activity_id, scope_type, scope_key);
+
             CREATE TABLE IF NOT EXISTS evaluacion_modos_calificacion (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 year TEXT NOT NULL,
@@ -580,7 +628,8 @@ const initDb = () => {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 evidence_key TEXT,
                 student_id TEXT, session_id TEXT, criteria_id TEXT,
-                file_path TEXT, file_type TEXT, observation TEXT,
+                file_path TEXT, file_type TEXT, observation TEXT, evidence_link TEXT DEFAULT '',
+                teacher_comment TEXT DEFAULT '', teacher_commented_at TEXT,
                 year TEXT, area_id TEXT, grade TEXT, section TEXT,
                 bimester TEXT, unit_number TEXT, session_number TEXT,
                 student_ids TEXT, student_names TEXT,
@@ -641,6 +690,7 @@ const initDb = () => {
                 received_chunks TEXT DEFAULT '[]',
                 client_sha256 TEXT DEFAULT '',
                 observation TEXT DEFAULT '',
+                evidence_link TEXT DEFAULT '',
                 status TEXT NOT NULL,
                 last_error TEXT DEFAULT '',
                 created_at INTEGER NOT NULL,
@@ -665,6 +715,7 @@ const initDb = () => {
         checkAndAdd('programacion_anual', 'metas_datos', 'TEXT');
         checkAndAdd('db_estudiantes', 'fecha_nacimiento', 'TEXT');
         checkAndAdd('db_estudiantes', 'password_hash', 'TEXT');
+        checkAndAdd('db_estudiantes', 'password_recovery_cipher', 'TEXT');
         checkAndAdd('db_estudiantes', 'password_changed_at', 'TEXT');
         checkAndAdd('db_estudiantes', 'notifications_enabled', 'INTEGER DEFAULT 0');
         checkAndAdd('db_egresados', 'fecha_nacimiento', 'TEXT');
@@ -676,8 +727,11 @@ const initDb = () => {
         checkAndAdd('evaluacion_evidencias', 'unit_number', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'session_number', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'student_ids', 'TEXT');
+        checkAndAdd('evaluacion_evidencias', 'student_dni', 'TEXT');
+        checkAndAdd('evaluacion_evidencias', 'student_dnis', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'student_names', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'file_name', 'TEXT');
+        checkAndAdd('evaluacion_evidencias', 'renamed_by', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'file_size', 'INTEGER DEFAULT 0');
         checkAndAdd('evaluacion_evidencias', 'relative_path', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'source', "TEXT DEFAULT 'teacher'");
@@ -688,10 +742,18 @@ const initDb = () => {
         checkAndAdd('evaluacion_evidencias', 'submitted_at', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'submission_ip', 'TEXT');
         checkAndAdd('evaluacion_evidencias', 'submission_user_agent', 'TEXT');
+        checkAndAdd('evaluacion_evidencias', 'evidence_link', "TEXT DEFAULT ''");
+        checkAndAdd('evaluacion_evidencias', 'requested_evidence', "TEXT DEFAULT ''");
+        checkAndAdd('portal_evidence_uploads', 'requested_evidence', "TEXT DEFAULT ''");
+        checkAndAdd('portal_evidence_uploads', 'completed_evidence_id', 'INTEGER DEFAULT 0');
+        checkAndAdd('evaluacion_evidencias', 'teacher_comment', "TEXT DEFAULT ''");
+        checkAndAdd('evaluacion_evidencias', 'teacher_commented_at', 'TEXT');
+        checkAndAdd('portal_evidence_uploads', 'evidence_link', "TEXT DEFAULT ''");
         checkAndAdd('evaluacion_conclusiones', 'competency_name', 'TEXT');
         checkAndAdd('evaluacion_conclusiones', 'competency_source', 'TEXT');
         checkAndAdd('evaluacion_registros', 'grading_mode', "TEXT NOT NULL DEFAULT 'literal_traditional'");
         checkAndAdd('evaluacion_registros', 'numeric_score', 'REAL');
+        checkAndAdd('interactive_activity_results', 'student_ids', "TEXT DEFAULT '[]'");
 
         db.exec(`
             UPDATE evaluacion_registros
@@ -743,6 +805,16 @@ ensureGeneralDataIntegrity();
 ensureInitialModuleStatusRow();
 ensureSyncChangeTracking();
 
+if (seededDatabaseThisRun) {
+    // Include rows created by schema initialization, so empty institution and
+    // module defaults cannot compete with the user's first remote changes.
+    const tables = {};
+    for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()) {
+        if (!SYNC_EXCLUDED_TABLES.has(name)) tables[name] = db.prepare(`SELECT * FROM ${quoteIdentifier(name)}`).all();
+    }
+    fs.writeFileSync(path.join(databaseRoot, '.bundled-seed.json'), JSON.stringify({ seededAt: new Date().toISOString(), tables }));
+}
+
 const listUserTables = () => db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
     .all()
@@ -790,6 +862,11 @@ const restoreDatabase = (snapshot) => {
 
     const transaction = db.transaction(() => {
         db.pragma('foreign_keys = OFF');
+
+        if (tables.includes('db_estudiantes') && !tables.includes('armi_sync_identity_map')
+            && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='armi_sync_identity_map'").get()) {
+            db.prepare('DELETE FROM armi_sync_identity_map').run();
+        }
 
         tables.forEach((table) => {
             db.prepare(`DELETE FROM "${table}"`).run();

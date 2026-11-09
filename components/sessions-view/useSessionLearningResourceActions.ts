@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { saveImageAssetFile, verifyYouTubeResource } from '../../services/apiService';
+import { saveImageAssetFile, saveSessionResource, verifyYouTubeResource } from '../../services/apiService';
 import { createGeminiClient, generateGeminiContent } from '../../utils/gemini';
 import { getAiUsageProgress, registerAiUsage } from '../../utils/aiUsage';
 import { classifyAiIssue } from '../../utils/aiErrors';
@@ -15,6 +15,7 @@ import { buildSessionResourcePlanPrompt, type SessionResourceAiContext } from '.
 import { buildSessionResourceImagePrompt } from './resource-prompts/buildResourceImagePrompt';
 import { buildCopyableSessionResourcePrompt } from './resource-prompts/buildCopyableResourcePrompt';
 import { cleanSessionResourceText as cleanResourceText } from './resource-prompts/cleanResourceText';
+import { buildSessionResourceCurricularRows } from './resource-prompts/sessionResourceCurriculum';
 import {
     generateSessionResourceImage,
     normalizeSessionResourcePlan,
@@ -31,6 +32,8 @@ import {
 } from './sessionAiSupport';
 
 interface UseSessionLearningResourceActionsParams {
+    year: string;
+    areaId: string;
     currentSessionId: string | null;
     selArea: string;
     selGrade: string;
@@ -49,6 +52,8 @@ interface UseSessionLearningResourceActionsParams {
 }
 
 export const useSessionLearningResourceActions = ({
+    year,
+    areaId,
     currentSessionId,
     selArea,
     selGrade,
@@ -71,6 +76,12 @@ export const useSessionLearningResourceActions = ({
     const resourceGenerationErrorsRef = useRef<Partial<Record<SessionResourceKey, string>>>({});
     const imageQuotaCooldownUntilRef = useRef(0);
     const imageQuotaCooldownReasonRef = useRef('');
+
+    const persistResourceLink = useCallback(async (key: SessionResourceKey, resource: SessionLearningResource) => {
+        const result = await saveSessionResource({ year, areaId, grade: selGrade, section: selSection,
+            unitNumber, sessionNumber, key, resource, sessionData });
+        if (!result.success) throw new Error(result.message || 'No se pudo guardar el vinculo del recurso con la sesion.');
+    }, [year, areaId, selGrade, selSection, unitNumber, sessionNumber, sessionData]);
 
     const updateLearningResources = useCallback((next: SessionLearningResourcesData) => {
         setSessionData((prev: any) => ({ ...prev, learningResources: next }));
@@ -114,6 +125,7 @@ export const useSessionLearningResourceActions = ({
     criterion: cleanResourceText(sessionData?.competenciaPrio?.des),
     evidence: cleanResourceText(sessionData?.competenciaPrio?.evidence),
     instrument: cleanResourceText(sessionData?.competenciaPrio?.inst),
+    curricularRows: buildSessionResourceCurricularRows(sessionData, cleanResourceText),
     
     learningSequence: {
         priorKnowledge: cleanResourceText(
@@ -171,10 +183,12 @@ export const useSessionLearningResourceActions = ({
     
     
     const normalizeResourcePlan = useCallback((
-        raw: any
+        raw: any,
+        key?: SessionResourceKey
     ) => normalizeSessionResourcePlan(
         raw,
-        buildResourceAiContext()
+        buildResourceAiContext(),
+        key
     ), [buildResourceAiContext]);
     
     const resolveYouTubeResource = useCallback((
@@ -202,7 +216,7 @@ export const useSessionLearningResourceActions = ({
     key: SessionResourceKey,
     resource: SessionLearningResource,
     content: SessionResourceAIContent
-    ) => buildSessionResourceImagePrompt(key, resource, content), []);
+    ) => buildSessionResourceImagePrompt(key, resource, content, buildResourceAiContext()), [buildResourceAiContext]);
     const buildCopyableResourcePrompt = useCallback((
     key: SessionResourceKey
     ) => {
@@ -367,7 +381,8 @@ export const useSessionLearningResourceActions = ({
         const plan = normalizeResourcePlan(
             parseAiJsonObject(
                 String(planningResponse?.text || '')
-            )
+            ),
+            key
         );
     
         const planningModel =
@@ -517,20 +532,14 @@ export const useSessionLearningResourceActions = ({
                 : {}),
     
             promptVersion:
-                'session-resource-v4-independent',
+                'session-resource-v5-curricular-evidence',
     
             generatedAt:
                 new Date().toISOString()
         };
     
-        setSessionData((prev: any) => {
-            const next =
-                createSessionLearningResourceDefaults(
-                    prev?.learningResources
-                );
-    
-            next[key] = {
-                ...next[key],
+        const savedResource = {
+                ...createSessionLearningResourceDefaults(sessionData?.learningResources)[key],
     
                 imageUrl,
                 wordImageUrl,
@@ -549,7 +558,10 @@ export const useSessionLearningResourceActions = ({
                 sourceSessionId:
                     currentSessionId
             };
-    
+        await persistResourceLink(key, savedResource);
+        setSessionData((prev: any) => {
+            const next = createSessionLearningResourceDefaults(prev?.learningResources);
+            next[key] = savedResource;
             return {
                 ...prev,
                 learningResources: next
@@ -682,6 +694,7 @@ export const useSessionLearningResourceActions = ({
     generalData?.gemini_model,
     normalizeResourcePlan,
     persistSessionResourceImage,
+    persistResourceLink,
     resolveYouTubeResource,
     sessionData,
     setToast
@@ -734,6 +747,8 @@ export const useSessionLearningResourceActions = ({
         try {
             const imageData = await readSessionResourceImageFile(file);
             const storedImage = await persistSessionResourceImage(key, imageData);
+            const resource = applyManualSessionResourceUpload(sessionData?.learningResources, key, storedImage, currentSessionId)[key];
+            await persistResourceLink(key, resource);
             setSessionData((prev: any) => {
                 const learningResources = applyManualSessionResourceUpload(
                     prev?.learningResources,
@@ -747,7 +762,7 @@ export const useSessionLearningResourceActions = ({
         } catch (error: any) {
             setToast({ msg: `❌ ${error?.message || 'No se pudo cargar la imagen.'}`, type: 'error' });
         }
-    }, [currentSessionId, persistSessionResourceImage, setToast]);
+    }, [currentSessionId, persistSessionResourceImage, persistResourceLink, sessionData, setToast]);
 
     return {
         isGeneratingResources,

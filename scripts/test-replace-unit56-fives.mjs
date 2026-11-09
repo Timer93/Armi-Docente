@@ -1,0 +1,67 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import Database from 'better-sqlite3';
+import { replaceUnit56Fives } from './replace-unit56-fives-with-ten.mjs';
+import { hybridGradeIssue } from '../backend/shared/hybridGradeIntegrity.js';
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'armi-five-to-ten-'));
+const file = path.join(root, 'grades.db');
+try {
+  const db = new Database(file);
+  db.exec(`CREATE TABLE sesiones(id_sesion TEXT PRIMARY KEY,year TEXT,unit_number TEXT,session_data TEXT);
+    CREATE TABLE evaluacion_registros(id INTEGER PRIMARY KEY,student_id TEXT,session_id TEXT,criteria_id TEXT,grading_mode TEXT,numeric_score REAL,level TEXT,observation TEXT,updated_at TEXT);
+    CREATE TABLE armi_frontend_state(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT);
+    CREATE TABLE evaluacion_evidencias(id INTEGER,data TEXT);
+    CREATE TABLE db_estudiantes(id INTEGER,name TEXT);
+    INSERT INTO evaluacion_evidencias VALUES(1,'Keep evidence');
+    INSERT INTO db_estudiantes VALUES(1,'Keep student');`);
+  const addSession = db.prepare('INSERT INTO sesiones VALUES(?,?,?,?)');
+  addSession.run('u5', '2026', '5', '{"keep":"plan"}');
+  addSession.run('u6', '2026', '6', '{"keep":"plan"}');
+  addSession.run('u4', '2026', '4', '{}'); addSession.run('old', '2025', '5', '{}');
+  const add = db.prepare("INSERT INTO evaluacion_registros VALUES(?,'1',?,?,?,?,?,'Keep comment','before')");
+  add.run(1, 'u5', 'primary-1', 'hybrid_vigesimal', 5, 'Inicio');
+  add.run(2, 'u6', 'transversal-1-1', 'hybrid_vigesimal', 5, 'c');
+  add.run(3, 'u6', 'legacy-criterion', 'hybrid_vigesimal', 5, 'C');
+  add.run(4, 'u4', 'primary-1', 'hybrid_vigesimal', 5, 'C');
+  add.run(5, 'old', 'primary-1', 'hybrid_vigesimal', 5, 'C');
+  add.run(6, 'u5', 'primary-2', 'literal_traditional', 5, 'C');
+  add.run(7, 'u5', 'primary-3', 'hybrid_vigesimal', null, '');
+  add.run(8, 'u5', 'primary-4', 'hybrid_vigesimal', 17, 'A');
+  add.run(9, 'u5', 'primary-5', 'hybrid_vigesimal', 5.1, 'C');
+  const scores = { 'u5::1::primary-1': 5, 'u6::1::transversal-1-1': '5', 'u6::1::legacy-criterion': 5, 'u4::1::primary-1': 5, 'other-score': 19 };
+  db.prepare('INSERT INTO armi_frontend_state VALUES(?,?,?)').run('armi_hybrid_numeric_scores_v1', JSON.stringify(scores), 'before');
+  db.prepare('INSERT INTO armi_frontend_state VALUES(?,?,?)').run('other-setting', 'keep', 'before');
+  const original = db.prepare('SELECT * FROM evaluacion_registros ORDER BY id').all(); db.close();
+  const dry = await replaceUnit56Fives({ databasePath: file });
+  assert.equal(dry.applied, false); assert.equal(dry.changedGrades, 3);
+  const conflictFile = path.join(root, 'conflict.db'); fs.copyFileSync(file, conflictFile);
+  const conflict = new Database(conflictFile);
+  conflict.prepare('UPDATE armi_frontend_state SET value=? WHERE key=?').run(JSON.stringify({ ...scores, 'u5::1::primary-1': 7 }), 'armi_hybrid_numeric_scores_v1'); conflict.close();
+  await assert.rejects(replaceUnit56Fives({ databasePath: conflictFile, apply: true, backupRoot: path.join(root, 'conflict-backups') }), /Conflicting cache/);
+  const conflictCheck = new Database(conflictFile, { readonly: true });
+  assert.deepEqual(conflictCheck.prepare('SELECT * FROM evaluacion_registros ORDER BY id').all(), original); conflictCheck.close();
+  const result = await replaceUnit56Fives({ databasePath: file, apply: true, backupRoot: path.join(root, 'backups') });
+  assert.equal(result.changedGrades, 3); assert.equal(result.cacheUpdates, 3); assert.equal(result.individualLevelsChanged, 0);
+  const check = new Database(file, { readonly: true });
+  const after = check.prepare('SELECT * FROM evaluacion_registros ORDER BY id').all();
+  after.slice(0, 3).forEach((row, index) => {
+    assert.equal(row.numeric_score, 10); assert.equal(row.level, original[index].level); assert.equal(row.observation, original[index].observation);
+    assert.equal(hybridGradeIssue(row), '');
+  });
+  assert.deepEqual(after.slice(3), original.slice(3), 'Other periods, modes, blanks, high scores and 5.1 must stay unchanged');
+  const cache = JSON.parse(check.prepare('SELECT value FROM armi_frontend_state WHERE key=?').get('armi_hybrid_numeric_scores_v1').value);
+  assert.equal(cache['u5::1::primary-1'], 10); assert.equal(cache['u6::1::transversal-1-1'], 10); assert.equal(cache['u4::1::primary-1'], 5);
+  assert.equal(cache['other-score'], 19); check.close();
+  const backup = new Database(result.backup, { readonly: true });
+  assert.deepEqual(backup.prepare('SELECT * FROM evaluacion_registros ORDER BY id').all(), original);
+  assert.equal(backup.pragma('quick_check', { simple: true }), 'ok'); backup.close();
+  assert.equal((await replaceUnit56Fives({ databasePath: file, apply: true, backupRoot: path.join(root, 'backups') })).changedGrades, 0);
+  console.log('OK: exact 5-to-10 in U5/U6 2026, area/transversal/legacy records, C unchanged, full backup, audit, safe cache, protected data, conflict rollback and idempotence.');
+} finally {
+  const resolved = path.resolve(root);
+  assert.ok(resolved.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(resolved).startsWith('armi-five-to-ten-'));
+  fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}

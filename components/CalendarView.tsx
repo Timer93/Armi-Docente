@@ -160,7 +160,6 @@ export const CalendarView: React.FC<Props> = ({ activeSection, onSuccess }) => {
           setHolidays(JSON.parse(savedHolidays));
       } else {
           setHolidays(DEFAULT_HOLIDAYS_LIST);
-          localStorage.setItem('armi_holidays_v7', JSON.stringify(DEFAULT_HOLIDAYS_LIST));
       }
 
       const dbStudents = await getEstudiantes();

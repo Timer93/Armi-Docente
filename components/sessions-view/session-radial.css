@@ -1,0 +1,24 @@
+.session-sound-toggle { width:28px; height:28px; min-width:28px; min-height:28px; border-radius:50%; }
+.session-sound-toggle svg { width:15px; height:15px; }
+.session-color-anchor { position:absolute; width:1px; height:1px; }
+.session-radial { position:fixed; width:48px; height:48px; z-index:900; color:#334155; font-family:inherit; }
+.session-radial .session-radial-trigger { width:48px; height:48px; min-width:48px; min-height:48px; border-radius:50%; background:var(--session-radial-color,#8200a1); color:#fff; box-shadow:0 5px 18px rgb(15 23 42 / 25%); touch-action:none; user-select:none; cursor:grab; z-index:3; }
+.session-radial .session-radial-trigger svg { width:23px; height:23px; }
+.session-radial.is-dragging .session-radial-trigger { cursor:grabbing; transform:none; }
+.session-radial .session-radial-trigger:focus-visible { outline:3px solid #2563eb; outline-offset:4px; }
+.session-radial-context { position:absolute; padding:3px 7px; border-radius:8px; background:rgb(15 23 42 / 90%); color:#fff; font-size:10px; font-weight:600; line-height:1.5; white-space:nowrap; pointer-events:none; max-width:190px; overflow:hidden; text-overflow:ellipsis; }
+.session-radial-fan { position:absolute; z-index:2; }
+.session-radial-item { position:absolute; width:44px; height:44px; animation:session-radial-open 150ms cubic-bezier(.2,.8,.2,1) both; }
+.session-radial .session-radial-action { width:44px; height:44px; min-width:44px; min-height:44px; border-radius:50%; background:rgb(255 255 255 / 94%); color:#334155; box-shadow:0 3px 12px rgb(15 23 42 / 20%); }
+.session-radial .session-radial-action svg { width:20px; height:20px; stroke-width:1.8; }
+.session-radial .session-glass-button > .session-glass-filter { width:0; height:0; }
+.session-radial .session-radial-action:focus-visible { outline:3px solid #2563eb; outline-offset:3px; }
+.session-radial .session-radial-action:disabled { opacity:.5; }
+.session-radial-caption { position:absolute; display:none; width:150px; padding:4px 6px; border-radius:7px; background:rgb(15 23 42 / 96%); color:#fff; text-align:center; font-size:11px; font-weight:600; line-height:1.4; pointer-events:none; z-index:4; }
+.session-radial-item:hover .session-radial-caption, .session-radial-item:focus-within .session-radial-caption { display:block; }
+.session-action-error { position:fixed; right:16px; top:16px; z-index:1100; max-width:min(360px,calc(100vw - 32px)); padding:12px 36px 12px 14px; border:1px solid #fecaca; border-radius:14px; background:#fff1f2; color:#881337; font-size:13px; box-shadow:0 8px 28px rgb(15 23 42 / 15%); }
+.session-action-error button { position:absolute; right:10px; top:8px; font-size:20px; }
+@keyframes session-radial-open { from { opacity:0; transform:translate(var(--radial-origin-x),var(--radial-origin-y)) scale(.35); } to { opacity:1; transform:translate(0,0) scale(1); } }
+@media(prefers-reduced-motion:reduce) { .session-radial-item { animation:none; } }
+@media(forced-colors:active) { .session-radial .session-glass-button { background:ButtonFace; color:ButtonText; border:1px solid ButtonText; } }
+@media print { .session-radial, .session-action-error { display:none !important; } }

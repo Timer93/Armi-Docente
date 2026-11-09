@@ -1,23 +1,104 @@
-﻿
+
 import { API_BASE_URL, INITIAL_GENERAL_DATA, INITIAL_MODULE_STATUS, DEPARTAMENTOS_PERU_MOCK } from '../constants';
 import { GeneralData, ModuleStatus, ApiResponse, Student, AttendanceRecord, FaceProfile, AuthSession } from '../types';
 import { optimizeImageDataUrl, type OptimizableImageKind } from '../utils/imageOptimization';
+import { runPortableBootstrap } from '../utils/portableBootstrap';
+import { createRandomUuid } from '../utils/randomUuid';
 
 const BACKEND_URL = '/api';
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const getPracticeImageLibrary = async (): Promise<ApiResponse<{ folder: string; images: { name: string; key: string }[]; warnings: string[] }>> => {
+    try { return await (await safeFetch(`${BACKEND_URL}/interactive-images`)).json(); }
+    catch (e: any) { return { success: false, message: e.message }; }
+};
+export const bindPracticeImageLibrary = async (html: string): Promise<ApiResponse<{ html: string; embedded: string[]; warnings: string[] }>> => {
+    try { return await (await safeFetch(`${BACKEND_URL}/interactive-images/bind`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html }) })).json(); }
+    catch (e: any) { return { success: false, message: e.message }; }
+};
+export const uploadPracticeImage = async (name: string, dataUrl: string): Promise<ApiResponse<any>> => {
+    try { return await (await safeFetch(`${BACKEND_URL}/interactive-images`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, dataUrl }) })).json(); }
+    catch (e: any) { return { success: false, message: e.message }; }
+};
 
-const safeFetch = async (url: string, options?: RequestInit, timeoutMs = 12000): Promise<Response> => {
+const SESSION_INDEX_CACHE_KEY = 'armi_fast_session_index_v1';
+let sessionIndexMemoryCache: Record<string, any> | null = null;
+let sessionIndexRefreshPromise: Promise<Record<string, any>> | null = null;
+
+const readSessionIndexCache = (): Record<string, any> | null => {
+    if (sessionIndexMemoryCache) return sessionIndexMemoryCache;
+    if (typeof window === 'undefined') return null;
+    try {
+        const raw = window.localStorage.getItem(SESSION_INDEX_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+        sessionIndexMemoryCache = parsed;
+        return parsed;
+    } catch {
+        return null;
+    }
+};
+
+const writeSessionIndexCache = (data: Record<string, any>) => {
+    sessionIndexMemoryCache = data || {};
+    if (typeof window !== 'undefined') {
+        try { window.localStorage.setItem(SESSION_INDEX_CACHE_KEY, JSON.stringify(sessionIndexMemoryCache)); } catch {}
+        window.dispatchEvent(new CustomEvent('armi-session-index-updated', { detail: sessionIndexMemoryCache }));
+    }
+};
+
+const refreshSessionIndex = async (): Promise<Record<string, any>> => {
+    if (sessionIndexRefreshPromise) return sessionIndexRefreshPromise;
+    sessionIndexRefreshPromise = (async () => {
+        try {
+            const response = await safeFetch(`${BACKEND_URL}/sesiones/index`, undefined, 4000);
+            const json = await response.json();
+            const data = json.success && json.data && typeof json.data === 'object' ? json.data : {};
+            writeSessionIndexCache(data);
+            return data;
+        } catch {
+            return readSessionIndexCache() || {};
+        } finally {
+            sessionIndexRefreshPromise = null;
+        }
+    })();
+    return sessionIndexRefreshPromise;
+};
+
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+let backendDataEpoch = (() => { try { return window.sessionStorage.getItem('armi_backend_data_epoch') || 'legacy'; } catch { return 'legacy'; } })();
+let staleDataEpoch = false;
+const observeDataEpoch = (response: Response) => {
+    // Several concurrent responses can observe the same epoch change. Schedule
+    // only one reload per document; repeated reloads abort the startup navigation.
+    if (staleDataEpoch) return;
+    const next = response.headers.get('X-ARMI-Data-Epoch');
+    if (!next || next === backendDataEpoch || typeof window === 'undefined') return;
+    staleDataEpoch = true;
+    try { window.sessionStorage.setItem('armi_backend_data_epoch', next); } catch {}
+    window.setTimeout(() => window.location.reload(), 50);
+};
+
+const safeFetch = async (url: string, options?: RequestInit, timeoutMs = 12000, maxAttempts = 4): Promise<Response> => {
     const method = (options?.method || 'GET').toUpperCase();
+    if (staleDataEpoch && !['GET', 'HEAD'].includes(method)) throw new Error('ARMI esta recargando los datos verificados antes de permitir guardar.');
     const shouldRetry = method === 'GET' || method === 'HEAD';
-    const attempts = shouldRetry ? 4 : 1;
+    const attempts = shouldRetry ? maxAttempts : 1;
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
         const controller = new AbortController();
+        const externalSignal = options?.signal;
+        if (externalSignal?.aborted) throw new DOMException('Solicitud cancelada', 'AbortError');
+        const abort = () => controller.abort();
+        externalSignal?.addEventListener('abort', abort, { once: true });
         const id = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
-            const response = await fetch(url, { ...options, signal: controller.signal });
+            const headers = new Headers(options?.headers);
+            headers.set('X-ARMI-Data-Epoch', backendDataEpoch);
+            const response = await fetch(url, { ...options, headers, signal: controller.signal });
+            observeDataEpoch(response);
             clearTimeout(id);
 
             if (shouldRetry && response.status >= 500 && attempt < attempts) {
@@ -28,15 +109,22 @@ const safeFetch = async (url: string, options?: RequestInit, timeoutMs = 12000):
             return response;
         } catch (error: any) {
             clearTimeout(id);
+            if (externalSignal?.aborted) throw error;
 
             if (shouldRetry && attempt < attempts && (error.name === 'AbortError' || error instanceof TypeError)) {
                 await wait(700 * attempt);
                 continue;
             }
 
-            if (error.name === 'AbortError') throw new Error("Tiempo de espera agotado (Servidor no responde)");
-            if (error instanceof TypeError) throw new Error("No se pudo conectar con el backend. Inicia el proyecto con `npm run dev`.");
+            if (error.name === 'AbortError') throw new Error("Tiempo de espera agotado (el servicio local no responde)");
+            if (error instanceof TypeError) {
+                const desktopMessage = 'El servicio local de ARMI se desconecto temporalmente. La aplicacion intentara recuperarlo automaticamente.';
+                const developmentMessage = 'No se pudo conectar con el backend. Inicia el proyecto con `npm run dev`.';
+                throw new Error(typeof window !== 'undefined' && Boolean(window.armiApp) ? desktopMessage : developmentMessage);
+            }
             throw error;
+        } finally {
+            externalSignal?.removeEventListener('abort', abort);
         }
     }
 
@@ -104,7 +192,17 @@ export interface CloudSyncManifest {
     files: CloudSyncFileMeta[];
 }
 
+export interface InternetConnectivityData {
+    online: boolean | null;
+    checkedAt: string | null;
+    checking: boolean;
+}
 export interface CloudSyncStatusData {
+    receivedChanges?: { operations: number; completedAt: string } | null;
+    downloadProgress?: TransferProgressState;
+    activeTransfers?: ResourceTransferState[];
+    mirrorTransfer?: ResourceDeliveryStatus['mirrorTransfer'];
+    internetConnectivity?: InternetConnectivityData;
     config: {
         mode: 'local' | 'drive_mirror' | 'apps_script_drive';
         mirrorPath: string;
@@ -185,11 +283,11 @@ export interface CloudSyncStatusData {
         resourceFiles: number;
         resourceBytes: number;
     } | null;
-    comparison: 'local-mode' | 'no-data' | 'mirror-missing' | 'mirror-newer' | 'local-newer' | 'in-sync' | 'diverged' | 'mirror-incomplete';
+    comparison: 'local-mode' | 'no-data' | 'mirror-missing' | 'mirror-newer' | 'local-newer' | 'in-sync' | 'diverged' | 'mirror-incomplete' | 'incremental-pending';
     lastFrontendStateAt: string | null;
     driveDesktop: {
         detected: boolean;
-        state?: 'inactive' | 'not-configured' | 'folder-missing' | 'app-not-running' | 'starting' | 'paused' | 'offline' | 'ready';
+        state?: 'inactive' | 'not-configured' | 'folder-missing' | 'app-not-running' | 'starting' | 'paused' | 'offline' | 'ready' | 'unknown';
         message?: string;
         processRunning?: boolean | null;
         installed?: boolean;
@@ -224,18 +322,31 @@ export interface CloudSyncStatusData {
         updatedAt?: string | null;
         lastSuccessAt?: string;
         lastErrorAt?: string;
+        progress?: { phase: string; completedFiles: number; totalFiles: number; completedBytes: number; totalBytes: number;
+            currentFile?: string; reviewedFiles?: number; unchangedFiles?: number } | null;
     };
     incrementalSync?: {
         enabled: boolean;
         state: string;
         message: string;
         pendingOperations?: number;
+        pendingTask?: {kind: string; label: string; detail: string; requiresAction: boolean} | null;
         publishedOperations?: number;
         appliedOperations?: number;
+        recoveredOperations?: number;
         conflicts?: number;
         updatedAt?: string | null;
         lastSuccessAt?: string;
         lastErrorAt?: string;
+        delivery?: {
+            scope: 'database-changes'; cloud: 'unverified'; localCopyPreparedAt?: string | null;
+            lastPublication?: { batchId: string; sha256: string; createdAt: string } | null;
+            peers: Array<{ deviceId: string; label?: string; confirmed: boolean; confirmedAt: string }>;
+        };
+        maintenance?: {
+            state: string; message: string; retiredFiles: number; retiredBytes: number;
+            indexedFiles?: number; duplicateCandidates?: number; cloudSpaceReclaimed: false; lastCheckedAt?: string;
+        };
     };
     resourceDelivery?: ResourceDeliveryStatus;
     frontendState?: {
@@ -282,7 +393,33 @@ export interface ResourceDeliveryStatus {
     } | null;
 }
 
+export interface TransferProgressState {
+        state: 'idle' | 'transferring' | 'waiting' | 'complete' | 'error';
+        totalFiles: number;
+        completedFiles: number;
+        totalBytes: number;
+        completedBytes: number;
+        message?: string;
+}
+export type ResourceConflict = {
+    id: string; title: string; fileName: string; createdAt: string;
+    versions: { key: 'local' | 'mirror'; label: string; size: number; modifiedAt: string }[];
+};
+export const resolveResourceFileConflict = async (id: string, version: 'local' | 'mirror'): Promise<ApiResponse<any>> => {
+    try {
+        return await (await safeFetch(`${BACKEND_URL}/sync/resource-conflicts/${encodeURIComponent(id)}/resolve`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version }),
+        })).json();
+    } catch (error: any) { return { success: false, message: error.message }; }
+};
+
 export interface LocalCloudSyncStatusData {
+    resourceConflicts?: ResourceConflict[];
+    receivedChanges?: { operations: number; completedAt: string } | null;
+    downloadProgress?: TransferProgressState;
+    internetConnectivity?: InternetConnectivityData;
+    activeTransfers?: ResourceTransferState[];
+    mirrorTransfer?: ResourceDeliveryStatus['mirrorTransfer'];
     config: {
         mode: 'local' | 'drive_mirror' | 'apps_script_drive';
         autoSyncOnClose: boolean;
@@ -407,8 +544,55 @@ export const saveSesion = async (payload: { year: string, areaId: string, grade:
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
+        const result = await res.json();
+        if (result?.success) {
+            const id = `${payload.year}-${payload.areaId}-${payload.grade}-${payload.section}-U${payload.unitNumber}-S${payload.sessionNumber}`;
+            const current = readSessionIndexCache() || {};
+            writeSessionIndexCache({
+                ...current,
+                [id]: {
+                    id,
+                    year: payload.year,
+                    areaId: payload.areaId,
+                    grade: payload.grade,
+                    section: payload.section,
+                    unitNumber: payload.unitNumber,
+                    sessionNumber: payload.sessionNumber,
+                    title: payload.sessionData?.title || 'Sin Titulo',
+                    date: payload.date || payload.sessionData?.date || '',
+                    updatedAt: new Date().toISOString(),
+                },
+            });
+            void refreshSessionIndex();
+        }
+        return result;
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const saveSessionResource = async (payload: {
+    year: string; areaId: string; grade: string; section: string; unitNumber: string;
+    sessionNumber: string; key: string; resource: any; sessionData: any;
+}): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sesiones/recurso`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        });
         return await res.json();
     } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const saveImportedSessionActivity = async (payload: {
+    year: string; areaId: string; grade: string; section: string; unitNumber: string;
+    sessionNumber: string; activity: any; sessionData: any;
+}): Promise<ApiResponse<any>> => {
+    try {
+        const response = await safeFetch(`${BACKEND_URL}/sesiones/actividad-html`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (result.success) void refreshSessionIndex();
+        return result;
+    } catch (error: any) { return { success: false, message: error.message }; }
 };
 
 export const getAllSesiones = async (): Promise<Record<string, any>> => {
@@ -419,12 +603,28 @@ export const getAllSesiones = async (): Promise<Record<string, any>> => {
     } catch (e) { return {}; }
 };
 
+export const getSessionIndex = async (): Promise<Record<string, any>> => {
+    const cached = readSessionIndexCache();
+    if (cached) {
+        void refreshSessionIndex();
+        return cached;
+    }
+    return refreshSessionIndex();
+};
+
 export const deleteSesion = async (id: string): Promise<ApiResponse<any>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/sesiones/${id}`, {
             method: 'DELETE',
         });
-        return await res.json();
+        const result = await res.json();
+        if (result?.success) {
+            const current = { ...(readSessionIndexCache() || {}) };
+            delete current[id];
+            writeSessionIndexCache(current);
+            void refreshSessionIndex();
+        }
+        return result;
     } catch (e: any) { return { success: false, message: e.message }; }
 };
 
@@ -598,12 +798,12 @@ export const getSystemHealth = async () => {
     } catch (e) { return { success: false, status: 'offline' }; }
 };
 
-export const saveCloudFrontendState = async (state: Record<string, string>): Promise<ApiResponse<any>> => {
+export const saveCloudFrontendState = async (state: Record<string, string>, changedKeys: string[] = []): Promise<ApiResponse<any>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/sync/frontend-state`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ state }),
+            body: JSON.stringify({ state, changedKeys }),
         });
         return await readJsonResponse(res);
     } catch (e: any) {
@@ -611,13 +811,60 @@ export const saveCloudFrontendState = async (state: Record<string, string>): Pro
     }
 };
 
-export const getCloudSyncStatus = async (): Promise<ApiResponse<CloudSyncStatusData>> => {
+let portableBootstrapReceipt: { signature: string; id: string } | null = null;
+export const bootstrapPortableState = async (state: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<any>> => {
+    const signature = JSON.stringify(Object.entries(state).sort(([a], [b]) => a.localeCompare(b)));
+    if (!portableBootstrapReceipt || portableBootstrapReceipt.signature !== signature) {
+        portableBootstrapReceipt = { signature, id: createRandomUuid() };
+    }
+    const receipt = portableBootstrapReceipt;
+    const request = async (url: string, options?: RequestInit) => {
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        const timer = setTimeout(cancel, 4000);
+        signal?.addEventListener('abort', cancel, { once: true });
+        if (signal?.aborted) cancel();
+        try {
+            const result = await readJsonResponse(await fetch(url, { ...options, signal: controller.signal }));
+            if (result.data?.job?.id) receipt.id = result.data.job.id;
+            if (result.data?.job?.status === 'completed' && portableBootstrapReceipt === receipt) portableBootstrapReceipt = null;
+            return result;
+        } finally {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', cancel);
+        }
+    };
+    try {
+        return await runPortableBootstrap({
+            signal,
+            start: () => request(`${BACKEND_URL}/sync/bootstrap`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ state, background: true, requestId: receipt.id }),
+            }),
+            poll: id => request(`${BACKEND_URL}/sync/bootstrap/${encodeURIComponent(id)}`),
+        });
+    } catch (error: any) { return { success: false, message: error.message }; }
+};
+
+let cloudStatusPending: Promise<ApiResponse<CloudSyncStatusData>> | null = null;
+export const getCloudSyncStatus = (): Promise<ApiResponse<CloudSyncStatusData>> => {
+    if (cloudStatusPending) return cloudStatusPending;
+    cloudStatusPending = readCloudSyncStatus().finally(() => { cloudStatusPending = null; });
+    return cloudStatusPending;
+};
+const readCloudSyncStatus = async (): Promise<ApiResponse<CloudSyncStatusData>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/sync/status`, undefined, 30000);
         return await readJsonResponse(res);
     } catch (e: any) {
         return { success: false, message: e.message };
     }
+};
+export const getInternetConnectivity = async (fresh = false, signal?: AbortSignal): Promise<ApiResponse<InternetConnectivityData>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/connectivity${fresh ? '?fresh=1' : ''}`, { signal }, 4000);
+        return await readJsonResponse(res);
+    } catch (error: any) { return { success: false, message: error.message }; }
 };
 
 export const saveCloudSyncConfig = async (data: {
@@ -633,10 +880,19 @@ export const saveCloudSyncConfig = async (data: {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data),
         }, 30000);
-        return await readJsonResponse(res);
+        const result = await readJsonResponse(res);
+        if (result.success && data.mode === 'drive_mirror') window.dispatchEvent(new Event('armi-portable-configuration-changed'));
+        return result;
     } catch (e: any) {
         return { success: false, message: e.message };
     }
+};
+
+export const openGoogleDriveDesktop = async (): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/sync/drive/open`, { method: 'POST' }, 15000);
+        return await readJsonResponse(res);
+    } catch (e: any) { return { success: false, message: e.message }; }
 };
 
 export const pushCloudSync = async (data?: { force?: boolean; reason?: string }): Promise<ApiResponse<any>> => {
@@ -670,7 +926,7 @@ export const pickCloudSyncFolder = async (): Promise<{ success: boolean; path?: 
     }
 };
 
-export const markPendingCloudSync = async (data?: { reason?: string; note?: string }): Promise<ApiResponse<any>> => {
+export const markPendingCloudSync = async (data?: { reason?: string; note?: string; deferRemote?: boolean }): Promise<ApiResponse<any>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/sync/pending/mark`, {
             method: 'POST',
@@ -683,9 +939,9 @@ export const markPendingCloudSync = async (data?: { reason?: string; note?: stri
     }
 };
 
-export const getLocalCloudSyncStatus = async (): Promise<ApiResponse<LocalCloudSyncStatusData>> => {
+export const getLocalCloudSyncStatus = async (options: { lightweight?: boolean; signal?: AbortSignal } = {}): Promise<ApiResponse<LocalCloudSyncStatusData>> => {
     try {
-        const res = await safeFetch(`${BACKEND_URL}/sync/status/local`, undefined, 12000);
+        const res = await safeFetch(`${BACKEND_URL}/sync/status/local${options.lightweight ? '?lightweight=1' : ''}`, { signal: options.signal }, 12000);
         return await readJsonResponse(res);
     } catch (e: any) {
         return { success: false, message: e.message };
@@ -849,6 +1105,18 @@ export const resetStudentPortalPassword = async (id: string | number): Promise<A
         const res = await safeFetch(`${BACKEND_URL}/estudiantes/${encodeURIComponent(String(id))}/reset-portal-password`, {
             method: 'POST',
         });
+        return await res.json();
+    } catch (e: any) {
+        return { success: false, message: e.message };
+    }
+};
+
+export const getStudentPortalPassword = async (id: string | number): Promise<ApiResponse<{
+    password: string;
+    isInitialPassword: boolean;
+}>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/estudiantes/${encodeURIComponent(String(id))}/portal-password`);
         return await res.json();
     } catch (e: any) {
         return { success: false, message: e.message };
@@ -1420,6 +1688,27 @@ export const saveEvaluacionRegistros = async (data: { records: any[]; gradingMod
   } catch (e: any) { return { success: false, message: e.message }; }
 };
 
+export const getInteractiveActivityResults = async (sessionId: string, activityId: string): Promise<ApiResponse<any[]>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/interactive-activities/${encodeURIComponent(sessionId)}/${encodeURIComponent(activityId)}/results`);
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message, data: [] }; }
+};
+
+export const resetInteractiveActivity = async (sessionId: string, activityId: string, target: {
+    scopeType: 'individual' | 'group';
+    targetId: string;
+}): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/interactive-activities/${encodeURIComponent(sessionId)}/${encodeURIComponent(activityId)}/reset`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(target),
+        });
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
 export type GradingMode = 'literal_traditional' | 'criterial_predominance' | 'hybrid_vigesimal';
 
 export const getModoCalificacion = async (filters: {
@@ -1527,6 +1816,28 @@ export const deleteEvaluacionEvidencia = async (id: number | string): Promise<Ap
     } catch (e: any) { return { success: false, message: e.message }; }
 };
 
+export const renameEvaluacionEvidencia = async (id: number | string, name: string): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/evidencias/${encodeURIComponent(String(id))}/name`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
+export const updateEvaluacionEvidenciaFeedback = async (id: number | string, teacherComment: string): Promise<ApiResponse<any>> => {
+    try {
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/evidencias/${encodeURIComponent(String(id))}/feedback`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ teacherComment }),
+        });
+        return await res.json();
+    } catch (e: any) { return { success: false, message: e.message }; }
+};
+
 export const getEvidenceStorageConfig = async (): Promise<ApiResponse<any>> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
@@ -1542,7 +1853,7 @@ export const getEvidenceStorageConfig = async (): Promise<ApiResponse<any>> => {
 
 export const getRemoteAccessStatus = async (): Promise<ApiResponse<any>> => {
     try {
-        const res = await safeFetch(`${BACKEND_URL}/remote-access/status`, undefined, 15000);
+        const res = await safeFetch(`${BACKEND_URL}/remote-access/status`, undefined, 15000, 1);
         return await readJsonResponse(res);
     } catch (e: any) {
         return { success: false, message: e.message };
@@ -1551,7 +1862,7 @@ export const getRemoteAccessStatus = async (): Promise<ApiResponse<any>> => {
 
 export const getRemoteAccessStudents = async (): Promise<ApiResponse<any>> => {
     try {
-        const res = await safeFetch(`${BACKEND_URL}/remote-access/students`, undefined, 10000);
+        const res = await safeFetch(`${BACKEND_URL}/remote-access/students`, undefined, 10000, 1);
         return await readJsonResponse(res);
     } catch (e: any) {
         return { success: false, message: e.message };
@@ -1571,12 +1882,12 @@ export const configureRemoteAccess = async (config: any): Promise<ApiResponse<an
     }
 };
 
-const changeRemoteAccessState = async (action: 'start' | 'stop' | 'restart'): Promise<ApiResponse<any>> => {
+const changeRemoteAccessState = async (action: 'start' | 'stop' | 'restart', accessEndsAt?: string): Promise<ApiResponse<any>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/remote-access/${action}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: '{}',
+            body: JSON.stringify(accessEndsAt ? { accessEndsAt } : {}),
         }, action === 'stop' ? 15000 : 20000);
         return await readJsonResponse(res);
     } catch (e: any) {
@@ -1584,7 +1895,7 @@ const changeRemoteAccessState = async (action: 'start' | 'stop' | 'restart'): Pr
     }
 };
 
-export const startRemoteAccess = () => changeRemoteAccessState('start');
+export const startRemoteAccess = (accessEndsAt: string) => changeRemoteAccessState('start', accessEndsAt);
 export const stopRemoteAccess = () => changeRemoteAccessState('stop');
 export const restartRemoteAccess = () => changeRemoteAccessState('restart');
 
@@ -1612,6 +1923,15 @@ export const recoverEvidenceStorageToMirror = async (): Promise<ApiResponse<any>
     }
 };
 
+export const analyzeEvidenceRecoveryFolder = async (folder: string): Promise<ApiResponse<any>> => {
+    try { return await readJsonResponse(await safeFetch(`${BACKEND_URL}/evidence-storage/analyze-folder`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder})},600000)); }
+    catch(e: any) { return {success:false,message:e.message}; }
+};
+export const recoverEvidenceFolder = async (token: string): Promise<ApiResponse<any>> => {
+    try { return await readJsonResponse(await safeFetch(`${BACKEND_URL}/evidence-storage/recover-folder`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})},600000)); }
+    catch(e: any) { return {success:false,message:e.message}; }
+};
+
 export const pickEvidenceStorageFolder = async (): Promise<{ success: boolean; path?: string; message?: string; cancelled?: boolean }> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/evidence-storage/pick-folder`, undefined, 600000);
@@ -1619,14 +1939,15 @@ export const pickEvidenceStorageFolder = async (): Promise<{ success: boolean; p
     } catch (e: any) { return { success: false, message: e.message }; }
 };
 
-export const getEvidenceDeliveryWindow = async (sessionId: string): Promise<ApiResponse<any>> => {
+export const getEvidenceDeliveryWindow = async (sessionId: string, section = ''): Promise<ApiResponse<any>> => {
     try {
-        const res = await safeFetch(`${BACKEND_URL}/evaluacion/ventana-entrega/${encodeURIComponent(sessionId)}`);
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/ventana-entrega/${encodeURIComponent(sessionId)}?section=${encodeURIComponent(section)}`);
         return await res.json();
     } catch (e: any) { return { success: false, message: e.message }; }
 };
 
 export const saveEvidenceDeliveryWindow = async (sessionId: string, data: {
+    section?: string;
     enabled: boolean;
     exceptional?: boolean;
     openFrom?: string;
@@ -1642,9 +1963,9 @@ export const saveEvidenceDeliveryWindow = async (sessionId: string, data: {
     } catch (e: any) { return { success: false, message: e.message }; }
 };
 
-export const resetEvidenceDeliveryWindow = async (sessionId: string): Promise<ApiResponse<any>> => {
+export const resetEvidenceDeliveryWindow = async (sessionId: string, section = ''): Promise<ApiResponse<any>> => {
     try {
-        const res = await safeFetch(`${BACKEND_URL}/evaluacion/ventana-entrega/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+        const res = await safeFetch(`${BACKEND_URL}/evaluacion/ventana-entrega/${encodeURIComponent(sessionId)}?section=${encodeURIComponent(section)}`, { method: 'DELETE' });
         return await res.json();
     } catch (e: any) { return { success: false, message: e.message }; }
 };
@@ -1654,6 +1975,8 @@ export const getPendingEvidenceReviews = async (sessionId: string): Promise<ApiR
     latestSubmissionAt: string;
     reviewedAt: string;
     pending: boolean;
+    evidenceCount: number;
+    pendingCount: number;
 }>>> => {
     try {
         const res = await safeFetch(`${BACKEND_URL}/evaluacion/revision-pendientes/${encodeURIComponent(sessionId)}`);
@@ -1678,4 +2001,3 @@ export const saveEvaluacionConfig = async (data: any): Promise<ApiResponse<any>>
         return await res.json();
     } catch (e: any) { return { success: false, message: e.message }; }
 };
-

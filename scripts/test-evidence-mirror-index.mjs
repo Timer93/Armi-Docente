@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { reconcileEvidenceMirrorIndex, writeEvidenceTombstone } from '../backend/evidenceMirrorIndex.js';
+import { reconcileEvidenceMirrorIndex, writeEvidenceMetadata, writeEvidenceTombstone } from '../backend/evidenceMirrorIndex.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'armi-evidence-index-test-'));
 const createDb = () => {
@@ -49,6 +49,32 @@ try {
 
   const published = reconcileEvidenceMirrorIndex({ db: origin, root });
   assert.equal(published.exported, 1);
+
+  const originalRow = origin.prepare('SELECT * FROM evaluacion_evidencias').get();
+  const recordPath = path.join(root, '.armi-evidence-index', 'records', `${originalRow.evidence_key}.json`);
+  const legacyMetadata = JSON.parse(fs.readFileSync(recordPath, 'utf8'));
+  delete legacyMetadata.requestedEvidence;
+  const legacyText = JSON.stringify(Object.fromEntries(Object.entries(legacyMetadata).reverse()));
+  fs.writeFileSync(recordPath, legacyText);
+  const legacyMtime = fs.statSync(recordPath).mtimeMs;
+  assert.equal(writeEvidenceMetadata({ root, row: originalRow, evidencePath: filePath }), null,
+    'Key order and an omitted empty optional field must not upload unchanged metadata');
+  assert.equal(fs.readFileSync(recordPath, 'utf8'), legacyText);
+  assert.equal(fs.statSync(recordPath).mtimeMs, legacyMtime);
+  assert.equal(reconcileEvidenceMirrorIndex({ db: origin, root }).exported, 0);
+
+  const changed = writeEvidenceMetadata({ root, row: { ...originalRow, teacher_comment: 'Nueva revision' }, evidencePath: filePath });
+  assert.equal(changed.teacherComment, 'Nueva revision', 'Real edits must still be published');
+  writeEvidenceMetadata({ root, row: originalRow, evidencePath: filePath });
+
+  const undatedRow = { ...originalRow, evidence_key: '', relative_path: 'sin-fecha.pdf', updated_at: '', submitted_at: '' };
+  const undatedPath = path.join(root, 'sin-fecha.pdf');
+  fs.writeFileSync(undatedPath, 'sin fecha');
+  const undated = writeEvidenceMetadata({ root, row: undatedRow, evidencePath: undatedPath });
+  assert.equal(undated.updatedAt, fs.statSync(undatedPath).mtime.toISOString());
+  assert.equal(writeEvidenceMetadata({ root, row: undatedRow, evidencePath: undatedPath }), null,
+    'Missing database dates must not create a fresh timestamp on every pass');
+  fs.rmSync(path.join(root, '.armi-evidence-index', 'records', `${undated.evidenceKey}.json`));
 
   const destination = createDb();
   const recovered = reconcileEvidenceMirrorIndex({ db: destination, root });

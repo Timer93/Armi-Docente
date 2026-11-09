@@ -1,4 +1,15 @@
+import { createSectionSessionSchedule } from '../sectionSessionSchedule.js';
+import { createEvidenceTemplateRoutes } from './evidenceTemplates.routes.js';
+import { automaticSectionWindow, effectiveSectionWindow,splitSessionSections } from '../shared/sectionSessionDates.js';
+import {templateScheduleState} from '../evidenceTemplateSchedule.js';
 import express from 'express';
+import { buildStudentGradebook, resolveStudentGradingMode } from '../studentGradebook.js';
+import { teacherGradeRecords } from '../shared/teacherGradeSource.js';
+import { resolveSessionCriterionRows } from '../shared/sessionCriterionIdentity.js';
+import { numericScoreToRegisterLevel } from '../shared/registerAggregation.generated.js';
+import { getPortalRequestedEvidences, readRequestedEvidence, resolvePortalRequestedEvidence } from '../shared/portalRequestedEvidences.js';
+import { createStudentJournalRoutes } from './studentJournal.routes.js';
+import { createStudentTeacherMessageRoutes } from './studentTeacherMessages.routes.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -9,8 +20,9 @@ import db, {
   touchPortalSessionToken,
   deletePortalSessionToken,
   cleanupExpiredPortalSessions,
+  ensureSyncChangeTracking,
 } from '../db.js';
-import { appRoot, uploadsRoot, ensureDir } from '../paths.js';
+import { appRoot, uploadsRoot, tempRoot, ensureDir } from '../paths.js';
 import {
   saveEvidenceTempFile,
   saveEvidenceDataUrl,
@@ -20,8 +32,10 @@ import {
   persistEvidencePortableMetadata,
   getEvidenceStorageRoot,
   requireLocalTeacherRequest,
+  removeEvidenceFileWithOriginals,
 } from '../evidenceStorage.js';
-import { disconnectStudentPresence, touchStudentPresence } from '../remote-access/studentPresenceService.js';
+import { disconnectStudentPresence, touchStudentPresence, getStudentPresenceSummary } from '../remote-access/studentPresenceService.js';
+import { getRemoteAccessDeadline } from '../remote-access/remoteAccessService.js';
 import { ensureSessionResourceVariantLinks } from '../sessionResourceStorage.js';
 import {
   assembleResumableUpload,
@@ -34,10 +48,130 @@ import {
 } from '../remote-access/resumableUploadService.js';
 import { streamPortfolioPdf, streamPortfolioZip } from '../studentPortfolio.js';
 import { ensureMirrorResourceAvailable } from '../sync.js';
+import { encryptStudentPassword } from '../studentPasswordVault.js';
+import { EVIDENCE_EXTENSION_SET } from '../evidenceFormats.js';
+import {
+  levelFromScore,
+  normalizeInteractiveResult,
+  sandboxInteractiveHtml,
+  validateStoredInteractiveActivity,
+} from '../interactiveHtml.js';
+import { createInteractiveAttemptStore, isMobilePracticeDevice } from '../interactiveAttemptStore.js';
+import { supportsPracticeRecovery } from '../interactivePracticeRuntime.js';
+import { createStudentForumRoutes } from './studentForum.routes.js';
+import { readPracticeImages, bindPracticeImages, practiceImagesRoot } from '../interactiveImageLibrary.js';
 
 const router = express.Router();
+const practiceAttempts = createInteractiveAttemptStore(db);
+router.get('/interactive-images', requireLocalTeacherRequest, async (_req, res) => {
+  try {
+    const library = await readPracticeImages();
+    res.json({ success: true, data: { folder: library.folder, images: library.images.map(({ name, key }) => ({ name, key })), warnings: library.warnings } });
+  } catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+router.post('/interactive-images/bind', requireLocalTeacherRequest, async (req, res) => {
+  try {
+    if (!validateStoredInteractiveActivity({ id: 'import', enabled: true, criterionId: 'import', html: req.body.html })) throw new Error('El HTML no cumple el contrato ARMI.');
+    const data = await bindPracticeImages(req.body.html);
+    res.json({ success: true, data });
+  } catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+router.post('/interactive-images', requireLocalTeacherRequest, async (req, res) => {
+  try {
+    const name = String(req.body.name || '');
+    if (!/^[\p{L}\p{N}][\p{L}\p{N}_-]*\.(jpg|jpeg|png|gif|svg|webp)$/iu.test(name)) throw new Error('Usa un nombre descriptivo sin espacios y un formato admitido.');
+    const encoded = String(req.body.dataUrl || '').match(/^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=]+)$/i)?.[1];
+    if (!encoded || encoded.length > 2_800_000) throw new Error('Imagen inválida o mayor de 2 MB.');
+    ensureDir(practiceImagesRoot);
+    // Validate in isolation before modifying the user's library.
+    const temp = fs.mkdtempSync(path.join(tempRoot, 'practice-image-'));
+    try {
+      fs.writeFileSync(path.join(temp, name), Buffer.from(encoded, 'base64'));
+      const checked = await readPracticeImages(temp);
+      if (!checked.images.length) throw new Error(checked.warnings.join(' '));
+      const target = path.join(practiceImagesRoot, name);
+      if (fs.existsSync(target)) throw new Error('Ya existe una imagen con ese nombre. Usa otro nombre o reemplázala desde la carpeta.');
+      const library = await readPracticeImages();
+      if (library.images.some((image) => image.key === checked.images[0].key)) throw new Error('Ya existe ese estado con otro formato.');
+      fs.copyFileSync(path.join(temp, name), target, fs.constants.COPYFILE_EXCL);
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+    res.json({ success: true });
+  } catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
 const studentChatUploadsFolder = path.join(uploadsRoot, 'student-chat-local');
 ensureDir(studentChatUploadsFolder);
+const STUDENT_CHAT_MAX_FILE_SIZE = 15 * 1024 * 1024;
+
+const isPathInside = (root, candidate) => {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+};
+
+const resolveStudentChatFile = (storedPath) => {
+  const raw = String(storedPath || '').trim();
+  if (!raw) return '';
+  const candidates = [
+    path.isAbsolute(raw) ? raw : '',
+    path.resolve(uploadsRoot, raw),
+    path.resolve(appRoot, raw),
+  ].filter(Boolean);
+  return candidates.find((candidate) => isPathInside(studentChatUploadsFolder, candidate) && fs.existsSync(candidate)) || '';
+};
+
+const removeStudentChatFiles = (rows = []) => rows.forEach((row) => {
+  const target = resolveStudentChatFile(row.file_path);
+  if (!target) return;
+  try { fs.rmSync(target, { force: true }); } catch {}
+});
+
+const storeStudentChatUpload = async (file, groupId) => {
+  if (!file?.path) return { relativePath: '', fileName: '', fileType: '', fileSize: 0 };
+  const fileName = path.basename(file.originalname || 'archivo').replace(/[^\p{L}\p{N}._ -]/gu, '_').slice(0, 180) || 'archivo';
+  const fileType = String(file.mimetype || 'application/octet-stream').slice(0, 150);
+  const fileSize = Number(file.size || 0);
+  if (fileSize > STUDENT_CHAT_MAX_FILE_SIZE) {
+    try { await fs.promises.rm(file.path, { force: true }); } catch {}
+    const error = new Error('El archivo supera 15 MB.');
+    error.statusCode = 413;
+    throw error;
+  }
+  const folder = path.join(studentChatUploadsFolder, String(groupId));
+  ensureDir(folder);
+  const storedPath = path.join(folder, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${fileName}`);
+  try {
+    await fs.promises.copyFile(file.path, storedPath);
+  } finally {
+    try { await fs.promises.rm(file.path, { force: true }); } catch {}
+  }
+  return {
+    relativePath: path.relative(uploadsRoot, storedPath).replace(/\\/g, '/'),
+    fileName,
+    fileType,
+    fileSize,
+  };
+};
+
+const streamStudentChatFile = (res, message) => {
+  const target = resolveStudentChatFile(message?.file_path);
+  if (!target) return res.status(404).json({ success: false, message: 'El archivo ya no esta disponible en esta computadora.' });
+  const fileName = path.basename(String(message.file_name || path.basename(target))).replace(/[\r\n"]/g, '_');
+  const fileType = String(message.file_type || 'application/octet-stream');
+  const canOpenInBrowser = /^(image|audio|video)\//i.test(fileType) || fileType === 'application/pdf' || fileType.startsWith('text/');
+  res.setHeader('Content-Type', fileType);
+  res.setHeader('Content-Length', fs.statSync(target).size);
+  res.setHeader('Content-Disposition', `${canOpenInBrowser ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  return fs.createReadStream(target).pipe(res);
+};
+
+const deleteStudentChatGroup = (groupId) => {
+  removeStudentChatFiles(db.prepare("SELECT file_path FROM student_chat_messages WHERE group_id=? AND file_path<>''").all(groupId));
+  db.transaction(() => {
+    db.prepare('DELETE FROM student_chat_messages WHERE group_id=?').run(groupId);
+    db.prepare('DELETE FROM student_chat_members WHERE group_id=?').run(groupId);
+    db.prepare('DELETE FROM student_chat_groups WHERE id=?').run(groupId);
+  })();
+};
 
 const STUDENT_PORTAL_TOKEN_TTL_MS = 1000 * 60 * 10;
 const STUDENT_PORTAL_MAX_SESSIONS = Math.max(200, Number(process.env.ARMI_STUDENT_MAX_SESSIONS) || 500);
@@ -46,6 +180,16 @@ const STUDENT_LOGIN_WINDOW_MS = 1000 * 60 * 15;
 const STUDENT_LOGIN_DNI_LIMIT = 8;
 const STUDENT_LOGIN_ADDRESS_LIMIT = 60;
 const studentPortalLoginAttempts = new Map();
+
+const normalizeEvidenceLink = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length > 1000) { const error = new Error('El enlace es demasiado largo.'); error.statusCode = 400; throw error; }
+  let parsed;
+  try { parsed = new URL(raw); } catch { const error = new Error('Escribe un enlace completo que empiece con http:// o https://.'); error.statusCode = 400; throw error; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) { const error = new Error('El enlace debe empezar con http:// o https://.'); error.statusCode = 400; throw error; }
+  return parsed.toString();
+};
 
 /* =====================================================
    UTILIDADES DEL PORTAL
@@ -125,23 +269,10 @@ const getPortalDateKey = (value) => {
   return [parsed.getFullYear(), String(parsed.getMonth() + 1).padStart(2, '0'), String(parsed.getDate()).padStart(2, '0')].join('-');
 };
 
-const getPortalStudentSessionDateValues = (sessionData, sessionSection = '', studentSection = '') => {
-  const options = Array.isArray(sessionData?.sessionDateOptions)
-    ? sessionData.sessionDateOptions.map((item) => item?.value).filter(Boolean)
-    : [];
-  if (!options.length) return [sessionData?.selectedSessionDate || sessionData?.date].filter(Boolean);
-
-  const taughtSections = splitPortalSections(sessionSection);
-  const studentSections = splitPortalSections(studentSection);
-  if (options.length === taughtSections.length && studentSections.length === 1) {
-    const sectionIndex = taughtSections.indexOf(studentSections[0]);
-    if (sectionIndex >= 0 && options[sectionIndex]) return [options[sectionIndex]];
-  }
-  return options;
-};
-
-const getPortalSessionDateKeys = (sessionData, sessionSection = '', studentSection = '') => (
-  [...new Set(getPortalStudentSessionDateValues(sessionData, sessionSection, studentSection).map(getPortalDateKey).filter(Boolean))]
+const sectionSchedule = createSectionSessionSchedule(db);
+const getPortalStudentSessionDateValues = (sessionData, row, studentSection = '') => sectionSchedule.dates(row, sessionData, studentSection);
+const getPortalSessionDateKeys = (sessionData, row, studentSection = '') => (
+  [...new Set(getPortalStudentSessionDateValues(sessionData, row, studentSection).map(getPortalDateKey).filter(Boolean))]
 );
 
 const getPortalWeekRange = (reference = new Date()) => {
@@ -156,20 +287,14 @@ const getPortalWeekRange = (reference = new Date()) => {
 };
 
 const getPortalDeliveryWindow = (sessionRow, sessionData, now = new Date(), studentSection = '') => {
-  const explicit = db.prepare('SELECT * FROM evaluacion_ventanas_entrega WHERE session_id = ?').get(sessionRow.id_sesion);
+  const explicit = sectionSchedule.explicit(sessionRow.id_sesion, studentSection);
   const { start: weekStart, end: weekEnd } = getPortalWeekRange(now);
-  const studentSessionDate = getPortalStudentSessionDateValues(sessionData, sessionRow?.section, studentSection)[0];
-  const sessionDate = parsePortalDate(studentSessionDate);
-  const defaultOpen = sessionDate ? new Date(sessionDate) : weekStart;
-  defaultOpen.setHours(0, 0, 0, 0);
-  const onTimeClose = new Date(defaultOpen);
-  onTimeClose.setDate(onTimeClose.getDate() + 1);
-  onTimeClose.setHours(23, 59, 59, 999);
-  const defaultClose = new Date(onTimeClose);
-  defaultClose.setDate(defaultClose.getDate() + 3);
-  const configuredClose = parsePortalDate(explicit?.close_at, true);
-  const closeAt = configuredClose && configuredClose > defaultClose ? configuredClose : defaultClose;
-  const openAt = defaultOpen;
+  const dates = getPortalStudentSessionDateValues(sessionData, sessionRow, studentSection);
+  const sessionDate = parsePortalDate(dates[0]);
+  const automatic = automaticSectionWindow(dates) || automaticSectionWindow([getPortalDateKey(weekStart)]);
+  const effective = effectiveSectionWindow(automatic, explicit);
+  const openAt = effective.openAt, onTimeClose = automatic.onTimeCloseAt;
+  const defaultClose = automatic.closeAt, closeAt = effective.closeAt;
   const inCurrentWeek = !!sessionDate && sessionDate >= weekStart && sessionDate <= weekEnd;
   const explicitlyEnabled = explicit ? Number(explicit.enabled) === 1 : false;
   const available = explicit
@@ -207,29 +332,36 @@ const portalLevelCode = (value) => {
   return '';
 };
 
-const getPortalFeedback = (sessionRow, studentId, sessionData) => {
-  const records = db.prepare(`
+const getPortalFeedback = (sessionRow, studentId, sessionData, recordsOverride = null) => {
+  const storedRecords = teacherGradeRecords(recordsOverride ?? db.prepare(`
     SELECT * FROM evaluacion_registros
     WHERE student_id = ? AND session_id = ?
     ORDER BY updated_at DESC
-  `).all(String(studentId), String(sessionRow.id_sesion));
-  const rows = Array.isArray(sessionData?.sessionAssessmentModel?.rows)
+  `).all(String(studentId), String(sessionRow.id_sesion)));
+  const mode = resolveStudentGradingMode({
+    modes: db.prepare('SELECT * FROM evaluacion_modos_calificacion WHERE year=? ORDER BY updated_at DESC').all(String(sessionRow.year)),
+    areaId: sessionRow.area_id, grade: sessionRow.grade, section: sessionRow.section,
+    defaultMode: db.prepare("SELECT value FROM armi_frontend_state WHERE key='armi_active_grading_mode_v1'").get()?.value,
+    sectionsOverlap: portalSectionsOverlap,
+  });
+  const scopedRounding = sessionData?.numericAverageRounding === 'nearest_integer' && (recordsOverride
+    ? recordsOverride.some(record=>record.grading_mode==='hybrid_vigesimal')
+    : db.prepare("SELECT value FROM armi_frontend_state WHERE key='armi_active_grading_mode_v1'").get()?.value==='hybrid_vigesimal');
+  const records = storedRecords.filter(record=>(record.grading_mode || 'literal_traditional')===mode);
+  const scoreForLevel = score => scopedRounding && Number.isFinite(score) ? Math.round(score) : score;
+  const storedRows = Array.isArray(sessionData?.sessionAssessmentModel?.rows)
     ? sessionData.sessionAssessmentModel.rows
     : [];
   const instrumentRows = Array.isArray(sessionData?.instrumento) ? sessionData.instrumento : [];
+  const rows = resolveSessionCriterionRows(sessionData, storedRows.length ? storedRows : instrumentRows.map(row=>({
+    id:row.id,source:row.source || 'primary',competencyName:row.competencia,capacityName:row.capacidad,criterionText:row.criterio
+  })));
   const instrumentRowById = new Map(instrumentRows.map((row) => [String(row?.id || ''), row]));
-  const rowById = new Map();
-  rows.forEach((row) => {
-    const id = String(row?.id || '');
-    rowById.set(id, row);
-    rowById.set(id.replace(/^primary-/, ''), row);
-  });
-  const summary = records.find((record) => String(record.criteria_id || '').startsWith('summary::primary::'))
-    || records.find((record) => String(record.criteria_id || '').startsWith('summary::'));
-  const criteria = records
-    .filter((record) => !String(record.criteria_id || '').startsWith('summary::'))
-    .map((record) => {
-      const row = rowById.get(String(record.criteria_id || ''));
+  const summary = records.find((record) => String(record.criteria_id || '').startsWith('summary::primary::'));
+  const criteria = rows
+    .map(row=>({row,record:row.recordIds.map(id=>records.find(record=>String(record.criteria_id)===id)).find(Boolean)}))
+    .filter(item=>item.record)
+    .map(({record,row}) => {
       const code = portalLevelCode(record.level);
       const instrumentRow = instrumentRowById.get(String(record.criteria_id || ''));
       return {
@@ -260,7 +392,6 @@ const getPortalFeedback = (sessionRow, studentId, sessionData) => {
     : null;
   const aggregateCode = Object.entries(levelWeights).find(([, weight]) => weight === medianLevel)?.[0] || '';
   const summaryCode = portalLevelCode(summary?.level);
-  const literalGrade = String(summaryCode || aggregateCode || '').toUpperCase();
   const summaryNumeric = summary?.numeric_score === null || summary?.numeric_score === undefined
     ? null
     : Number(summary.numeric_score);
@@ -268,6 +399,7 @@ const getPortalFeedback = (sessionRow, studentId, sessionData) => {
   const numericScore = Number.isFinite(summaryNumeric)
     ? summaryNumeric
     : (criteriaNumeric.length ? criteriaNumeric.reduce((sum, value) => sum + value, 0) / criteriaNumeric.length : null);
+  const literalGrade = String(scopedRounding && Number.isFinite(numericScore) ? numericScoreToRegisterLevel(scoreForLevel(numericScore)) : summaryCode || aggregateCode || '').toUpperCase();
   const conclusions = db.prepare(`
     SELECT conclusion_text, section FROM evaluacion_conclusiones
     WHERE student_id = ? AND year = ? AND area_id = ? AND grade = ?
@@ -313,7 +445,7 @@ const getPortalFeedback = (sessionRow, studentId, sessionData) => {
         || competencyCriteria.length
       ),
       level: competencySummary?.level || '',
-      literalGrade: String(summaryLevel || aggregate || '').toUpperCase(),
+      literalGrade: String(scopedRounding && Number.isFinite(competencyNumeric) ? numericScoreToRegisterLevel(scoreForLevel(competencyNumeric)) : summaryLevel || aggregate || '').toUpperCase(),
       numericScore: competencyNumeric,
       observation: competencySummary?.observation || '',
       criteria: competencyCriteria,
@@ -357,7 +489,7 @@ const getPortalSubmissionState = (sessionRow, studentId, sessionData, deliveryWi
     WHERE student_id = ? AND session_id = ? AND is_latest = 1
     ORDER BY COALESCE(submitted_at, updated_at) DESC
   `).all(String(studentId), String(sessionRow.id_sesion));
-  const studentEvidenceCount = evidences.filter((item) => String(item.source || '') === 'student_portal').length;
+  const studentEvidenceCount = evidences.filter((item) => ['student_portal', 'evidence_template'].includes(String(item.source || ''))).length;
   const feedback = getPortalFeedback(sessionRow, studentId, sessionData);
   const latestSubmittedAt = evidences[0]?.submitted_at || evidences[0]?.updated_at || '';
   const submittedDate = parsePortalDate(latestSubmittedAt);
@@ -472,7 +604,7 @@ const mapPortalStudent = (student) => {
       teacherName,
       message: `Hoy celebramos tu día y todo lo genial que eres. Me alegra acompañarte en este camino de aprender y crecer. Que esta nueva vuelta al sol venga llena de aprendizajes, risas, metas cumplidas y muchas notas de 20/20. Con mucho cariño, tu profesor ${teacherName}.`,
     } : null,
-    notificationsEnabled: !!student.notifications_enabled,
+    notificationsEnabled: true,
     profilePhoto: face?.image_data || '',
   };
 };
@@ -530,8 +662,16 @@ const normalizePortalExternalUrl = (value) => {
   }
 };
 
-const mapPortalLearningResources = (row, sessionData) => Object.entries(PORTAL_RESOURCE_DEFINITIONS)
-  .map(([key, definition]) => {
+const mapPortalEvidenceTemplates=(row,data,studentSection)=>{
+  const section=splitSessionSections(studentSection)[0] || '',automatic=sectionSchedule.windows(row,data,section);
+  const requested=new Set(getPortalRequestedEvidences(data).map(e=>e.id));
+  return db.prepare('SELECT id,evidence_id,mode,requested_json,close_overrides FROM evidence_templates WHERE session_id=? AND enabled=1').all(String(row.id_sesion)).filter(t=>requested.has(t.evidence_id)).map(t=>{
+    const override=JSON.parse(t.close_overrides || '{}')[section];
+    return {id:t.id,evidence_id:t.evidence_id,mode:t.mode,requested:JSON.parse(t.requested_json),window:templateScheduleState(override?[override]:automatic)};
+  });
+};
+const mapPortalLearningResources = (row, sessionData, studentSection='', publishedTemplates=null) => {
+  const visualResources = Object.entries(PORTAL_RESOURCE_DEFINITIONS).map(([key, definition]) => {
     const resource = sessionData?.learningResources?.[key] || {};
     const hasImage = Boolean(String(resource.imageUrl || '').trim());
     const externalUrl = normalizePortalExternalUrl(resource.metadata?.url);
@@ -545,8 +685,21 @@ const mapPortalLearningResources = (row, sessionData) => Object.entries(PORTAL_R
         : '',
       externalUrl,
     };
-  })
-  .filter((resource) => resource.imageUrl || resource.externalUrl);
+  }).filter((resource) => resource.imageUrl || resource.externalUrl);
+  const interactiveResources = (Array.isArray(sessionData?.interactiveActivities) ? sessionData.interactiveActivities : [])
+    .filter(validateStoredInteractiveActivity)
+    .map((activity) => ({
+      key: `interactive-${activity.id}`,
+      title: String(activity.title || 'Actividad HTML interactiva'),
+      typeLabel: 'Juego interactivo',
+      kind: 'interactive_html',
+      imageUrl: '',
+      externalUrl: `armi-activity:${encodeURIComponent(String(row.id_sesion))}:${encodeURIComponent(String(activity.id))}`,
+    }));
+  const templates = (publishedTemplates || mapPortalEvidenceTemplates(row,sessionData,studentSection))
+    .map(t=>({key:`template-${t.id}`,title:t.requested.text,typeLabel:`Plantilla de evidencia${t.window.status==='open'?' · En horario de clase':t.window.status==='upcoming'?' · Programada':t.window.status==='closed'?' · Horario finalizado':' · Horario pendiente'}`,kind:'evidence_template',imageUrl:'',externalUrl:`armi-template:${encodeURIComponent(String(row.id_sesion))}:${encodeURIComponent(t.id)}`}));
+  return [...visualResources, ...interactiveResources, ...templates];
+};
 
 const getPortalAreaName = (row) => {
   const sessionArea = String(row?.area_curricular || '').trim();
@@ -659,6 +812,301 @@ router.get('/student-portal/session-resources/:sessionId/:resourceKey', requireS
   }
 });
 
+const getInteractiveActivityForStudent = (sessionId, activityId, student) => {
+  const row = getPortalSessionForStudent(sessionId, student);
+  if (!row) return null;
+  let sessionData = {};
+  try { sessionData = JSON.parse(row.session_data || '{}'); } catch { return null; }
+  const activity = (Array.isArray(sessionData?.interactiveActivities) ? sessionData.interactiveActivities : [])
+    .find((item) => String(item?.id || '') === String(activityId || ''));
+  if (!validateStoredInteractiveActivity(activity)) return null;
+  const criterion = (Array.isArray(sessionData?.sessionAssessmentModel?.rows) ? sessionData.sessionAssessmentModel.rows : [])
+    .find((item) => String(item?.id || '') === String(activity.criterionId || ''));
+  if (!criterion) return null;
+  return { row, sessionData, activity, criterion };
+};
+
+const getInteractiveActivityForTeacher = (sessionId, activityId) => {
+  const row = db.prepare('SELECT * FROM sesiones WHERE id_sesion = ?').get(String(sessionId || ''));
+  if (!row) return null;
+  let sessionData = {};
+  try { sessionData = JSON.parse(row.session_data || '{}'); } catch { return null; }
+  const activity = (Array.isArray(sessionData?.interactiveActivities) ? sessionData.interactiveActivities : [])
+    .find((item) => String(item?.id || '') === String(activityId || ''));
+  if (!activity?.id || !activity?.criterionId) return null;
+  const criterion = (Array.isArray(sessionData?.sessionAssessmentModel?.rows) ? sessionData.sessionAssessmentModel.rows : [])
+    .find((item) => String(item?.id || '') === String(activity.criterionId || ''));
+  return { row, sessionData, activity, criterion: criterion || { id: activity.criterionId } };
+};
+
+const isActivePortalStudent = (student) => {
+  const status = normalizePortalText(student?.estado);
+  return !(status === 'r' || status.includes('retir') || status === 't' || status.includes('traslad'));
+};
+
+const studentsForInteractiveSession = (row) => db.prepare('SELECT * FROM db_estudiantes ORDER BY estudiantes COLLATE NOCASE')
+  .all()
+  .filter((student) => isActivePortalStudent(student)
+    && normalizePortalText(student.grado) === normalizePortalText(row.grade)
+    && portalSectionsOverlap(student.secc, row.section));
+
+const interactiveActivityMode = (activity) => activity?.mode === 'group' ? 'group' : 'individual';
+const parseInteractiveStudentIds = (value) => {
+  try {
+    const parsed = JSON.parse(String(value || '[]'));
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch { return []; }
+};
+
+const persistInteractiveResult = (found, student, result, existingAttempt, beforeWrite = () => {}) => {
+    const sessionId = String(found.row.id_sesion), activityId = String(found.activity.id), criterionId = String(found.criterion.id);
+    const mode = interactiveActivityMode(found.activity), groupName = String(student.grupo || '').trim();
+    const scopeKey = mode === 'group' ? normalizePortalText(groupName) : String(student.id);
+    const participants = mode === 'group' ? studentsForInteractiveSession(found.row).filter((item) => normalizePortalText(item.grupo) === scopeKey) : [student];
+    const level = levelFromScore(result.score);
+    const protectedCount = participants.filter(participant => teacherGradeRecords(db.prepare(
+      'SELECT * FROM evaluacion_registros WHERE student_id=? AND session_id=? AND criteria_id=?'
+    ).all(String(participant.id), sessionId, criterionId)).length > 0).length;
+    db.transaction(() => {
+      beforeWrite();
+      db.prepare(`
+        INSERT INTO interactive_activity_results
+          (session_id, activity_id, scope_type, scope_key, student_id, group_name, student_ids, attempt_number,
+           score, level, answers_summary, completed_at, reset_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP)
+        ON CONFLICT(session_id, activity_id, scope_type, scope_key) DO UPDATE SET
+          student_id = excluded.student_id, group_name = excluded.group_name, student_ids = excluded.student_ids,
+          score = excluded.score, level = excluded.level, answers_summary = excluded.answers_summary,
+          completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      `).run(sessionId, activityId, mode, scopeKey, mode === 'individual' ? String(student.id) : null,
+        mode === 'group' ? groupName : null, JSON.stringify(participants.map((item) => String(item.id))),
+        Number(existingAttempt?.attempt_number || 1), result.score, level, result.answersSummary);
+
+    })();
+    return { recorded: true, gradeRecorded: false, protectedTeacherGrade: protectedCount > 0, score: result.score, level, mode,
+      participantCount: participants.length, gradedCount: 0,
+      message: `Resultado de práctica registrado: ${result.score}/20 (${level}). No es una calificación docente.${protectedCount ? ' Se conservaron las calificaciones manuales del docente.' : ''}` };
+};
+
+const practiceContext = (req) => {
+  const student = db.prepare('SELECT * FROM db_estudiantes WHERE id = ?').get(req.studentPortal.studentId);
+  const found = student && getInteractiveActivityForStudent(req.params.sessionId, req.params.activityId, student);
+  if (!found) { const error = new Error('La práctica no está disponible para este estudiante.'); error.statusCode = 404; throw error; }
+  const mode = interactiveActivityMode(found.activity);
+  const scopeKey = mode === 'group' ? normalizePortalText(student.grupo) : String(student.id);
+  if (!scopeKey) { const error = new Error('Pide al docente que te asigne a un grupo.'); error.statusCode = 409; throw error; }
+  return { found, student, key: { sessionId: String(found.row.id_sesion), activityId: String(found.activity.id), mode, scopeKey } };
+};
+const previousPracticeResult = (key) => db.prepare('SELECT * FROM interactive_activity_results WHERE session_id=? AND activity_id=? AND scope_type=? AND scope_key=?')
+  .get(key.sessionId, key.activityId, key.mode, key.scopeKey);
+const settleClosedPractice = ({ found, student, key }) => {
+  const row = practiceAttempts.get(key);
+  const existing = previousPracticeResult(key);
+  if (row && ['expired', 'abandoned'].includes(row.status) && !existing?.completed_at) {
+    const checkpoint = JSON.parse(row.checkpoint_json);
+    const partial = normalizeInteractiveResult({ type: 'armi:activity-result', version: 1, completed: true,
+      score: checkpoint.score, maxScore: checkpoint.maxScore, answersSummary: checkpoint.answersSummary });
+    persistInteractiveResult(found, student, { score: partial?.score || 0,
+      answersSummary: `${row.status === 'expired' ? 'Tiempo agotado' : 'Salida definitiva'}. ${partial?.answersSummary || 'Se conservó el avance parcial.'}` }, existing);
+  }
+  return row;
+};
+const rejectMobilePractice = (req) => {
+  if (isMobilePracticeDevice(req.get('user-agent'), req.body?.device || {})) {
+    const error = new Error('Esta práctica se resuelve en una computadora del aula. No está habilitada para celulares o tabletas, incluso en modo escritorio.');
+    error.statusCode = 403; throw error;
+  }
+};
+
+router.get('/student-portal/interactive-activities/:sessionId/:activityId', requireStudentPortalAuth, (req, res) => {
+  try {
+    const student = db.prepare('SELECT * FROM db_estudiantes WHERE id = ?').get(req.studentPortal.studentId);
+    if (!student) return res.status(401).json({ success: false, message: 'Estudiante no encontrado.' });
+    const found = getInteractiveActivityForStudent(req.params.sessionId, req.params.activityId, student);
+    if (!found) return res.status(404).json({ success: false, message: 'La actividad no existe, no está publicada o dejó de ser compatible.' });
+    const context = practiceContext(req);
+    const attempt = settleClosedPractice(context);
+    const completed = previousPracticeResult(context.key)?.completed_at;
+    return res.json({
+      success: true,
+      data: {
+        id: found.activity.id,
+        title: found.activity.title,
+        mode: interactiveActivityMode(found.activity),
+        recoverySupported: supportsPracticeRecovery(found.activity.html),
+        attempt: completed && !attempt ? { status: 'completed' } : practiceAttempts.publicState(attempt, ['paused', 'extension_ready'].includes(attempt?.status)),
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || 'No se pudo abrir la actividad.' });
+  }
+});
+
+router.post('/student-portal/interactive-activities/:sessionId/:activityId/attempt', requireStudentPortalAuth, (req, res) => {
+  try {
+    const context = practiceContext(req), { key, found } = context;
+    let attempt;
+    const action = String(req.body?.action || 'status');
+    if (['start', 'continue'].includes(action)) {
+      rejectMobilePractice(req);
+      if (previousPracticeResult(key)?.completed_at) throw Object.assign(new Error('Esta práctica ya fue entregada y no puede repetirse.'), { statusCode: 409 });
+      if (!supportsPracticeRecovery(found.activity.html)) throw Object.assign(new Error('Este HTML usa el contrato anterior. El docente debe actualizarlo con el nuevo prompt para conservar el avance.'), { statusCode: 409 });
+      if (action === 'start') attempt = practiceAttempts.start(key);
+      else attempt = db.transaction(() => {
+        if (practiceAttempts.get(key)?.status === 'paused') practiceAttempts.grant(key);
+        return practiceAttempts.resume(key);
+      })();
+    } else if (action === 'progress') {
+      attempt = practiceAttempts.save(key, req.body?.attemptToken, req.body?.checkpoint);
+    } else if (action === 'abandon') {
+      attempt = practiceAttempts.abandon(key, req.body?.attemptToken);
+      settleClosedPractice(context);
+    } else if (action === 'status') {
+      const row = settleClosedPractice(context);
+      attempt = practiceAttempts.publicState(row, ['paused', 'extension_ready'].includes(row?.status));
+    } else return res.status(400).json({ success: false, message: 'Acción de práctica no válida.' });
+    return res.json({ success: true, data: { attempt,
+      ...(['start', 'continue'].includes(action) ? { html: sandboxInteractiveHtml(found.activity.html, attempt) } : {}) } });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/student-portal/interactive-activities/:sessionId/:activityId/result', requireStudentPortalAuth, (req, res) => {
+  try {
+    const student = db.prepare('SELECT * FROM db_estudiantes WHERE id = ?').get(req.studentPortal.studentId);
+    if (!student) return res.status(401).json({ success: false, message: 'Estudiante no encontrado.' });
+    const found = getInteractiveActivityForStudent(req.params.sessionId, req.params.activityId, student);
+    if (!found) return res.status(404).json({ success: false, message: 'La actividad no existe, no está publicada o dejó de ser compatible.' });
+    const result = normalizeInteractiveResult(req.body);
+    if (!result) return res.status(400).json({ success: false, message: 'El resultado recibido no cumple el contrato ARMI.' });
+    rejectMobilePractice(req);
+
+    const sessionId = String(found.row.id_sesion);
+    const activityId = String(found.activity.id);
+    const criterionId = String(found.criterion.id);
+    const mode = interactiveActivityMode(found.activity);
+    const groupName = String(student.grupo || '').trim();
+    if (mode === 'group' && !groupName) {
+      return res.status(409).json({ success: false, message: 'Esta actividad es grupal, pero todavía no perteneces a un grupo. Pide al docente que actualice tu grupo.' });
+    }
+    const scopeKey = mode === 'group' ? normalizePortalText(groupName) : String(student.id);
+    const participants = mode === 'group'
+      ? studentsForInteractiveSession(found.row).filter((item) => normalizePortalText(item.grupo) === scopeKey)
+      : [student];
+    if (!participants.length) return res.status(409).json({ success: false, message: 'No se encontraron integrantes activos para registrar este resultado.' });
+
+    const existingAttempt = db.prepare(`SELECT * FROM interactive_activity_results
+      WHERE session_id = ? AND activity_id = ? AND scope_type = ? AND scope_key = ?`)
+      .get(sessionId, activityId, mode, scopeKey);
+    if (existingAttempt?.completed_at) {
+      return res.status(409).json({
+        success: false,
+        code: 'ACTIVITY_ALREADY_COMPLETED',
+        message: mode === 'group'
+          ? 'Tu grupo ya completó esta actividad. El docente puede reiniciarla si necesitan otro intento.'
+          : 'Ya completaste esta actividad. El docente puede reiniciarla si necesitas otro intento.',
+      });
+    }
+
+    const key = { sessionId, activityId, mode, scopeKey };
+    practiceAttempts.requireRunning(key, req.body?.attemptToken);
+    const recorded = persistInteractiveResult(found, student, result, existingAttempt, () => practiceAttempts.complete(key, req.body.attemptToken));
+    return res.json({ success: true, data: recorded });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error?.message || 'No se pudo registrar el resultado.' });
+  }
+});
+
+router.get('/interactive-activities/:sessionId/:activityId/results', requireLocalTeacherRequest, (req, res) => {
+  try {
+    const found = getInteractiveActivityForTeacher(req.params.sessionId, req.params.activityId);
+    if (!found) return res.status(404).json({ success: false, message: 'No se encontró la actividad en la sesión guardada.' });
+    const runtimeRows = db.prepare('SELECT * FROM interactive_activity_attempts WHERE session_id=? AND activity_id=?').all(String(found.row.id_sesion), String(found.activity.id));
+    const sessionStudents = studentsForInteractiveSession(found.row);
+    runtimeRows.forEach((row) => {
+      const student = sessionStudents.find((item) => row.scope_type === 'group' ? normalizePortalText(item.grupo) === row.scope_key : String(item.id) === row.scope_key);
+      if (student) settleClosedPractice({ found, student, key: { sessionId: row.session_id, activityId: row.activity_id, mode: row.scope_type, scopeKey: row.scope_key } });
+    });
+    const students = db.prepare('SELECT id, estudiantes FROM db_estudiantes').all();
+    const namesById = new Map(students.map((student) => [String(student.id), String(student.estudiantes || 'Estudiante')]));
+    const rows = db.prepare(`SELECT * FROM interactive_activity_results
+      WHERE session_id = ? AND activity_id = ? ORDER BY completed_at IS NULL, score DESC, updated_at DESC`)
+      .all(String(found.row.id_sesion), String(found.activity.id));
+    return res.json({ success: true, data: rows.map((row) => {
+      const studentIds = parseInteractiveStudentIds(row.student_ids);
+      return {
+        scopeType: row.scope_type,
+        scopeKey: row.scope_key,
+        targetId: row.scope_type === 'group' ? row.scope_key : String(row.student_id || row.scope_key),
+        targetName: row.scope_type === 'group' ? String(row.group_name || row.scope_key) : (namesById.get(String(row.student_id || row.scope_key)) || 'Estudiante'),
+        studentIds,
+        participantNames: studentIds.map((id) => namesById.get(id)).filter(Boolean),
+        attemptNumber: Number(row.attempt_number || 1),
+        score: row.score,
+        level: row.level,
+        answersSummary: row.answers_summary || '',
+        completedAt: row.completed_at,
+        resetAt: row.reset_at,
+      };
+    }) });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || 'No se pudieron consultar los resultados.' });
+  }
+});
+
+router.post('/interactive-activities/:sessionId/:activityId/reset', requireLocalTeacherRequest, (req, res) => {
+  try {
+    const found = getInteractiveActivityForTeacher(req.params.sessionId, req.params.activityId);
+    if (!found) return res.status(404).json({ success: false, message: 'No se encontró la actividad en la sesión guardada.' });
+    const mode = interactiveActivityMode(found.activity);
+    const requestedMode = req.body?.scopeType === 'group' ? 'group' : 'individual';
+    if (requestedMode !== mode) return res.status(400).json({ success: false, message: `Esta actividad está configurada como ${mode === 'group' ? 'grupal' : 'individual'}.` });
+    const targetId = String(req.body?.targetId || '').trim();
+    if (!targetId) return res.status(400).json({ success: false, message: 'Selecciona un estudiante o grupo.' });
+    const scopeKey = mode === 'group' ? normalizePortalText(targetId) : targetId;
+    const sessionId = String(found.row.id_sesion);
+    const activityId = String(found.activity.id);
+    const attempt = db.prepare(`SELECT * FROM interactive_activity_results
+      WHERE session_id = ? AND activity_id = ? AND scope_type = ? AND scope_key = ?`)
+      .get(sessionId, activityId, mode, scopeKey);
+    const runtimeKey = { sessionId, activityId, mode, scopeKey };
+    if (!attempt?.completed_at) {
+      const reset = Boolean(practiceAttempts.get(runtimeKey));
+      practiceAttempts.reset(runtimeKey);
+      return res.json({ success: true, data: { reset, message: reset ? 'Intento habilitado de nuevo por el docente.' : 'Ese estudiante o grupo no tiene un intento iniciado.' } });
+    }
+
+    const currentStudents = studentsForInteractiveSession(found.row);
+    const currentTargetIds = mode === 'group'
+      ? currentStudents.filter((student) => normalizePortalText(student.grupo) === scopeKey).map((student) => String(student.id))
+      : [targetId];
+    const affectedStudentIds = [...new Set([...parseInteractiveStudentIds(attempt.student_ids), ...currentTargetIds])];
+    const nextAttempt = Number(attempt.attempt_number || 1) + 1;
+    let removedGrades = 0;
+    db.transaction(() => {
+      practiceAttempts.reset(runtimeKey);
+      db.prepare(`UPDATE interactive_activity_results SET student_ids = '[]', score = NULL, level = NULL,
+        answers_summary = NULL, completed_at = NULL, attempt_number = ?, reset_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(nextAttempt, attempt.id);
+    })();
+    return res.json({
+      success: true,
+      data: {
+        reset: true,
+        attemptNumber: nextAttempt,
+        affectedStudents: affectedStudentIds.length,
+        removedGrades,
+        message: mode === 'group'
+          ? `Actividad reiniciada para el grupo. Ya pueden realizar el intento ${nextAttempt}.`
+          : `Actividad reiniciada para el estudiante. Ya puede realizar el intento ${nextAttempt}.`,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || 'No se pudo reiniciar la actividad.' });
+  }
+});
+
 router.get('/student-portal/info', (req, res) => {
   const root = getEvidenceStorageRoot();
   cleanupExpiredPortalSessions();
@@ -668,6 +1116,8 @@ router.get('/student-portal/info', (req, res) => {
       institution: db.prepare('SELECT institution FROM datos_generales ORDER BY id DESC LIMIT 1').get()?.institution || 'Institución educativa',
       storageReady: fs.existsSync(root),
       maxStudentSessions: STUDENT_PORTAL_MAX_SESSIONS,
+      remoteAccessEndsAt: getRemoteAccessDeadline(),
+      serverNow: new Date().toISOString(),
     },
   });
 });
@@ -701,6 +1151,12 @@ router.post('/student-portal/login', (req, res) => {
     registerStudentLoginFailure(dniAttemptKey, now);
     registerStudentLoginFailure(addressAttemptKey, now);
     return res.status(401).json({ success: false, message: 'No pudimos validar el DNI o la contraseña.' });
+  }
+  if (!requiresPasswordChange) {
+    // Tras validar una clave histórica, conservar una copia cifrada local permite
+    // que el docente pueda consultarla sin cambiarla ni debilitar el hash scrypt.
+    db.prepare('UPDATE db_estudiantes SET password_recovery_cipher = ? WHERE id = ?')
+      .run(encryptStudentPassword(password), student.id);
   }
   studentPortalLoginAttempts.delete(dniAttemptKey);
   const token = crypto.randomBytes(32).toString('hex');
@@ -736,7 +1192,8 @@ router.post('/student-portal/change-password', requireStudentPortalAuth, (req, r
   if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) return res.status(400).json({ success: false, message: 'Usa al menos 8 caracteres, incluyendo letras y números.' });
   const student = db.prepare('SELECT dni FROM db_estudiantes WHERE id = ?').get(req.studentPortal.studentId);
   if (password === String(student?.dni || '')) return res.status(400).json({ success: false, message: 'La nueva contraseña debe ser diferente de tu DNI.' });
-  db.prepare('UPDATE db_estudiantes SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(hashStudentPassword(password), req.studentPortal.studentId);
+  db.prepare('UPDATE db_estudiantes SET password_hash = ?, password_recovery_cipher = ?, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+    .run(hashStudentPassword(password), encryptStudentPassword(password), req.studentPortal.studentId);
 
   const token = getPortalToken(req);
   setPortalSessionToken(token, {
@@ -759,7 +1216,7 @@ router.get('/student-portal/profile', requireStudentPortalAuth, (req, res) => {
 });
 
 router.put('/student-portal/profile', requireStudentPortalAuth, uploadEvidenceMiddleware, async (req, res) => {
-  const notificationsEnabled = req.body?.notificationsEnabled ? 1 : 0;
+  const notificationsEnabled = 1;
   const email = String(req.body?.email || '').trim().slice(0, 160);
   const microsoft = String(req.body?.microsoft || '').trim().slice(0, 160);
   if (!isValidOptionalEmail(email) || !isValidOptionalEmail(microsoft)) {
@@ -770,6 +1227,7 @@ router.put('/student-portal/profile', requireStudentPortalAuth, uploadEvidenceMi
   let imageData = String(req.body?.profilePhoto || '');
   if (req.file) {
     if (Number(req.file.size || 0) > 8 * 1024 * 1024) {
+      await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
       return res.status(413).json({ success: false, message: 'La foto no debe superar 8 MB.' });
     }
     try {
@@ -781,6 +1239,8 @@ router.put('/student-portal/profile', requireStudentPortalAuth, uploadEvidenceMi
       imageData = `data:image/webp;base64,${optimized.toString('base64')}`;
     } catch {
       return res.status(400).json({ success: false, message: 'No se pudo procesar la foto seleccionada.' });
+    } finally {
+      await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
     }
   }
   if (imageData) {
@@ -826,25 +1286,13 @@ router.get('/student-portal/sessions', requireStudentPortalAuth, (req, res) => {
     const deliveryWindow = getPortalDeliveryWindow(row, sessionData, now, student.secc);
     return { row, sessionData, deliveryWindow };
   });
-  const activeUnits = new Set(prepared
-    .filter((item) => item.deliveryWindow.inCurrentWeek || item.deliveryWindow.available)
-    .map((item) => String(item.row.unit_number)));
-  if (!activeUnits.size && prepared.length) {
-    const nearest = [...prepared].sort((left, right) => {
-      const leftDate = parsePortalDate(left.sessionData?.date || left.sessionData?.selectedSessionDate)?.getTime() || 0;
-      const rightDate = parsePortalDate(right.sessionData?.date || right.sessionData?.selectedSessionDate)?.getTime() || 0;
-      return Math.abs(leftDate - now.getTime()) - Math.abs(rightDate - now.getTime());
-    })[0];
-    activeUnits.add(String(nearest.row.unit_number));
-  }
-  const data = prepared.filter((item) => (
-    activeUnits.has(String(item.row.unit_number)) || item.deliveryWindow.configured
-  )).map(({ row, sessionData, deliveryWindow }) => {
+  const data = prepared.map(({ row, sessionData, deliveryWindow }) => {
     const submission = getPortalSubmissionState(row, student.id, sessionData, deliveryWindow);
     const unitInfo = getPortalUnitInfo(row);
+    const publishedTemplates=mapPortalEvidenceTemplates(row,sessionData,student.secc);
     const deliveryGroup = deliveryWindow.isClosed
       ? (submission.evidenceCount > 0 ? 'history' : 'closed')
-      : (deliveryWindow.inCurrentWeek ? 'week' : 'unit');
+      : (deliveryWindow.inCurrentWeek && deliveryWindow.available ? 'week' : 'unit');
     return {
       id: row.id_sesion,
       year: row.year,
@@ -860,9 +1308,11 @@ router.get('/student-portal/sessions', requireStudentPortalAuth, (req, res) => {
       title: String(sessionData.title || 'Sesión de aprendizaje'),
       purpose: stripPortalHtml(sessionData.purpose || ''),
       evidence: stripPortalHtml(sessionData?.competenciaPrio?.evidence || ''),
-      date: getPortalSessionDateKeys(sessionData, row.section, student.secc)[0] || '',
-      dates: getPortalSessionDateKeys(sessionData, row.section, student.secc),
-      resources: mapPortalLearningResources(row, sessionData),
+      requestedEvidences: getPortalRequestedEvidences(sessionData),
+      evidenceTemplates: publishedTemplates,
+      date: getPortalSessionDateKeys(sessionData, row, student.secc)[0] || '',
+      dates: getPortalSessionDateKeys(sessionData, row, student.secc),
+      resources: mapPortalLearningResources(row, sessionData, student.secc, publishedTemplates),
       criteriaId: getPortalSummaryId(sessionData),
       available: deliveryWindow.available,
       deliveryGroup,
@@ -879,6 +1329,30 @@ router.get('/student-portal/sessions', requireStudentPortalAuth, (req, res) => {
   return res.json({ success: true, data });
 });
 
+router.get('/student-portal/grades', requireStudentPortalAuth, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const studentRow = db.prepare('SELECT * FROM db_estudiantes WHERE id=?').get(req.studentPortal.studentId);
+    if (!studentRow) return res.status(401).json({ success: false, message: 'Estudiante no encontrado.' });
+    const year = String(db.prepare('SELECT year FROM datos_generales ORDER BY id DESC LIMIT 1').get()?.year || new Date().getFullYear());
+    const rows = db.prepare('SELECT * FROM sesiones WHERE year=? ORDER BY CAST(unit_number AS INTEGER), CAST(session_number AS INTEGER)').all(year)
+      .filter(row => normalizePortalText(row.grade) === normalizePortalText(studentRow.grado) && portalSectionsOverlap(row.section, studentRow.secc));
+    const sessions = rows.map(row => {
+      const sessionData = JSON.parse(row.session_data || '{}');
+      return { id: row.id_sesion, year, areaId: String(row.area_id || ''), areaName: getPortalAreaName(row), grade: row.grade, section: row.section, unitNumber: String(row.unit_number), sessionNumber: String(row.session_number), bimesterLabel: getPortalBimester(row.unit_number), title: String(sessionData.title || 'Sesión de aprendizaje'), unitTitle: getPortalUnitInfo(row).title, date: getPortalSessionDateKeys(sessionData, row, studentRow.secc)[0] || '', sessionData, row };
+    });
+    const modes = db.prepare('SELECT * FROM evaluacion_modos_calificacion WHERE year=? ORDER BY updated_at DESC').all(year);
+    const defaultMode = db.prepare("SELECT value FROM armi_frontend_state WHERE key='armi_active_grading_mode_v1'").get()?.value;
+    const records = db.prepare('SELECT * FROM evaluacion_registros WHERE student_id=? ORDER BY updated_at ASC, id ASC').all(String(studentRow.id));
+    const result = buildStudentGradebook({
+      student: { id: studentRow.id, name: studentRow.estudiantes, grade: studentRow.grado, section: studentRow.secc, estado: studentRow.estado }, sessions, records,
+      modeForArea: areaId => resolveStudentGradingMode({ modes, areaId, grade: studentRow.grado, section: studentRow.secc, defaultMode, sectionsOverlap: portalSectionsOverlap }),
+      feedbackForSession: (session, sessionRecords) => getPortalFeedback(session.row, studentRow.id, session.sessionData, [...sessionRecords].reverse()),
+    });
+    return res.json({ success: true, data: { year, ...result } });
+  } catch (error) { return res.status(500).json({ success: false, message: 'No se pudieron cargar tus calificaciones. Inténtalo nuevamente.' }); }
+});
+
 router.get('/student-portal/academic-overview', requireStudentPortalAuth, (req, res) => {
   const student = db.prepare('SELECT * FROM db_estudiantes WHERE id = ?').get(req.studentPortal.studentId);
   const general = db.prepare('SELECT year FROM datos_generales ORDER BY id DESC LIMIT 1').get();
@@ -888,7 +1362,7 @@ router.get('/student-portal/academic-overview', requireStudentPortalAuth, (req, 
     const areaName = getPortalAreaName(row);
     const unitInfo = getPortalUnitInfo(row);
     const evidenceCount = Number(db.prepare('SELECT COUNT(*) AS total FROM evaluacion_evidencias WHERE student_id = ? AND session_id = ? AND is_latest = 1').get(String(student.id), String(row.id_sesion))?.total || 0);
-    return { id: row.id_sesion, areaId: String(row.area_id || ''), areaName, unitNumber: String(row.unit_number), unitTitle: unitInfo.title, unitPurpose: unitInfo.purpose, sessionNumber: String(row.session_number), bimester: getPortalBimester(row.unit_number), title: String(data.title || 'Sesión de aprendizaje'), purpose: stripPortalHtml(data.purpose || ''), evidence: stripPortalHtml(data?.competenciaPrio?.evidence || ''), dates: getPortalSessionDateKeys(data, row.section, student.secc), evidenceCount, resources: mapPortalLearningResources(row, data) };
+    return { id: row.id_sesion, year: String(row.year || ''), areaId: String(row.area_id || ''), areaName, unitNumber: String(row.unit_number), unitTitle: unitInfo.title, unitPurpose: unitInfo.purpose, sessionNumber: String(row.session_number), bimester: getPortalBimester(row.unit_number), title: String(data.title || 'Sesión de aprendizaje'), purpose: stripPortalHtml(data.purpose || ''), evidence: stripPortalHtml(data?.competenciaPrio?.evidence || ''), dates: getPortalSessionDateKeys(data, row, student.secc), evidenceCount, resources: mapPortalLearningResources(row, data, student.secc) };
   });
   const programmedHours = db.prepare('SELECT area_id, area_curricular, grade, section, horas_sem FROM programacion_anual').all()
     .filter((row) => normalizePortalText(row.grade) === normalizePortalText(student.grado) && portalSectionsOverlap(row.section, student.secc))
@@ -963,18 +1437,7 @@ router.post('/student-portal/chat/groups', requireStudentPortalAuth, (req, res) 
 router.delete('/student-portal/chat/groups/:id', requireStudentPortalAuth, (req, res) => {
   const group = db.prepare('SELECT * FROM student_chat_groups WHERE id=?').get(Number(req.params.id));
   if (!group || String(group.created_by_student_id) !== String(req.studentPortal.studentId)) return res.status(403).json({ success: false, message: 'Solo quien creó el grupo puede eliminarlo.' });
-  const files = db.prepare("SELECT file_path FROM student_chat_messages WHERE group_id=? AND file_path<>''").all(group.id);
-  files.forEach((row) => {
-    try {
-      const target = path.resolve(appRoot, String(row.file_path));
-      if (target.startsWith(path.resolve(studentChatUploadsFolder))) fs.unlinkSync(target);
-    } catch {}
-  });
-  db.transaction(() => {
-    db.prepare('DELETE FROM student_chat_messages WHERE group_id=?').run(group.id);
-    db.prepare('DELETE FROM student_chat_members WHERE group_id=?').run(group.id);
-    db.prepare('DELETE FROM student_chat_groups WHERE id=?').run(group.id);
-  })();
+  deleteStudentChatGroup(group.id);
   return res.json({ success: true });
 });
 
@@ -994,10 +1457,21 @@ router.get('/student-portal/chat/groups/:id/messages', requireStudentPortalAuth,
       fileName: m.file_name,
       fileType: m.file_type,
       fileSize: m.file_size,
-      fileUrl: m.file_path ? `/${String(m.file_path).replace(/\\/g, '/')}` : '',
+      fileUrl: m.file_path ? `/api/student-portal/chat/messages/${m.id}/file` : '',
       createdAt: m.created_at,
     })),
   });
+});
+
+router.get('/student-portal/chat/messages/:messageId/file', requireStudentPortalAuth, (req, res) => {
+  const message = db.prepare(`
+    SELECT message.*
+    FROM student_chat_messages message
+    JOIN student_chat_members member ON member.group_id = message.group_id
+    WHERE message.id = ? AND member.student_id = ?
+  `).get(Number(req.params.messageId), String(req.studentPortal.studentId));
+  if (!message || !message.file_path) return res.status(404).json({ success: false, message: 'Archivo de chat no encontrado.' });
+  return streamStudentChatFile(res, message);
 });
 
 router.post('/student-portal/chat/groups/:id/messages', requireStudentPortalAuth, uploadEvidenceMiddleware, async (req, res) => {
@@ -1010,28 +1484,16 @@ router.post('/student-portal/chat/groups/:id/messages', requireStudentPortalAuth
   let relativePath = '', fileName = '', fileType = '', fileSize = 0;
 
   if (req.file) {
-    fileName = path.basename(req.file.originalname || 'archivo').replace(/[^\p{L}\p{N}._ -]/gu, '_');
-    fileType = req.file.mimetype || '';
-    fileSize = Number(req.file.size || 0);
-    if (fileSize > 15 * 1024 * 1024) {
-      try { await fs.promises.rm(req.file.path, { force: true }); } catch {}
-      return res.status(413).json({ success: false, message: 'El archivo supera 15 MB.' });
-    }
-    const folder = path.join(studentChatUploadsFolder, String(groupId));
-    ensureDir(folder);
-    const stored = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${fileName}`;
-    const storedPath = path.join(folder, stored);
     try {
-      await fs.promises.copyFile(req.file.path, storedPath);
-    } finally {
-      try { await fs.promises.rm(req.file.path, { force: true }); } catch {}
+      ({ relativePath, fileName, fileType, fileSize } = await storeStudentChatUpload(req.file, groupId));
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'No se pudo guardar el archivo del chat.' });
     }
-    relativePath = path.relative(appRoot, storedPath);
   } else if (req.body?.dataUrl) {
     const match = String(req.body.dataUrl).match(/^data:([^;]+);base64,(.+)$/s);
     if (!match) return res.status(400).json({ success: false, message: 'Archivo de chat inválido.' });
     const buffer = Buffer.from(match[2], 'base64');
-    if (buffer.length > 15 * 1024 * 1024) return res.status(413).json({ success: false, message: 'El archivo supera 15 MB.' });
+    if (buffer.length > STUDENT_CHAT_MAX_FILE_SIZE) return res.status(413).json({ success: false, message: 'El archivo supera 15 MB.' });
     fileName = path.basename(String(req.body?.fileName || 'archivo')).replace(/[^\p{L}\p{N}._ -]/gu, '_');
     fileType = match[1];
     fileSize = buffer.length;
@@ -1039,7 +1501,7 @@ router.post('/student-portal/chat/groups/:id/messages', requireStudentPortalAuth
     ensureDir(folder);
     const stored = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${fileName}`;
     fs.writeFileSync(path.join(folder, stored), buffer);
-    relativePath = path.relative(appRoot, path.join(folder, stored));
+    relativePath = path.relative(uploadsRoot, path.join(folder, stored)).replace(/\\/g, '/');
   }
 
   if (!text && !relativePath) return res.status(400).json({ success: false, message: 'Escribe un mensaje o adjunta un archivo.' });
@@ -1072,7 +1534,7 @@ router.patch('/student-portal/evidences/:evidenceId/name', requireStudentPortalA
     if (!requestedBase) return res.status(400).json({ success: false, message: 'Escribe un nombre válido para la evidencia.' });
 
     const fileName = `${requestedBase}${currentExtension}`;
-    db.prepare('UPDATE evaluacion_evidencias SET file_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(fileName, evidenceId);
+    db.prepare("UPDATE evaluacion_evidencias SET file_name = ?, renamed_by = 'student', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(fileName, evidenceId);
     const updated = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = ?').get(evidenceId);
     persistEvidencePortableMetadata(updated);
     return res.json({ success: true, data: mapEvidenceRow(updated) });
@@ -1081,26 +1543,27 @@ router.patch('/student-portal/evidences/:evidenceId/name', requireStudentPortalA
   }
 });
 
-const validatePortalUploadTarget = (student, sessionId, replaceEvidenceId = 0) => {
+const validatePortalUploadTarget = (student, sessionId, replaceEvidenceId = 0, requestedEvidenceId = '') => {
   const sessionRow = getPortalSessionForStudent(sessionId, student);
   if (!sessionRow) { const error = new Error('Esa sesión no corresponde a tu grado y sección.'); error.statusCode = 403; throw error; }
   const sessionData = JSON.parse(sessionRow.session_data || '{}');
   const deliveryWindow = getPortalDeliveryWindow(sessionRow, sessionData, new Date(), student.secc);
   if (!deliveryWindow.available) { const error = new Error(deliveryWindow.isClosed ? 'El plazo de entrega de esta sesión está cerrado.' : 'Esta sesión todavía no está habilitada para recibir evidencias.'); error.statusCode = 403; throw error; }
+  let previous = null;
   if (replaceEvidenceId) {
-    const previous = db.prepare('SELECT id FROM evaluacion_evidencias WHERE id=? AND student_id=? AND session_id=?').get(Number(replaceEvidenceId), String(student.id), String(sessionRow.id_sesion));
+    previous = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id=? AND student_id=? AND session_id=? AND is_latest=1').get(Number(replaceEvidenceId), String(student.id), String(sessionRow.id_sesion));
     if (!previous) { const error = new Error('No se encontró la evidencia que deseas reemplazar.'); error.statusCode = 404; throw error; }
   } else {
     const currentCount = Number(db.prepare("SELECT COUNT(*) AS total FROM evaluacion_evidencias WHERE student_id=? AND session_id=? AND source='student_portal' AND is_latest=1").get(String(student.id), String(sessionRow.id_sesion))?.total || 0);
     if (currentCount >= STUDENT_PORTAL_MAX_EVIDENCES_PER_SESSION) { const error = new Error(`Ya alcanzaste el máximo de ${STUDENT_PORTAL_MAX_EVIDENCES_PER_SESSION} evidencias para esta sesión. Puedes reemplazar una entrega existente.`); error.statusCode = 409; throw error; }
   }
-  return { sessionRow, sessionData };
+  return { sessionRow, sessionData, requestedEvidence: resolvePortalRequestedEvidence(sessionData, requestedEvidenceId, previous) };
 };
 
 router.post('/student-portal/uploads/init', requireStudentPortalAuth, (req, res) => {
   try {
     const student = db.prepare('SELECT * FROM db_estudiantes WHERE id=?').get(req.studentPortal.studentId);
-    validatePortalUploadTarget(student, req.body?.sessionId, Number(req.body?.replaceEvidenceId || 0));
+    const { requestedEvidence } = validatePortalUploadTarget(student, req.body?.sessionId, Number(req.body?.replaceEvidenceId || 0), req.body?.requestedEvidenceId);
     const data = initializeResumableUpload({
       studentId: student.id,
       sessionId: req.body?.sessionId,
@@ -1108,8 +1571,11 @@ router.post('/student-portal/uploads/init', requireStudentPortalAuth, (req, res)
       fileName: req.body?.fileName,
       fileType: req.body?.fileType,
       totalSize: req.body?.totalSize,
+      chunkSizeLimit: 1024 * 1024,
       sha256: req.body?.sha256,
       observation: req.body?.observation,
+      evidenceLink: normalizeEvidenceLink(req.body?.evidenceLink),
+      requestedEvidence,
     });
     return res.json({ success: true, data: { ...data, config: { retryCount: UPLOAD_CONFIG.retryCount } } });
   } catch (error) {
@@ -1131,12 +1597,21 @@ router.put('/student-portal/uploads/:uploadId/chunks/:chunkIndex', requireStuden
   }
 });
 
-router.post('/student-portal/uploads/:uploadId/complete', requireStudentPortalAuth, async (req, res) => {
+const finalizePortalUpload = async (req) => {
   let savedFile = null;
+  let fileCommitted = false;
   try {
     const student = db.prepare('SELECT * FROM db_estudiantes WHERE id=?').get(req.studentPortal.studentId);
+    db.prepare('UPDATE portal_evidence_uploads SET observation=?, evidence_link=?, updated_at=? WHERE upload_id=? AND student_id=?').run(
+      String(req.body?.observation || '').slice(0, 4000),
+      normalizeEvidenceLink(req.body?.evidenceLink),
+      Date.now(),
+      String(req.params.uploadId),
+      String(student.id),
+    );
     const assembled = await assembleResumableUpload(req.params.uploadId, student.id);
     const sessionRow = getPortalSessionForStudent(assembled.row.session_id, student);
+    const requestedEvidence = readRequestedEvidence(assembled.row.requested_evidence);
     if (!sessionRow) { const error = new Error('La sesión de esta transferencia ya no está disponible.'); error.statusCode = 403; throw error; }
     const sessionData = JSON.parse(sessionRow.session_data || '{}');
     savedFile = await saveEvidenceTempFile({
@@ -1150,27 +1625,70 @@ router.post('/student-portal/uploads/:uploadId/complete', requireStudentPortalAu
       sessionNumber: sessionRow.session_number,
       mimeType: assembled.row.file_type,
     });
-    const replaceEvidenceId = Number(assembled.row.replace_evidence_id || 0);
-    let versionGroupId = crypto.randomUUID(), versionNumber = 1, replacedPreviousId = 0;
-    if (replaceEvidenceId) {
-      const previous = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id=? AND student_id=? AND session_id=?').get(replaceEvidenceId, String(student.id), String(sessionRow.id_sesion));
-      if (!previous) { const error = new Error('No se encontró la evidencia que deseas reemplazar.'); error.statusCode = 404; throw error; }
-      versionGroupId = String(previous.version_group_id || `legacy-${previous.id}`);
-      versionNumber = Number(db.prepare('SELECT MAX(version_number) AS max_version FROM evaluacion_evidencias WHERE student_id=? AND session_id=? AND version_group_id=?').get(String(student.id), String(sessionRow.id_sesion), versionGroupId)?.max_version || 0) + 1;
-      db.prepare('UPDATE evaluacion_evidencias SET is_latest=0 WHERE student_id=? AND session_id=? AND version_group_id=?').run(String(student.id), String(sessionRow.id_sesion), versionGroupId);
-      replacedPreviousId = Number(previous.id);
-    }
-    const result = db.prepare(`INSERT INTO evaluacion_evidencias (student_id,session_id,criteria_id,file_path,file_type,observation,year,area_id,grade,section,bimester,unit_number,session_number,student_ids,student_names,file_name,file_size,relative_path,source,version_group_id,version_number,is_latest,submitted_at,submission_ip,submission_user_agent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP,?,?)`).run(
-      String(student.id), sessionRow.id_sesion, getPortalSummaryId(sessionData), savedFile.absolutePath, savedFile.detectedMime || assembled.row.file_type, assembled.row.observation || 'Evidencia enviada por el estudiante', sessionRow.year, String(sessionRow.area_id), student.grado || sessionRow.grade, student.secc || sessionRow.section, getPortalBimester(sessionRow.unit_number), String(sessionRow.unit_number), String(sessionRow.session_number), JSON.stringify([student.id]), JSON.stringify([student.estudiantes]), savedFile.fileName, savedFile.size, savedFile.relativePath, 'student_portal', versionGroupId, versionNumber, String(req.ip || req.socket?.remoteAddress || ''), String(req.headers['user-agent'] || '').slice(0, 500),
-    );
-    const saved = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id=?').get(result.lastInsertRowid);
+    let replacedPreviousId = 0;
+    const saved = db.transaction(() => {
+      if (!Number(assembled.row.replace_evidence_id || 0)) {
+        const used = Number(db.prepare("SELECT COUNT(*) AS total FROM evaluacion_evidencias WHERE student_id=? AND session_id=? AND source='student_portal' AND is_latest=1").get(String(student.id), sessionRow.id_sesion).total);
+        if (used >= STUDENT_PORTAL_MAX_EVIDENCES_PER_SESSION) { const error = new Error('Ya alcanzaste el límite de archivos de esta sesión.'); error.statusCode = 409; throw error; }
+      }
+      const replaceEvidenceId = Number(assembled.row.replace_evidence_id || 0);
+      let versionGroupId = crypto.randomUUID(), versionNumber = 1;
+      let criteriaId = requestedEvidence?.criteriaId || getPortalSummaryId(sessionData);
+      if (replaceEvidenceId) {
+        const previous = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id=? AND student_id=? AND session_id=? AND is_latest=1').get(replaceEvidenceId, String(student.id), String(sessionRow.id_sesion));
+        if (!previous) { const error = new Error('No se encontró la evidencia que deseas reemplazar.'); error.statusCode = 404; throw error; }
+        criteriaId = requestedEvidence?.criteriaId || previous.criteria_id || criteriaId;
+        versionGroupId = String(previous.version_group_id || `legacy-${previous.id}`);
+        versionNumber = Number(db.prepare('SELECT MAX(version_number) AS max_version FROM evaluacion_evidencias WHERE student_id=? AND session_id=? AND version_group_id=?').get(String(student.id), String(sessionRow.id_sesion), versionGroupId)?.max_version || 0) + 1;
+        db.prepare('UPDATE evaluacion_evidencias SET is_latest=0 WHERE student_id=? AND session_id=? AND version_group_id=?').run(String(student.id), String(sessionRow.id_sesion), versionGroupId);
+        replacedPreviousId = Number(previous.id);
+      }
+      const result = db.prepare(`INSERT INTO evaluacion_evidencias (student_id,session_id,criteria_id,file_path,file_type,observation,evidence_link,year,area_id,grade,section,bimester,unit_number,session_number,student_ids,student_names,file_name,file_size,relative_path,source,version_group_id,version_number,is_latest,submitted_at,submission_ip,submission_user_agent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP,?,?)`).run(
+        String(student.id), sessionRow.id_sesion, criteriaId, savedFile.absolutePath, savedFile.detectedMime || assembled.row.file_type, assembled.row.observation || '', normalizeEvidenceLink(assembled.row.evidence_link), sessionRow.year, String(sessionRow.area_id), student.grado || sessionRow.grade, student.secc || sessionRow.section, getPortalBimester(sessionRow.unit_number), String(sessionRow.unit_number), String(sessionRow.session_number), JSON.stringify([student.id]), JSON.stringify([student.estudiantes]), savedFile.fileName, savedFile.size, savedFile.relativePath, 'student_portal', versionGroupId, versionNumber, String(req.ip || req.socket?.remoteAddress || ''), String(req.headers['user-agent'] || '').slice(0, 500),
+      );
+      db.prepare('UPDATE evaluacion_evidencias SET requested_evidence=? WHERE id=?').run(requestedEvidence ? JSON.stringify(requestedEvidence) : '', result.lastInsertRowid);
+      const saved = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id=?').get(result.lastInsertRowid);
+      db.prepare("UPDATE portal_evidence_uploads SET completed_evidence_id=?, status='COMPLETED',updated_at=? WHERE upload_id=? AND student_id=?").run(saved.id, Date.now(), req.params.uploadId, String(student.id));
+      return saved;
+    })();
+    fileCommitted = true;
     if (replacedPreviousId) persistEvidencePortableMetadata(db.prepare('SELECT * FROM evaluacion_evidencias WHERE id=?').get(replacedPreviousId));
     persistEvidencePortableMetadata(saved);
     await completeResumableUpload(req.params.uploadId);
     touchStudentPresence({ token: req.studentPortalToken, studentId: student.id, activity: 'Evidencia recibida', uploadStatus: 'IDLE', source: req.headers['cf-ray'] ? 'remote' : 'lan' });
-    return res.json({ success: true, data: mapEvidenceRow(saved) });
+    return mapEvidenceRow(saved);
   } catch (error) {
-    if (savedFile?.absolutePath) try { fs.rmSync(savedFile.absolutePath, { force: true }); } catch {}
+    if (savedFile?.absolutePath && !fileCommitted) removeEvidenceFileWithOriginals(savedFile.absolutePath);
+    throw error;
+  }
+};
+
+// One finalization per upload. Conversion and portable storage outlive an HTTP
+// request; clients can poll the durable status without submitting the video again.
+const uploadCompletions = new Map();
+router.post('/student-portal/uploads/:uploadId/complete', requireStudentPortalAuth, async (req, res) => {
+  try {
+    const studentId = req.studentPortal.studentId, uploadId = req.params.uploadId;
+    const status = getResumableUploadStatus(uploadId, studentId);
+    if (status.completedEvidenceId) {
+      const saved = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id=? AND student_id=?').get(status.completedEvidenceId, String(studentId));
+      if (!saved) throw new Error('No se encontro la evidencia confirmada.');
+      return res.json({ success: true, data: mapEvidenceRow(saved) });
+    }
+    if (status.missingChunks.length) return res.status(409).json({ success: false, message: 'Todavia faltan partes del archivo.', data: status });
+    let pending = uploadCompletions.get(uploadId);
+    if (!pending) {
+      db.prepare("UPDATE portal_evidence_uploads SET status='ASSEMBLING',last_error='',updated_at=? WHERE upload_id=?").run(Date.now(), uploadId);
+      pending = Promise.resolve().then(() => finalizePortalUpload(req)).catch(error => {
+        try { db.prepare("UPDATE portal_evidence_uploads SET status='FAILED_FINALIZATION',last_error=?,updated_at=? WHERE upload_id=? AND status<>'COMPLETED'").run(String(error.message || error).slice(0,500), Date.now(), uploadId); } catch {}
+        throw error;
+      }).finally(() => uploadCompletions.delete(uploadId));
+      uploadCompletions.set(uploadId, pending);
+      void pending.catch(() => {});
+    }
+    if (req.body?.background === true) return res.status(202).json({ success: true, data: getResumableUploadStatus(uploadId, studentId) });
+    return res.json({ success: true, data: await pending });
+  } catch (error) {
     return res.status(Number(error.statusCode) || 500).json({ success: false, data: error.data, message: error.message });
   }
 });
@@ -1181,6 +1699,8 @@ router.delete('/student-portal/uploads/:uploadId', requireStudentPortalAuth, (re
 });
 
 router.post('/student-portal/evidences', requireStudentPortalAuth, uploadEvidenceMiddleware, async (req, res) => {
+  let savedFile = null;
+  let fileCommitted = false;
   try {
     const student = db.prepare('SELECT * FROM db_estudiantes WHERE id = ?').get(req.studentPortal.studentId);
     const sessionId = req.body?.sessionId;
@@ -1209,14 +1729,17 @@ router.post('/student-portal/evidences', requireStudentPortalAuth, uploadEvidenc
       }
     }
 
+    const previousDelivery = replaceEvidenceId ? db.prepare('SELECT * FROM evaluacion_evidencias WHERE id=? AND student_id=? AND session_id=? AND is_latest=1').get(replaceEvidenceId, String(student.id), sessionRow.id_sesion) : null;
+    if (replaceEvidenceId && !previousDelivery) return res.status(404).json({ success: false, message: 'No se encontró la entrega actual que deseas reemplazar.' });
+    const requestedEvidence = resolvePortalRequestedEvidence(sessionData, req.body?.requestedEvidenceId, previousDelivery);
+    const criteriaId = requestedEvidence?.criteriaId || previousDelivery?.criteria_id || getPortalSummaryId(sessionData);
     const originalFileName = path.basename(String(req.file?.originalname || req.body?.fileName || 'evidencia'));
-    const allowed = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', 'mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'pdf', 'doc', 'docx', 'odt', 'xls', 'xlsx', 'ods', 'ppt', 'pptx', 'odp', 'armi']);
+    const evidenceLink = normalizeEvidenceLink(req.body?.evidenceLink);
     const extension = path.extname(originalFileName).slice(1).toLowerCase();
-    if (!allowed.has(extension)) {
+    if (!EVIDENCE_EXTENSION_SET.has(extension)) {
       return res.status(400).json({ success: false, message: 'Ese formato de archivo no está permitido.' });
     }
 
-    let savedFile = null;
     if (req.file) {
       savedFile = await saveEvidenceTempFile({
         tempFilePath: req.file.path,
@@ -1244,50 +1767,57 @@ router.post('/student-portal/evidences', requireStudentPortalAuth, uploadEvidenc
       return res.status(400).json({ success: false, message: 'No se recibió ningún archivo de evidencia.' });
     }
 
-    const criteriaId = getPortalSummaryId(sessionData);
-    let versionGroupId = crypto.randomUUID();
-    let versionNumber = 1;
     let replacedPreviousId = 0;
-
-    if (replaceEvidenceId) {
-      const previous = db.prepare(`
-        SELECT * FROM evaluacion_evidencias
-        WHERE id = ? AND student_id = ? AND session_id = ?
-      `).get(replaceEvidenceId, String(student.id), String(sessionRow.id_sesion));
-      if (!previous) {
-        try { fs.unlinkSync(savedFile.absolutePath); } catch {}
-        return res.status(404).json({ success: false, message: 'No se encontró la evidencia que deseas reemplazar.' });
+    const saved = db.transaction(() => {
+      let versionGroupId = crypto.randomUUID();
+      let versionNumber = 1;
+      if (!replaceEvidenceId) {
+        const used = Number(db.prepare("SELECT COUNT(*) AS total FROM evaluacion_evidencias WHERE student_id=? AND session_id=? AND source='student_portal' AND is_latest=1").get(String(student.id), sessionRow.id_sesion).total);
+        if (used >= STUDENT_PORTAL_MAX_EVIDENCES_PER_SESSION) { const error = new Error('Ya alcanzaste el límite de archivos de esta sesión.'); error.statusCode = 409; throw error; }
       }
-      versionGroupId = String(previous.version_group_id || `legacy-${previous.id}`);
-      versionNumber = Number(db.prepare(`
-        SELECT MAX(version_number) AS max_version FROM evaluacion_evidencias
-        WHERE student_id = ? AND session_id = ? AND version_group_id = ?
-      `).get(String(student.id), String(sessionRow.id_sesion), versionGroupId)?.max_version || 0) + 1;
-      db.prepare(`
-        UPDATE evaluacion_evidencias SET is_latest = 0
-        WHERE student_id = ? AND session_id = ? AND version_group_id = ?
-      `).run(String(student.id), String(sessionRow.id_sesion), versionGroupId);
-      replacedPreviousId = Number(previous.id || 0);
-    }
 
-    const result = db.prepare(`
-      INSERT INTO evaluacion_evidencias (
-        student_id, session_id, criteria_id, file_path, file_type, observation,
-        year, area_id, grade, section, bimester, unit_number, session_number,
-        student_ids, student_names, file_name, file_size, relative_path, source,
-        version_group_id, version_number, is_latest, submitted_at,
-        submission_ip, submission_user_agent
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?, ?)
-    `).run(
-      String(student.id), sessionRow.id_sesion, criteriaId, savedFile.absolutePath,
-      String(savedFile.detectedMime || req.body?.fileType || ''), String(req.body?.observation || 'Evidencia enviada por el estudiante'),
-      sessionRow.year, String(sessionRow.area_id), student.grado || sessionRow.grade, student.secc || sessionRow.section, getPortalBimester(sessionRow.unit_number),
-      String(sessionRow.unit_number), String(sessionRow.session_number), JSON.stringify([student.id]), JSON.stringify([student.estudiantes]),
-      savedFile.fileName || originalFileName, savedFile.size, savedFile.relativePath, 'student_portal', versionGroupId, versionNumber,
-      String(req.ip || req.socket?.remoteAddress || ''), String(req.headers['user-agent'] || '').slice(0, 500)
-    );
+      if (replaceEvidenceId) {
+        const previous = db.prepare(`
+          SELECT * FROM evaluacion_evidencias
+          WHERE id = ? AND student_id = ? AND session_id = ? AND is_latest = 1
+        `).get(replaceEvidenceId, String(student.id), String(sessionRow.id_sesion));
+        if (!previous) {
+          const error = new Error('No se encontró la entrega actual que deseas reemplazar.'); error.statusCode = 404; throw error;
+        }
+        versionGroupId = String(previous.version_group_id || `legacy-${previous.id}`);
+        versionNumber = Number(db.prepare(`
+          SELECT MAX(version_number) AS max_version FROM evaluacion_evidencias
+          WHERE student_id = ? AND session_id = ? AND version_group_id = ?
+        `).get(String(student.id), String(sessionRow.id_sesion), versionGroupId)?.max_version || 0) + 1;
+        db.prepare(`
+          UPDATE evaluacion_evidencias SET is_latest = 0
+          WHERE student_id = ? AND session_id = ? AND version_group_id = ?
+        `).run(String(student.id), String(sessionRow.id_sesion), versionGroupId);
+        replacedPreviousId = Number(previous.id || 0);
+      }
 
-    const saved = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = ?').get(result.lastInsertRowid);
+      const result = db.prepare(`
+        INSERT INTO evaluacion_evidencias (
+          student_id, session_id, criteria_id, file_path, file_type, observation, evidence_link,
+          year, area_id, grade, section, bimester, unit_number, session_number,
+          student_ids, student_names, file_name, file_size, relative_path, source,
+          version_group_id, version_number, is_latest, submitted_at,
+          submission_ip, submission_user_agent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?, ?)
+      `).run(
+        String(student.id), sessionRow.id_sesion, criteriaId, savedFile.absolutePath,
+        String(savedFile.detectedMime || req.body?.fileType || ''), String(req.body?.observation || ''), evidenceLink,
+        sessionRow.year, String(sessionRow.area_id), student.grado || sessionRow.grade, student.secc || sessionRow.section, getPortalBimester(sessionRow.unit_number),
+        String(sessionRow.unit_number), String(sessionRow.session_number), JSON.stringify([student.id]), JSON.stringify([student.estudiantes]),
+        savedFile.fileName || originalFileName, savedFile.size, savedFile.relativePath, 'student_portal', versionGroupId, versionNumber,
+        String(req.ip || req.socket?.remoteAddress || ''), String(req.headers['user-agent'] || '').slice(0, 500)
+      );
+
+      db.prepare('UPDATE evaluacion_evidencias SET requested_evidence=? WHERE id=?').run(requestedEvidence ? JSON.stringify(requestedEvidence) : '', result.lastInsertRowid);
+      const saved = db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = ?').get(result.lastInsertRowid);
+      return saved;
+    })();
+    fileCommitted = true;
     if (replacedPreviousId) {
       persistEvidencePortableMetadata(db.prepare('SELECT * FROM evaluacion_evidencias WHERE id = ?').get(replacedPreviousId));
     }
@@ -1295,7 +1825,8 @@ router.post('/student-portal/evidences', requireStudentPortalAuth, uploadEvidenc
 
     return res.json({ success: true, data: mapEvidenceRow(saved) });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    if (savedFile?.absolutePath && !fileCommitted) removeEvidenceFileWithOriginals(savedFile.absolutePath);
+    return res.status(Number(error.statusCode) || 500).json({ success: false, message: error.message });
   }
 });
 
@@ -1339,8 +1870,21 @@ router.get('/student-chat/teacher/groups', requireLocalTeacherRequest, (_req, re
 });
 
 router.put('/student-chat/teacher/groups/:id', requireLocalTeacherRequest, (req, res) => {
-  db.prepare('UPDATE student_chat_groups SET portfolio_url=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(String(req.body?.portfolioUrl || '').trim(), Number(req.params.id));
-  return res.json({ success: true });
+  const groupId = Number(req.params.id);
+  if (!db.prepare('SELECT 1 FROM student_chat_groups WHERE id=?').get(groupId)) return res.status(404).json({ success: false, message: 'Grupo no encontrado.' });
+  const rawUrl = String(req.body?.portfolioUrl || '').trim();
+  let portfolioUrl = '';
+  if (rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
+      portfolioUrl = parsed.href;
+    } catch {
+      return res.status(400).json({ success: false, message: 'Escribe un enlace web válido que comience con http:// o https://.' });
+    }
+  }
+  db.prepare('UPDATE student_chat_groups SET portfolio_url=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(portfolioUrl, groupId);
+  return res.json({ success: true, data: { portfolioUrl } });
 });
 
 router.get('/student-chat/teacher/groups/:id/messages', requireLocalTeacherRequest, (req, res) => {
@@ -1349,15 +1893,65 @@ router.get('/student-chat/teacher/groups/:id/messages', requireLocalTeacherReque
     success: true,
     data: rows.map((message) => ({
       ...message,
-      file_url: message.file_path ? `/${String(message.file_path).replace(/\\/g, '/')}` : '',
+      file_url: message.file_path ? `/api/student-chat/teacher/messages/${message.id}/file` : '',
     })),
   });
 });
 
-router.post('/student-chat/teacher/groups/:id/messages', requireLocalTeacherRequest, (req, res) => {
+router.get('/student-chat/teacher/messages/:messageId/file', requireLocalTeacherRequest, (req, res) => {
+  const message = db.prepare('SELECT * FROM student_chat_messages WHERE id=?').get(Number(req.params.messageId));
+  if (!message || !message.file_path) return res.status(404).json({ success: false, message: 'Archivo de chat no encontrado.' });
+  return streamStudentChatFile(res, message);
+});
+
+router.post('/student-chat/teacher/groups/:id/messages', requireLocalTeacherRequest, uploadEvidenceMiddleware, async (req, res) => {
+  const groupId = Number(req.params.id);
+  if (!db.prepare('SELECT 1 FROM student_chat_groups WHERE id=?').get(groupId)) return res.status(404).json({ success: false, message: 'Grupo no encontrado.' });
   const name = String(req.body?.teacherName || 'Docente').trim();
-  db.prepare("INSERT INTO student_chat_messages (group_id,sender_type,sender_id,sender_name,message_text) VALUES (?,'teacher','teacher',?,?)").run(Number(req.params.id), name, String(req.body?.text || '').trim().slice(0, 4000));
+  const text = String(req.body?.text || '').trim().slice(0, 4000);
+  let stored = { relativePath: '', fileName: '', fileType: '', fileSize: 0 };
+  if (req.file) {
+    try { stored = await storeStudentChatUpload(req.file, groupId); }
+    catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'No se pudo guardar el archivo del chat.' }); }
+  }
+  if (!text && !stored.relativePath) return res.status(400).json({ success: false, message: 'Escribe un mensaje o adjunta un archivo.' });
+  db.prepare("INSERT INTO student_chat_messages (group_id,sender_type,sender_id,sender_name,message_text,file_path,file_name,file_type,file_size) VALUES (?,'teacher','teacher',?,?,?,?,?,?)")
+    .run(groupId, name, text, stored.relativePath, stored.fileName, stored.fileType, stored.fileSize);
+  db.prepare('UPDATE student_chat_groups SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(groupId);
   return res.json({ success: true });
 });
 
+router.delete('/student-chat/teacher/messages/:messageId', requireLocalTeacherRequest, (req, res) => {
+  const message = db.prepare('SELECT * FROM student_chat_messages WHERE id=?').get(Number(req.params.messageId));
+  if (!message) return res.status(404).json({ success: false, message: 'Mensaje no encontrado.' });
+  removeStudentChatFiles([message]);
+  db.prepare('DELETE FROM student_chat_messages WHERE id=?').run(message.id);
+  return res.json({ success: true });
+});
+
+router.delete('/student-chat/teacher/groups/:id/messages', requireLocalTeacherRequest, (req, res) => {
+  const groupId = Number(req.params.id);
+  if (!db.prepare('SELECT 1 FROM student_chat_groups WHERE id=?').get(groupId)) return res.status(404).json({ success: false, message: 'Grupo no encontrado.' });
+  removeStudentChatFiles(db.prepare("SELECT file_path FROM student_chat_messages WHERE group_id=? AND file_path<>''").all(groupId));
+  db.prepare('DELETE FROM student_chat_messages WHERE group_id=?').run(groupId);
+  return res.json({ success: true });
+});
+
+router.delete('/student-chat/teacher/groups/:id', requireLocalTeacherRequest, (req, res) => {
+  const groupId = Number(req.params.id);
+  if (!db.prepare('SELECT 1 FROM student_chat_groups WHERE id=?').get(groupId)) return res.status(404).json({ success: false, message: 'Grupo no encontrado.' });
+  deleteStudentChatGroup(groupId);
+  return res.json({ success: true });
+});
+
+router.use(createStudentForumRoutes({ db, requireStudentAuth: requireStudentPortalAuth, requireTeacher: requireLocalTeacherRequest, recoverFile: ensureMirrorResourceAvailable,
+  deliveryWindow: getPortalDeliveryWindow, resolveEvidence: resolveEvidenceFilePath,
+  sessionsForStudent: (student, year) => db.prepare('SELECT * FROM sesiones WHERE year=?').all(year).filter((row) => normalizePortalText(row.grade) === normalizePortalText(student.grado) && portalSectionsOverlap(row.section, student.secc))
+}));
+router.use(createStudentJournalRoutes({ db, requireStudentAuth: requireStudentPortalAuth, sessionForStudent: getPortalSessionForStudent, mapEvidence: row => mapEvidenceRow(row) }));
+router.use(createStudentTeacherMessageRoutes({ db, requireStudentAuth: requireStudentPortalAuth, requireTeacher: requireLocalTeacherRequest, presence: getStudentPresenceSummary }));
+router.use(createEvidenceTemplateRoutes({ db, requireStudentAuth:requireStudentPortalAuth, requireTeacher:requireLocalTeacherRequest,
+  sessionForStudent:getPortalSessionForStudent, studentsForSession:studentsForInteractiveSession, schedule:sectionSchedule,
+  saveEvidenceDataUrl,persistEvidencePortableMetadata,removeEvidenceFileWithOriginals,readImages:readPracticeImages }));
+ensureSyncChangeTracking();
 export default router;

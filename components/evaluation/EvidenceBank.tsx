@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   deleteEvaluacionEvidencia,
-  getAllSesiones,
+  getSessionIndex,
   getDatosGenerales,
   getEvidenceStorageConfig,
   getEvaluacionEvidencias,
@@ -10,9 +10,10 @@ import {
   getProgramacionesAnuales,
   getRemoteAccessStatus,
   getRemoteAccessStudents,
-  getUnidadDidactica,
   pickEvidenceStorageFolder,
   recoverEvidenceStorageToMirror,
+  analyzeEvidenceRecoveryFolder,
+  recoverEvidenceFolder,
   restartRemoteAccess,
   saveEvidenceStorageConfig,
   saveEvaluacionEvidencia,
@@ -21,6 +22,16 @@ import {
 } from '../../services/apiService';
 import { Student, TeachingAssignment } from '../../types';
 import { StudentChatMonitor } from './StudentChatMonitor';
+import { TeacherMessages } from './TeacherMessages';
+import { StudentForumMonitor } from './StudentForumMonitor';
+import {
+  EVIDENCE_ACCEPT,
+  VALID_EVIDENCE_EXTENSIONS,
+  canPreviewEvidence,
+  getEvidenceExtension as getFileExtension,
+  getEvidencePreviewKind,
+  type EvidencePreviewKind,
+} from '../../utils/evidenceFormats';
 
 type EvidenceFilters = {
   year: string;
@@ -39,8 +50,10 @@ type EvidenceFileItem = {
   fileType: string;
   extension: string;
   fileUrl: string;
+  previewUrl: string;
+  thumbnailUrl: string;
   uploadedAt: string;
-  previewKind: 'image' | 'video' | 'pdf' | 'doc' | 'sheet' | 'slides' | 'custom' | 'generic';
+  previewKind: EvidencePreviewKind;
   filters: EvidenceFilters;
   studentIds: Array<string | number>;
   studentNames: string[];
@@ -57,6 +70,8 @@ type RemoteAccessState = {
   enabledByTeacher: boolean;
   tunnelStatus: 'DISABLED' | 'STARTING' | 'CONNECTED' | 'RECONNECTING' | 'STOPPING' | 'DISCONNECTED' | 'ERROR';
   publicUrl: string;
+  accessEndsAt?: string;
+  pendingAccessDurationMs?: number;
   configured: boolean;
   cloudflaredInstalled: boolean;
   connectedStudents: number;
@@ -92,6 +107,7 @@ const EMPTY_REMOTE_STATE: RemoteAccessState = {
   enabledByTeacher: false,
   tunnelStatus: 'DISABLED',
   publicUrl: '',
+  accessEndsAt: '',
   configured: false,
   cloudflaredInstalled: false,
   connectedStudents: 0,
@@ -102,6 +118,14 @@ const EMPTY_REMOTE_STATE: RemoteAccessState = {
 };
 
 const EVIDENCE_RENDER_BATCH_SIZE = 24;
+
+const formatRemoteDuration = (durationMs: number) => {
+  const seconds = Math.max(0, Math.round(Number(durationMs || 0) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  return `${hours}:${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+};
 
 const BIMESTER_OPTIONS = [
   { value: 'I', label: 'I Bimestre' },
@@ -116,17 +140,6 @@ const ALL_BIMESTER_UNITS: Record<string, string[]> = {
   III: ['5', '6'],
   IV: ['7', '8']
 };
-
-const EVIDENCE_ACCEPT = '.jpg,.jpeg,.png,.gif,.webp,.bmp,.svg,.mp4,.webm,.mov,.avi,.mkv,.m4v,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.armi';
-const VALID_EVIDENCE_EXTENSIONS = new Set([
-  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg',
-  'mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v',
-  'pdf',
-  'doc', 'docx', 'odt',
-  'xls', 'xlsx', 'ods',
-  'ppt', 'pptx', 'odp',
-  'armi'
-]);
 
 const getDefaultYear = () => new Date().getFullYear().toString();
 
@@ -154,20 +167,8 @@ const sectionsOverlap = (left: string, right: string) => {
   return leftParts.some((item) => rightParts.includes(item));
 };
 
-const getFileExtension = (fileName: string) => {
-  const parts = fileName.split('.');
-  return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : '';
-};
-
 const getPreviewKind = (extension: string): EvidenceFileItem['previewKind'] => {
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(extension)) return 'image';
-  if (['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v'].includes(extension)) return 'video';
-  if (extension === 'pdf') return 'pdf';
-  if (['doc', 'docx', 'odt'].includes(extension)) return 'doc';
-  if (['xls', 'xlsx', 'ods'].includes(extension)) return 'sheet';
-  if (['ppt', 'pptx', 'odp'].includes(extension)) return 'slides';
-  if (extension === 'armi') return 'custom';
-  return 'generic';
+  return getEvidencePreviewKind(`evidencia.${extension}`);
 };
 
 const formatFileSize = (bytes: number) => {
@@ -176,15 +177,18 @@ const formatFileSize = (bytes: number) => {
   return `${Math.round(bytes / 104857.6) / 10} MB`;
 };
 
-const canOpenInline = (previewKind: EvidenceFileItem['previewKind']) => (
-  previewKind === 'image' || previewKind === 'video' || previewKind === 'pdf'
-);
+const canOpenInline = (previewKind: EvidenceFileItem['previewKind']) => canPreviewEvidence(previewKind);
 
 const getFileAccent = (previewKind: EvidenceFileItem['previewKind']) => {
   if (previewKind === 'pdf') return { bg: 'bg-red-600', soft: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', label: 'PDF' };
   if (previewKind === 'doc') return { bg: 'bg-blue-600', soft: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', label: 'DOC' };
   if (previewKind === 'sheet') return { bg: 'bg-emerald-600', soft: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', label: 'XLS' };
   if (previewKind === 'slides') return { bg: 'bg-orange-500', soft: 'bg-orange-50', text: 'text-orange-700', border: 'border-orange-200', label: 'PPT' };
+  if (previewKind === 'audio') return { bg: 'bg-fuchsia-600', soft: 'bg-fuchsia-50', text: 'text-fuchsia-700', border: 'border-fuchsia-200', label: 'AUDIO' };
+  if (previewKind === 'html') return { bg: 'bg-cyan-600', soft: 'bg-cyan-50', text: 'text-cyan-700', border: 'border-cyan-200', label: 'HTML' };
+  if (previewKind === 'text') return { bg: 'bg-teal-600', soft: 'bg-teal-50', text: 'text-teal-700', border: 'border-teal-200', label: 'TEXTO' };
+  if (previewKind === 'archive') return { bg: 'bg-amber-600', soft: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', label: 'ZIP' };
+  if (previewKind === 'svg') return { bg: 'bg-violet-600', soft: 'bg-violet-50', text: 'text-violet-700', border: 'border-violet-200', label: 'SVG' };
   if (previewKind === 'custom') return { bg: 'bg-slate-700', soft: 'bg-slate-100', text: 'text-slate-700', border: 'border-slate-300', label: 'ARMI' };
   return { bg: 'bg-slate-600', soft: 'bg-slate-100', text: 'text-slate-700', border: 'border-slate-300', label: 'FILE' };
 };
@@ -206,10 +210,21 @@ export const EvidenceBank: React.FC = () => {
   const [storageBusy, setStorageBusy] = useState(false);
   const [automaticMirrorStorage, setAutomaticMirrorStorage] = useState(false);
   const [storageRecovery, setStorageRecovery] = useState<any>(null);
+  const [recoveryPlan, setRecoveryPlan] = useState<any>(null);
   const [remoteAccess, setRemoteAccess] = useState<RemoteAccessState>(EMPTY_REMOTE_STATE);
   const [remoteStudents, setRemoteStudents] = useState<RemoteStudentPresence[]>([]);
+  const [remoteBackendAvailable, setRemoteBackendAvailable] = useState<boolean | null>(null);
   const [remoteBusy, setRemoteBusy] = useState(false);
   const [remoteMessage, setRemoteMessage] = useState('');
+  const [remoteOperation, setRemoteOperation] = useState<'idle' | 'starting' | 'stopping'>('idle');
+  const remoteOperationRef = useRef<'idle' | 'starting' | 'stopping'>('idle');
+  const pendingRemoteDurationMsRef = useRef(0);
+  const [remoteEndTime, setRemoteEndTime] = useState(() => {
+    const later = new Date(Date.now() + 60 * 60 * 1000);
+    later.setSeconds(0, 0);
+    return `${later.getFullYear()}-${String(later.getMonth() + 1).padStart(2, '0')}-${String(later.getDate()).padStart(2, '0')}T${String(later.getHours()).padStart(2, '0')}:${String(later.getMinutes()).padStart(2, '0')}`;
+  });
+  const [remoteNow, setRemoteNow] = useState(Date.now());
   const [remoteQr, setRemoteQr] = useState('');
   const [visibleEvidenceLimit, setVisibleEvidenceLimit] = useState(EVIDENCE_RENDER_BATCH_SIZE);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -227,61 +242,78 @@ export const EvidenceBank: React.FC = () => {
 
   useEffect(() => {
     let active = true;
-    const loadData = async () => {
-      setLoading(true);
+
+    const savedAssignments = localStorage.getItem('armi_assignments');
+    if (savedAssignments) {
       try {
-        const [generalData, fetchedStudents, fetchedPrograms, fetchedSessions] = await Promise.all([
-          getDatosGenerales(),
-          getEstudiantes(),
-          getProgramacionesAnuales(),
-          getAllSesiones()
-        ]);
-        if (!active) return;
-
-        const savedAssignments = localStorage.getItem('armi_assignments');
-        if (savedAssignments) {
-          try {
-            const parsed = JSON.parse(savedAssignments);
-            if (Array.isArray(parsed)) setAssignments(parsed);
-          } catch {
-            // ignore local parse errors
-          }
-        }
-
-        setStudents(Array.isArray(fetchedStudents) ? fetchedStudents : []);
-        setPrograms(fetchedPrograms || {});
-        setAllSessions(Object.values(fetchedSessions || {}));
-        setFilters((prev) => ({
-          ...prev,
-          year: generalData?.year || prev.year || getDefaultYear()
-        }));
-      } finally {
-        if (active) setLoading(false);
+        const parsed = JSON.parse(savedAssignments);
+        if (Array.isArray(parsed)) setAssignments(parsed);
+      } catch {
+        // ignore local parse errors
       }
+    }
+
+    setLoading(false);
+
+    const loadPrimaryData = async () => {
+      const results = await Promise.allSettled([
+        getDatosGenerales(),
+        getEstudiantes(),
+        getProgramacionesAnuales(),
+        getSessionIndex()
+      ]);
+      if (!active) return;
+
+      const [generalDataResult, studentsResult, programsResult, sessionsResult] = results;
+      if (generalDataResult.status === 'fulfilled') {
+        const generalData = generalDataResult.value;
+        setFilters((prev) => ({ ...prev, year: generalData?.year || prev.year || getDefaultYear() }));
+      }
+      if (studentsResult.status === 'fulfilled') {
+        const fetchedStudents = studentsResult.value;
+        setStudents(Array.isArray(fetchedStudents) ? fetchedStudents : []);
+      }
+      if (programsResult.status === 'fulfilled') setPrograms(programsResult.value || {});
+      if (sessionsResult.status === 'fulfilled') setAllSessions(Object.values(sessionsResult.value || {}));
+    };
+
+    const applyStorageConfig = (storageConfig: any) => {
+      if (!active || !storageConfig?.success) return false;
+      setStoragePath(storageConfig.data?.configuredPath || storageConfig.data?.effectivePath || '');
+      setPortalUrls(Array.isArray(storageConfig.data?.portalUrls) ? storageConfig.data.portalUrls : []);
+      setAutomaticMirrorStorage(storageConfig.data?.automaticMirror === true);
+      if (storageConfig.data?.recovery) setStorageRecovery(storageConfig.data.recovery);
+      setStorageMessage('');
+      return true;
     };
 
     const loadSecondaryData = async () => {
       void loadSavedEvidences();
-      let storageConfig = await getEvidenceStorageConfig();
-      if (!storageConfig.success) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1200));
-        if (!active) return;
-        storageConfig = await getEvidenceStorageConfig();
-      }
+      const storageConfig = await getEvidenceStorageConfig();
       if (!active) return;
-      if (storageConfig.success) {
-        setStoragePath(storageConfig.data?.configuredPath || storageConfig.data?.effectivePath || '');
-        setPortalUrls(Array.isArray(storageConfig.data?.portalUrls) ? storageConfig.data.portalUrls : []);
-        setAutomaticMirrorStorage(storageConfig.data?.automaticMirror === true);
-        setStorageRecovery(storageConfig.data?.recovery || null);
-      } else {
-        setStorageMessage(storageConfig.message || 'No se pudo detectar la red local.');
-      }
+      if (!applyStorageConfig(storageConfig)) setStorageMessage('');
+
+      window.setTimeout(async () => {
+        if (!active) return;
+        const refreshed = await getEvidenceStorageConfig();
+        if (!active) return;
+        applyStorageConfig(refreshed);
+      }, 3000);
     };
 
-    loadData();
-    loadSecondaryData();
-    return () => { active = false; };
+    const onSessionIndexUpdated = (event: Event) => {
+      const data = (event as CustomEvent<Record<string, any>>).detail;
+      if (active && data) setAllSessions(Object.values(data));
+    };
+    window.addEventListener('armi-session-index-updated', onSessionIndexUpdated as EventListener);
+
+    void loadPrimaryData();
+    void loadSecondaryData();
+
+    return () => {
+      active = false;
+      window.removeEventListener('armi-session-index-updated', onSessionIndexUpdated as EventListener);
+    };
   }, []);
 
   const applyRemoteState = (next: any) => {
@@ -289,20 +321,69 @@ export const EvidenceBank: React.FC = () => {
     setRemoteAccess({ ...EMPTY_REMOTE_STATE, ...next });
   };
 
+  const updateRemoteOperation = (next: 'idle' | 'starting' | 'stopping') => {
+    remoteOperationRef.current = next;
+    setRemoteOperation(next);
+  };
+
   useEffect(() => {
     let active = true;
+    let refreshing = false;
     const refresh = async () => {
+      if (!active || refreshing) return;
+      refreshing = true;
+      try {
       const [result, presenceResult] = await Promise.all([getRemoteAccessStatus(), getRemoteAccessStudents()]);
       if (!active) return;
-      if (result.data) applyRemoteState(result.data);
+      // A reported tunnel error is still a valid response from the backend.
+      // Keep its retry controls available instead of claiming the service died.
+      if (result.data && typeof result.data.tunnelStatus === 'string') {
+        setRemoteBackendAvailable(true);
+        const operation = remoteOperationRef.current;
+        let nextRemoteState = result.data;
+        if (operation === 'starting' && result.data.tunnelStatus === 'DISABLED') {
+          nextRemoteState = {
+            ...result.data,
+            enabledByTeacher: true,
+            tunnelStatus: 'STARTING',
+            publicUrl: '',
+            lastError: null,
+            accessEndsAt: result.data.accessEndsAt || '',
+            pendingAccessDurationMs: result.data.pendingAccessDurationMs || pendingRemoteDurationMsRef.current,
+          };
+        }
+        applyRemoteState(nextRemoteState);
+        if (operation === 'starting' && ['CONNECTED', 'ERROR'].includes(result.data.tunnelStatus)) {
+          updateRemoteOperation('idle');
+        } else if (operation === 'stopping' && result.data.tunnelStatus === 'DISABLED') {
+          updateRemoteOperation('idle');
+        }
+      } else {
+        setRemoteBackendAvailable(false);
+        setRemoteMessage(result.message || 'El servicio local de ARMI se está recuperando.');
+      }
       if (presenceResult.data?.students) setRemoteStudents(presenceResult.data.students);
+      } finally { refreshing = false; }
     };
     void refresh();
+    const unsubscribeRecovery = window.armiApp?.onBackendRecovered?.(() => {
+      if (active) void refresh();
+    });
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh();
-    }, remoteAccess.enabledByTeacher ? 5000 : 15000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [remoteAccess.enabledByTeacher]);
+    }, remoteOperation === 'idle' ? (remoteAccess.enabledByTeacher ? 5000 : 15000) : 2000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      if (typeof unsubscribeRecovery === 'function') unsubscribeRecovery();
+    };
+  }, [remoteAccess.enabledByTeacher, remoteOperation]);
+
+  useEffect(() => {
+    if (!remoteAccess.accessEndsAt) return;
+    const timer = window.setInterval(() => setRemoteNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [remoteAccess.accessEndsAt]);
 
   const remoteStudentGroups = useMemo(() => {
     const groups = new Map<string, RemoteStudentPresence[]>();
@@ -324,6 +405,8 @@ export const EvidenceBank: React.FC = () => {
       fileType: item.fileType || '',
       extension: getFileExtension(item.fileName || ''),
       fileUrl: item.fileUrl || '',
+      previewUrl: item.previewUrl || '',
+      thumbnailUrl: item.thumbnailUrl || '',
       uploadedAt: item.updatedAt || '',
       previewKind: getPreviewKind(getFileExtension(item.fileName || '')),
       filters: {
@@ -349,12 +432,18 @@ export const EvidenceBank: React.FC = () => {
   };
 
   useEffect(() => {
-    if (!evidences.some((item) => !item.available)) return undefined;
+    let reading = false;
+    const refresh = async () => {
+      if (reading || document.visibilityState !== 'visible') return;
+      reading = true;
+      try { await loadSavedEvidences(); } finally { reading = false; }
+    };
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void loadSavedEvidences();
-    }, 10000);
-    return () => window.clearInterval(timer);
-  }, [evidences]);
+      void refresh();
+    }, 5000);
+    window.addEventListener('focus', refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener('focus', refresh); };
+  }, []);
 
   const areaOptions = useMemo(() => {
     const unique = new Map<string, string>();
@@ -497,31 +586,7 @@ export const EvidenceBank: React.FC = () => {
   }, [filteredStudents]);
 
   useEffect(() => {
-    const loadUnitSessions = async () => {
-      if (!filters.year || !filters.areaId || !filters.grade || !filters.section || !filters.unit) {
-        setUnitSessions([]);
-        return;
-      }
-
-      const sectionCandidates = [
-        filters.section,
-        ...parseCombinedSections(filters.section).filter((section) => section !== filters.section)
-      ];
-
-      let foundSessions: any[] = [];
-      for (const section of sectionCandidates) {
-        const unitData = await getUnidadDidactica(filters.year, filters.areaId, filters.grade, section, filters.unit);
-        const sessions = Array.isArray(unitData?.sesiones) ? unitData.sesiones : [];
-        if (sessions.length > 0) {
-          foundSessions = sessions;
-          break;
-        }
-      }
-
-      setUnitSessions(foundSessions);
-    };
-
-    loadUnitSessions();
+    setUnitSessions([]);
   }, [filters.areaId, filters.grade, filters.section, filters.unit, filters.year]);
 
   const updateFilter = (key: keyof EvidenceFilters, value: string) => {
@@ -574,6 +639,10 @@ export const EvidenceBank: React.FC = () => {
       fileType: file.type || extension || 'application/octet-stream',
       extension,
       fileUrl: '',
+      previewUrl: '',
+      thumbnailUrl: '',
+      available: false,
+      availabilitySource: 'pending-upload',
       uploadedAt: new Date().toLocaleString(),
       previewKind: getPreviewKind(extension),
       filters: { ...filters },
@@ -641,7 +710,7 @@ export const EvidenceBank: React.FC = () => {
   const handleViewEvidence = (item: EvidenceFileItem) => {
     if (!item.fileUrl) return;
     if (canOpenInline(item.previewKind)) {
-      window.open(item.fileUrl, '_blank', 'noopener,noreferrer');
+      window.open(item.previewUrl || item.fileUrl, '_blank', 'noopener,noreferrer');
       return;
     }
 
@@ -735,6 +804,30 @@ export const EvidenceBank: React.FC = () => {
     setStorageBusy(false);
   };
 
+  const analyzeRecoveryFolder = async () => {
+    setStorageBusy(true); setRecoveryPlan(null); setStorageMessage('');
+    try {
+      const picked = await pickEvidenceStorageFolder();
+      if (picked.cancelled) return;
+      if (!picked.success || !picked.path) throw new Error(picked.message || 'No se pudo seleccionar la carpeta.');
+      const result = await analyzeEvidenceRecoveryFolder(picked.path);
+      if (!result.success) throw new Error(result.message);
+      setRecoveryPlan(result.data);
+    } catch(error: any) { setStorageMessage(error.message); }
+    finally { setStorageBusy(false); }
+  };
+  const recoverAnalyzedFolder = async () => {
+    if (!recoveryPlan?.token) return;
+    setStorageBusy(true);
+    try {
+      const result = await recoverEvidenceFolder(recoveryPlan.token);
+      if (!result.success) throw new Error(result.message);
+      setStorageRecovery(result.data.recovery); setRecoveryPlan(null);
+      setStorageMessage(result.message + (result.data.failures?.length ? ` ${result.data.failures.map((item: any) => `${item.fileName}: ${item.reason}`).join('; ')}` : ' Espera a que Google Drive termine de sincronizar.'));
+      await loadSavedEvidences();
+    } catch(error: any) { setRecoveryPlan(null); setStorageMessage(error.message); }
+    finally { setStorageBusy(false); }
+  };
   const recoverStorageToMirror = async () => {
     setStorageBusy(true);
     setStorageMessage('Copiando y verificando las evidencias disponibles en esta PC...');
@@ -763,10 +856,34 @@ export const EvidenceBank: React.FC = () => {
     ? `${remoteAccess.publicUrl.replace(/\/+$/, '')}/estudiante`
     : '';
   const remoteIsConnected = remoteAccess.tunnelStatus === 'CONNECTED' && Boolean(remotePortalUrl);
-  const remoteIsStarting = ['STARTING', 'RECONNECTING'].includes(remoteAccess.tunnelStatus);
-  const remoteNeedsRetry = remoteAccess.enabledByTeacher && ['DISCONNECTED', 'ERROR'].includes(remoteAccess.tunnelStatus);
+  const remoteIsStarting = remoteOperation === 'starting' || (remoteOperation === 'idle' && ['STARTING', 'RECONNECTING'].includes(remoteAccess.tunnelStatus));
+  const remoteIsStopping = remoteOperation === 'stopping' || remoteAccess.tunnelStatus === 'STOPPING';
+  const remoteNeedsRetry = !remoteIsStarting && !remoteIsStopping && remoteAccess.enabledByTeacher && ['DISCONNECTED', 'ERROR'].includes(remoteAccess.tunnelStatus);
+  const remoteNotice = remoteBackendAvailable === false
+    ? 'El servicio local de ARMI se está recuperando automáticamente.'
+    : remoteIsStopping
+      ? 'ARMI está desactivando y cerrando el enlace por Internet.'
+      : remoteIsStarting
+        ? 'ARMI está creando y verificando el enlace por Internet.'
+        : remoteAccess.tunnelStatus === 'ERROR'
+          ? remoteAccess.lastError || remoteMessage
+          : remoteMessage || remoteAccess.lastError;
 
-  const remoteStatusView = {
+  useEffect(() => {
+    if (remoteAccess.tunnelStatus === 'ERROR' && remoteAccess.lastError) {
+      setRemoteMessage(remoteAccess.lastError);
+    } else if (remoteAccess.tunnelStatus === 'CONNECTED') {
+      setRemoteMessage('Acceso remoto conectado y verificado.');
+    }
+  }, [remoteAccess.tunnelStatus, remoteAccess.lastError]);
+
+  const remoteStatusView = remoteBackendAvailable === false
+    ? { dot: 'bg-amber-300 animate-pulse', label: 'Recuperando servicio', text: 'text-amber-200' }
+    : remoteIsStarting
+      ? { dot: 'bg-amber-300 animate-pulse', label: 'Creando enlace', text: 'text-amber-200' }
+      : remoteIsStopping
+        ? { dot: 'bg-amber-300 animate-pulse', label: 'Desactivando', text: 'text-amber-200' }
+        : {
     DISABLED: { dot: 'bg-slate-300', label: 'Desactivado', text: 'text-slate-200' },
     STARTING: { dot: 'bg-amber-300 animate-pulse', label: 'Iniciando', text: 'text-amber-200' },
     CONNECTED: { dot: 'bg-emerald-400', label: 'Conectado', text: 'text-emerald-200' },
@@ -774,19 +891,52 @@ export const EvidenceBank: React.FC = () => {
     STOPPING: { dot: 'bg-amber-300 animate-pulse', label: 'Desactivando', text: 'text-amber-200' },
     DISCONNECTED: { dot: 'bg-orange-400', label: 'Sin conexión', text: 'text-orange-200' },
     ERROR: { dot: 'bg-red-400', label: 'Error', text: 'text-red-200' },
-  }[remoteAccess.tunnelStatus] || { dot: 'bg-slate-300', label: 'Desactivado', text: 'text-slate-200' };
+      }[remoteAccess.tunnelStatus] || { dot: 'bg-slate-300', label: 'Desactivado', text: 'text-slate-200' };
 
   const toggleRemoteAccess = async () => {
-    setRemoteBusy(true);
     const shouldStop = remoteIsConnected || remoteIsStarting;
+    if (!shouldStop && !remoteNeedsRetry && (!Number.isFinite(new Date(remoteEndTime).getTime()) || new Date(remoteEndTime).getTime() <= Date.now())) {
+      setRemoteMessage('Selecciona una hora de cierre posterior a la hora actual.');
+      return;
+    }
+    setRemoteBusy(true);
     setRemoteMessage(shouldStop ? 'Desactivando acceso remoto...' : remoteNeedsRetry ? 'Creando un nuevo enlace por Internet...' : 'Comprobando servidor, Internet y túnel seguro...');
+    if (!shouldStop) {
+      const requestedDurationMs = Math.max(1_000, new Date(remoteEndTime).getTime() - Date.now());
+      if (!remoteNeedsRetry) pendingRemoteDurationMsRef.current = requestedDurationMs;
+      updateRemoteOperation('starting');
+      setRemoteAccess((current) => ({
+        ...current,
+        enabledByTeacher: true,
+        tunnelStatus: remoteNeedsRetry ? 'RECONNECTING' : 'STARTING',
+        publicUrl: '',
+        lastError: null,
+        accessEndsAt: remoteNeedsRetry ? current.accessEndsAt : '',
+        pendingAccessDurationMs: remoteNeedsRetry ? current.pendingAccessDurationMs : requestedDurationMs,
+      }));
+    }
     const result = shouldStop
       ? await stopRemoteAccess()
       : remoteNeedsRetry
         ? await restartRemoteAccess()
-        : await startRemoteAccess();
-    if (result.data) applyRemoteState(result.data);
-    const nextStatus = result.data?.tunnelStatus;
+        : await startRemoteAccess(new Date(remoteEndTime).toISOString());
+    const acceptedStartStillPreparing = !shouldStop && result.success && result.data?.tunnelStatus === 'DISABLED';
+    const effectiveResultState = acceptedStartStillPreparing
+      ? { ...result.data, enabledByTeacher: true, tunnelStatus: remoteNeedsRetry ? 'RECONNECTING' : 'STARTING', publicUrl: '', lastError: null }
+      : result.data;
+    if (effectiveResultState) applyRemoteState(effectiveResultState);
+    if (!result.success && !result.data) {
+      updateRemoteOperation('idle');
+      setRemoteAccess((current) => ({
+        ...current,
+        enabledByTeacher: true,
+        tunnelStatus: 'ERROR',
+        publicUrl: '',
+        lastError: result.message || 'No se pudo iniciar el acceso remoto.',
+      }));
+    }
+    const nextStatus = effectiveResultState?.tunnelStatus;
+    if (['CONNECTED', 'ERROR'].includes(nextStatus)) updateRemoteOperation('idle');
     setRemoteMessage(!result.success
       ? result.message || result.data?.lastError || 'No se pudo cambiar el acceso remoto.'
       : nextStatus === 'CONNECTED'
@@ -857,11 +1007,13 @@ export const EvidenceBank: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <TeacherMessages />
       <StudentChatMonitor />
+      <StudentForumMonitor />
       <div className="overflow-hidden rounded-[2rem] border border-violet-100 bg-gradient-to-br from-slate-950 via-violet-950 to-cyan-950 p-6 text-white shadow-xl">
         <div className="grid gap-5 xl:grid-cols-[1fr_0.75fr]">
           <div>
-            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-violet-300">Recepción por red local</div>
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-violet-300">Recepción por red local</p>
             <h2 className="mt-2 text-xl font-black">Carpeta de evidencias de estudiantes</h2>
             <p className="mt-2 max-w-2xl text-xs font-semibold leading-relaxed text-slate-300">
               {automaticMirrorStorage
@@ -888,14 +1040,30 @@ export const EvidenceBank: React.FC = () => {
             {automaticMirrorStorage && storageRecovery ? (
               <div className={`mt-3 rounded-2xl border px-4 py-3 text-xs font-semibold ${storageRecovery.missingFiles > 0 || storageRecovery.recoverableHere > 0 ? 'border-amber-300/40 bg-amber-300/10 text-amber-100' : 'border-emerald-300/40 bg-emerald-300/10 text-emerald-100'}`}>
                 <p className="font-black uppercase tracking-[0.12em]">{storageRecovery.sharedFiles || 0} compartidas · {storageRecovery.recoverableHere || 0} recuperables aqui · {storageRecovery.missingFiles || 0} pendientes</p>
+                {(storageRecovery.historicalFiles || 0) > 0 && <p className="mt-2">{storageRecovery.historicalFiles} archivos de versiones reemplazadas se conservan en el historial y no se cuentan como pendientes.</p>}
+                {(storageRecovery.duplicateRecords || 0) > 0 && <p className="mt-1">Los registros repetidos se cuentan una sola vez por archivo.</p>}
+                {(storageRecovery.deletedRecords || 0) > 0 && <p className="mt-1">Las evidencias con borrado registrado no se incluyen en la recuperaci?n.</p>}
+                {storageRecovery.missingFiles > 0 && <button type="button" onClick={analyzeRecoveryFolder} disabled={storageBusy} className="mt-3 rounded-xl bg-white px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-900 disabled:opacity-50">Buscar pendientes en una carpeta</button>}
+                {recoveryPlan && <div className="mt-4 rounded-xl bg-slate-950/50 p-4">
+                  <p className="break-all">Carpeta analizada: {recoveryPlan.folder}</p>
+                  <p className="mt-2">{recoveryPlan.files} archivos coinciden con los pendientes · {recoveryPlan.records} registros recuperables</p>
+                  <p className="mt-1">{recoveryPlan.scannedFiles ?? 0} archivos revisados en la carpeta y sus subcarpetas.</p>
+                  <p className="mt-2">Se copiarán al espejo verificando su integridad. Los originales permanecerán en su carpeta.</p>
+                  <div className="mt-3 max-h-64 overflow-auto space-y-2">
+                    {recoveryPlan.items.map((item: any) => <div key={item.relativePath} className="rounded-lg bg-white/10 p-2"><b className="break-all">{item.fileName}</b><p>{item.size.toLocaleString()} bytes · {item.records} registros</p><p>{item.matchType}</p><p className="break-all">Origen: {item.source}</p></div>)}
+                    {recoveryPlan.unresolved.map((item: any) => <div key={item.relativePath} className="rounded-lg bg-white/5 p-2 break-all"><b>{item.fileName}</b><p>{item.reason}</p>{item.storedName && <p>Nombre guardado: {item.storedName}</p>}{item.expectedSize > 0 && <p>Tamaño esperado: {item.expectedSize.toLocaleString()} bytes</p>}{item.candidates?.map((candidate: any) => <p key={candidate.path}>Encontrado: {candidate.path} · {candidate.size?.toLocaleString() ?? '?'} bytes</p>)}</div>)}
+                    {recoveryPlan.warnings?.map((warning: string) => <p key={warning}>{warning}</p>)}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={recoverAnalyzedFolder} disabled={storageBusy || !recoveryPlan.files} className="rounded-xl bg-emerald-300 px-4 py-2 text-emerald-950 disabled:opacity-50">Copiar y enlazar {recoveryPlan.files} archivos</button><button type="button" onClick={() => setRecoveryPlan(null)} disabled={storageBusy} className="rounded-xl border border-white/30 px-4 py-2">Cancelar</button></div>
+                </div>}
                 {storageRecovery.recoverableHere > 0 ? (
                   <button type="button" onClick={recoverStorageToMirror} disabled={storageBusy} className="mt-3 rounded-xl bg-amber-300 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-amber-950 disabled:opacity-50">
                     Copiar y enlazar {storageRecovery.recoverableHere} archivos sin borrar originales
                   </button>
                 ) : storageRecovery.missingFiles > 0 ? (
-                  <p className="mt-2 leading-relaxed">Los enlaces estan protegidos. Abre ARMI en la PC2, entra a este banco y ejecuta alli la recuperacion cuando aparezcan como recuperables.</p>
+                  <p className="mt-2 leading-relaxed">ARMI no encuentra algunos originales. En la PC que los conserve, usa “Buscar pendientes en una carpeta” y selecciona su ubicación antigua.</p>
                 ) : (
-                  <p className="mt-2">Todas las evidencias registradas estan disponibles desde la carpeta espejo.</p>
+                  <p className="mt-2">Todas las evidencias vigentes est?n disponibles desde la carpeta espejo.</p>
                 )}
               </div>
             ) : null}
@@ -929,12 +1097,18 @@ export const EvidenceBank: React.FC = () => {
                 </div>
               ) : (
                 <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs font-bold text-slate-300">
-                  {!remoteAccess.cloudflaredInstalled
+                  {remoteBackendAvailable === null
+                    ? 'Comprobando el servicio local de ARMI…'
+                    : remoteBackendAvailable === false
+                      ? 'El servicio local de ARMI se está recuperando automáticamente. Espera unos segundos.'
+                      : !remoteAccess.cloudflaredInstalled
                     ? 'Falta el componente de acceso remoto. Reinstala o actualiza ARMI.'
+                    : remoteIsStopping
+                      ? 'Desactivando el acceso remoto y cerrando el enlace por Internet…'
                     : remoteIsStarting
                       ? 'Creando y verificando el enlace por Internet… Todavía no lo compartas.'
                       : remoteNeedsRetry
-                        ? 'No hay un enlace por Internet activo. El enlace local mostrado arriba solo funciona dentro de la misma red.'
+                        ? remoteAccess.lastError || 'No hay un enlace por Internet activo. El enlace local mostrado arriba solo funciona dentro de la misma red.'
                         : 'Listo para crear un enlace por Internet. Se mostrará aquí cuando esté verificado.'}
                 </div>
               )}
@@ -968,23 +1142,58 @@ export const EvidenceBank: React.FC = () => {
                 <p className="mt-3 text-center text-[9px] font-bold text-slate-400">Todavía no hay estudiantes en línea.</p>
               )}
 
+              {remoteIsStarting && !remoteAccess.accessEndsAt ? (
+                <div className="mt-3 rounded-xl border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-[10px] font-bold text-amber-100">
+                  El contador iniciará cuando el enlace esté validado
+                  {' · '}Duración: {formatRemoteDuration(remoteAccess.pendingAccessDurationMs || pendingRemoteDurationMsRef.current)}
+                </div>
+              ) : remoteAccess.accessEndsAt && (remoteAccess.enabledByTeacher || remoteIsStopping) ? (
+                <div className={`mt-3 rounded-xl border px-3 py-2 text-[10px] font-bold ${remoteIsStarting ? 'border-amber-300/30 bg-amber-300/10 text-amber-100' : 'border-cyan-300/25 bg-cyan-300/10 text-cyan-50'}`}>
+                  Cierre automático: {new Date(remoteAccess.accessEndsAt).toLocaleString('es-PE', { dateStyle: 'medium', timeStyle: 'short' })}
+                  {' · '}Quedan {(() => { const seconds = Math.max(0, Math.ceil((new Date(remoteAccess.accessEndsAt).getTime() - remoteNow) / 1000)); return `${Math.floor(seconds / 3600)}:${String(Math.floor((seconds % 3600) / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`; })()}
+                </div>
+              ) : !remoteAccess.enabledByTeacher ? (
+                <label className="mt-3 block text-[10px] font-bold text-cyan-50" htmlFor="remoteEndTime">
+                  Acceso remoto activo hasta
+                  <input id="remoteEndTime" type="datetime-local" value={remoteEndTime} onChange={event => setRemoteEndTime(event.target.value)} className="mt-1 w-full rounded-xl border border-white/20 bg-slate-900 px-3 py-2 text-xs text-white [color-scheme:dark]" />
+                </label>
+              ) : null}
+
               <div className="mt-3 flex flex-wrap gap-2">
-                <button type="button" onClick={toggleRemoteAccess} disabled={remoteBusy} className={`flex-1 rounded-2xl px-4 py-3 text-[10px] font-black uppercase tracking-widest disabled:opacity-50 ${remoteIsConnected || remoteIsStarting ? 'bg-red-100 text-red-700 hover:bg-red-50' : remoteNeedsRetry ? 'bg-amber-300 text-amber-950 hover:bg-amber-200' : 'bg-emerald-400 text-emerald-950 hover:bg-emerald-300'}`}>
-                  {remoteBusy
-                    ? 'Procesando...'
+                <button type="button" onClick={toggleRemoteAccess} disabled={remoteBusy || remoteBackendAvailable !== true || remoteIsStarting || remoteIsStopping} aria-busy={remoteBusy || remoteIsStarting || remoteIsStopping} className={`flex-1 rounded-2xl px-4 py-3 text-[10px] font-black uppercase tracking-widest disabled:opacity-70 ${remoteIsStarting || remoteIsStopping ? 'cursor-wait bg-amber-300 text-amber-950' : remoteIsConnected ? 'bg-red-100 text-red-700 hover:bg-red-50' : remoteNeedsRetry ? 'bg-amber-300 text-amber-950 hover:bg-amber-200' : 'bg-emerald-400 text-emerald-950 hover:bg-emerald-300'}`}>
+                  {remoteBackendAvailable !== true
+                    ? remoteBackendAvailable === null ? 'Comprobando servicio local…' : 'Recuperando servicio local…'
+                    : remoteIsStopping
+                    ? <span className="inline-flex items-center justify-center gap-2"><span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent" />Desactivando acceso remoto…</span>
+                    : remoteBusy || remoteIsStarting
+                    ? <span className="inline-flex items-center justify-center gap-2"><span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent" />Creando y validando enlace…</span>
                     : remoteIsConnected
                       ? 'Desactivar acceso remoto'
-                      : remoteIsStarting
-                        ? 'Cancelar activación'
-                        : remoteNeedsRetry
+                      : remoteNeedsRetry
                           ? 'Reintentar acceso remoto'
                           : 'Activar acceso remoto'}
                 </button>
               </div>
 
+              {remoteIsStarting ? (
+                <button type="button" onClick={async () => {
+                  setRemoteBusy(true);
+                  updateRemoteOperation('stopping');
+                  setRemoteMessage('Cancelando la creación del enlace remoto...');
+                  const result = await stopRemoteAccess();
+                  if (result.data) applyRemoteState(result.data);
+                  updateRemoteOperation('idle');
+                  setRemoteMessage(result.success ? 'Creación cancelada. El acceso remoto está desactivado.' : result.message || 'No se pudo cancelar la activación.');
+                  setRemoteBusy(false);
+                }} disabled={remoteBusy} className="mt-2 w-full rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:bg-white/10 disabled:opacity-50">
+                  Cancelar creación del enlace
+                </button>
+              ) : null}
+
               <p className="mt-3 text-[9px] font-semibold leading-relaxed text-slate-400">
                 No requiere cuenta, dominio ni token. El enlace cambia cada vez que lo activas y deja de funcionar al desactivarlo o cerrar ARMI.
               </p>
+
 
               {remoteNeedsRetry ? (
                 <button type="button" onClick={async () => {
@@ -1004,8 +1213,8 @@ export const EvidenceBank: React.FC = () => {
                 </div>
               ) : null}
 
-              {remoteMessage || remoteAccess.lastError ? (
-                <p className={`mt-3 text-[10px] font-bold leading-relaxed ${remoteAccess.tunnelStatus === 'ERROR' ? 'text-red-200' : 'text-amber-100'}`}>{remoteMessage || remoteAccess.lastError}</p>
+              {remoteNotice ? (
+                <p className={`mt-3 text-[10px] font-bold leading-relaxed ${remoteAccess.tunnelStatus === 'ERROR' ? 'text-red-200' : 'text-amber-100'}`}>{remoteNotice}</p>
               ) : null}
             </div>
           </div>
@@ -1258,7 +1467,7 @@ export const EvidenceBank: React.FC = () => {
                   </p>
                 </div>
               ) : (
-                renderedCards.map((card) => (
+                renderedCards.map((card, cardIndex) => (
                   <div
                     key={card.id}
                     className="group overflow-hidden rounded-3xl border border-slate-100 bg-white transition-all hover:shadow-xl"
@@ -1276,9 +1485,23 @@ export const EvidenceBank: React.FC = () => {
                           <p className="text-[9px] font-semibold leading-relaxed">El enlace, estudiante y sesion estan protegidos. No se eliminara mientras recuperas el original.</p>
                         </div>
                       ) : card.previewKind === 'image' ? (
-                        <img src={card.fileUrl} alt={card.fileName} loading="lazy" decoding="async" className="h-full w-full object-cover" />
+                        <img
+                          src={card.thumbnailUrl || card.fileUrl}
+                          alt={card.fileName}
+                          loading={cardIndex < 8 ? 'eager' : 'lazy'}
+                          decoding="async"
+                          fetchPriority={cardIndex < 4 ? 'high' : 'auto'}
+                          onError={(event) => {
+                            const image = event.currentTarget;
+                            if (image.dataset.originalFallback === '1' || !card.fileUrl) return;
+                            image.dataset.originalFallback = '1';
+                            image.src = card.fileUrl;
+                          }}
+                          className="h-full w-full object-cover"
+                        />
                       ) : card.previewKind === 'video' ? (
                         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-indigo-100 via-violet-100 to-slate-100 px-4 text-center">
+                          {card.thumbnailUrl ? <img src={card.thumbnailUrl} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover opacity-45" /> : null}
                           <span className="rounded-2xl bg-indigo-600 px-4 py-3 text-2xl font-black uppercase text-white">VIDEO</span>
                           <span className="line-clamp-2 rounded-xl border border-indigo-200 bg-white/80 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-indigo-700">{card.fileName}</span>
                           <span className="text-[8px] font-bold uppercase tracking-widest text-indigo-500">Pulsa Ver para reproducir</span>

@@ -1,3 +1,4 @@
+import { openStudentPhoto } from './studentPhotoViewer';
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import QRCode from 'qrcode';
@@ -1771,7 +1772,7 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                     <div className="mt-3 max-h-44 space-y-2 overflow-auto pr-1">
                       {visibleProfiles.length ? visibleProfiles.map((profile) => (
                         <div key={profile.id} className="flex items-center gap-3 rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
-                          <img src={profile.imageData || ''} alt={profile.studentName} className="h-12 w-12 rounded-lg object-cover" />
+                          <button type="button" aria-label={`Ampliar foto de ${profile.studentName}`} onClick={() => void openStudentPhoto(profile.studentId, profile.studentName, profile.imageData)}><img src={profile.imageData || ''} alt={profile.studentName} className="h-12 w-12 rounded-lg object-cover" /></button>
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-[10px] font-black uppercase tracking-[0.12em] text-slate-700">{profile.source || 'captura'}</p>
                             <p className="mt-0.5 text-[10px] font-bold text-slate-500">{profile.grade} {profile.section}</p>
@@ -1846,7 +1847,7 @@ export const AttendanceSection: React.FC<Props> = ({ students, assignments, gene
                   <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-3">
                     {visibleProfiles.length ? visibleProfiles.map((profile) => (
                       <div key={profile.id} className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
-                        <img src={profile.imageData || ''} alt={profile.studentName} className="h-28 w-full object-cover" />
+                        <button type="button" aria-label={`Ampliar foto de ${profile.studentName}`} onClick={() => void openStudentPhoto(profile.studentId, profile.studentName, profile.imageData)}><img src={profile.imageData || ''} alt={profile.studentName} className="h-28 w-full object-cover" /></button>
                         <div className="space-y-1.5 p-2.5">
                           <p className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-700">{profile.source || 'captura'}</p>
                           <p className="text-[9px] font-bold text-slate-500">{profile.grade} {profile.section}</p>

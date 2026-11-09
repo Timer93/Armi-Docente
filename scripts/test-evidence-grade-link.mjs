@@ -43,7 +43,7 @@ const startServer = async () => {
   serverProcess.stdout.on('data', (chunk) => { logs += chunk.toString(); });
   serverProcess.stderr.on('data', (chunk) => { logs += chunk.toString(); });
 
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (serverProcess.exitCode !== null) throw new Error(`El backend de prueba termino antes de iniciar.\n${logs}`);
     try {
@@ -107,10 +107,47 @@ try {
   const uploadedDatabase = new Database(testDatabasePath);
   uploadedDatabase.prepare(`
     UPDATE evaluacion_evidencias
-    SET source = 'student_portal', criteria_id = ?
+    SET source = 'student_portal', criteria_id = ?, student_ids='["9001","9002"]'
     WHERE id = ?
   `).run('summary::primary::competenciadeprueba', upload.data.id);
   uploadedDatabase.close();
+
+  const readReview = async () => {
+    const result = await (await fetch(`${backendUrl}/evaluacion/revision-pendientes/${encodeURIComponent(sessionId)}`)).json();
+    assert.equal(result.success, true, result.message);
+    return result.data.find(item => item.studentId === '9001');
+  };
+  assert.equal((await readReview()).evidenceCount, 1);
+  const transversalId = 'summary::transversal::otra competencia';
+  form.set('criteriaId', transversalId);
+  form.set('studentIds', '["9001"]');
+  form.set('file', new Blob(['evidencia transversal'], { type: 'text/plain' }), 'transversal.txt');
+  const transversal = await (await fetch(`${backendUrl}/evaluacion/evidencias`, { method: 'POST', body: form })).json();
+  assert.equal(transversal.success, true, transversal.message);
+  const linkDatabase = new Database(testDatabasePath);
+  linkDatabase.prepare("UPDATE evaluacion_evidencias SET source='student_portal' WHERE id=?").run(transversal.data.id);
+  linkDatabase.close();
+  const listCompetency = async criteria => {
+    const params = new URLSearchParams({ sessionId, studentId: '9001', criteriaId: criteria });
+    const response = await (await fetch(`${backendUrl}/evaluacion/evidencias?${params}`)).json();
+    assert.equal(response.success, true, response.message);
+    return response.data.map(row => row.id);
+  };
+  assert.deepEqual(await listCompetency(criteriaId), [upload.data.id], 'Area NL must contain only area evidence, including compact legacy IDs');
+  assert.deepEqual(await listCompetency(transversalId), [transversal.data.id], 'Transversal NL must not contain area evidence');
+  assert.equal((await listCompetency('')).length, 2, 'Student counter must keep the complete list');
+  const gradeDatabase = new Database(testDatabasePath);
+  gradeDatabase.prepare("INSERT INTO evaluacion_registros(student_id,session_id,criteria_id,level,observation,updated_at) VALUES(?,?,?,?,?,?)")
+    .run('9001', sessionId, 'summary::transversal::otra competencia', 'A', 'Actividad distinta', '2099-01-01 00:00:00');
+  assert.equal((await readReview()).pending, true, 'Another competency cannot mark the uploaded evidence as reviewed');
+  gradeDatabase.prepare("INSERT INTO evaluacion_registros(student_id,session_id,criteria_id,level,observation,updated_at) VALUES(?,?,?,?,?,?)")
+    .run('9001', sessionId, criteriaId, 'B', 'Revisión pertinente', '2099-01-01 00:00:00');
+  gradeDatabase.close();
+  const reviewed = await readReview();
+  assert.equal(reviewed.pending, false);
+  assert.equal(reviewed.evidenceCount, 2, 'Evidence presence must remain after grading');
+  const memberList = await (await fetch(`${backendUrl}/evaluacion/evidencias?sessionId=${encodeURIComponent(sessionId)}&studentId=9002`)).json();
+  assert.equal(memberList.data.length, 1, 'Every group member must be able to open the files counted for their name');
 
   const query = new URLSearchParams({
     sessionId,
@@ -126,10 +163,15 @@ try {
   });
 
   const verifyEvidence = async () => {
-    const storageResponse = await fetch(`${backendUrl}/evidence-storage/config`);
-    const storage = await storageResponse.json();
+    let storage = await (await fetch(`${backendUrl}/evidence-storage/config`)).json();
     assert.equal(storage.success, true, storage.message);
-    assert.equal(storage.data?.recovery?.totalRecords, 1, 'El estado de recuperacion debe calcularse sin ocultar el enlace LAN.');
+    assert.ok(Array.isArray(storage.data?.portalUrls), 'LAN links must be available before the background inventory finishes');
+    const recoveryDeadline = Date.now() + 15_000;
+    while (!storage.data?.recovery && Date.now() < recoveryDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      storage = await (await fetch(`${backendUrl}/evidence-storage/config`)).json();
+    }
+    assert.equal(storage.data?.recovery?.totalRecords, 2, 'El estado de recuperacion debe calcularse sin ocultar el enlace LAN.');
 
     const listResponse = await fetch(`${backendUrl}/evaluacion/evidencias?${query}`);
     const list = await listResponse.json();

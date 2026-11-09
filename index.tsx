@@ -4,6 +4,10 @@ import App from './App';
 import { AuthProvider } from './components/auth/AuthContext';
 import './index.css';
 import './styles/streaming.css';
+import { installDesktopPrint } from './utils/desktopPrint';
+
+const disposeDesktopPrint = installDesktopPrint();
+if (import.meta.hot) import.meta.hot.dispose(disposeDesktopPrint);
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

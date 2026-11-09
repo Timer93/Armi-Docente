@@ -3,6 +3,9 @@ import { getAllSesiones, getDatosGenerales, getSessionWordGenerationStatus, getS
 import { TeachingAssignment } from '../types';
 import { Select } from './Select';
 import { InternalToast } from './sessions-view/overlays';
+import { WordNumberFilter } from './sessions-view/WordNumberFilter';
+import { WordMarkerGroups } from './sessions-view/WordMarkerGroups';
+import { matchesMergeSection, matchesMergeNumbers, toggleVisibleSessionIds } from '../utils/sessionWordMerge';
 
 interface Props {
     onBack: () => void;
@@ -37,16 +40,6 @@ interface ProgressState {
 
 const EMPTY_PROGRESS: ProgressState = { active: false, total: 0, current: 0, lastFile: '', error: null, outputPath: '', generatedCount: 0, missingIds: [] };
 
-const dedupeMarkers = (values: string[]) => {
-    const seen = new Set<string>();
-    return values.filter(v => {
-        const key = String(v || '').trim().toLowerCase();
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-    }).sort((a, b) => a.localeCompare(b, 'es'));
-};
-
 const splitSectionTokens = (section: string) => String(section || '').split(/,| y /i).map(p => p.trim()).filter(Boolean);
 const normalizeValue = (value: string) => String(value || '').trim().toLowerCase();
 
@@ -71,8 +64,8 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
     const [filterArea, setFilterArea] = useState(selectedAreaId);
     const [filterGrade, setFilterGrade] = useState(selectedGrade);
     const [filterSection, setFilterSection] = useState(selectedSection);
-    const [filterUnit, setFilterUnit] = useState(selectedUnitNumber);
-    const [filterSession, setFilterSession] = useState(selectedSessionNumber);
+    const [filterUnits, setFilterUnits] = useState<string[]>(selectedUnitNumber ? [selectedUnitNumber] : []);
+    const [filterSessions, setFilterSessions] = useState<string[]>(selectedSessionNumber ? [selectedSessionNumber] : []);
     const [progress, setProgress] = useState<ProgressState>(EMPTY_PROGRESS);
     const pollingRef = useRef<number | null>(null);
     const autoOpenedFolderRef = useRef(false);
@@ -165,6 +158,9 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
         const base = Array.from(new Set(rows.map(r => String(r.section || '').trim()).filter(Boolean))).sort();
         const options = base.map(value => ({ value, label: value }));
         const atomic = Array.from(new Set(base.flatMap(splitSectionTokens))).sort();
+        atomic.forEach(value => {
+            if (!options.some(option => option.value === value)) options.push({ value, label: value });
+        });
         if (atomic.length > 1) {
             const last = atomic[atomic.length - 1];
             const rest = atomic.slice(0, -1);
@@ -178,13 +174,7 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
         let rows = resolvedSessions;
         if (filterArea) rows = rows.filter(r => matchesAreaFilter(r, filterArea));
         if (filterGrade) rows = rows.filter(r => r.grade === filterGrade);
-        if (filterSection) {
-            const requested = splitSectionTokens(filterSection.toUpperCase());
-            rows = rows.filter(r => {
-                const current = String(r.section || '').trim().toUpperCase();
-                return current === filterSection.toUpperCase() || splitSectionTokens(current).some(piece => requested.includes(piece));
-            });
-        }
+        if (filterSection) rows = rows.filter(row => matchesMergeSection(String(row.section || ''), filterSection));
         return Array.from(new Set(rows.map(r => String(r.unitNumber || '').trim()).filter(Boolean))).sort((a, b) => Number(a) - Number(b)).map(value => ({ value, label: `Unidad ${value}` }));
     }, [resolvedSessions, filterArea, filterGrade, filterSection]);
 
@@ -192,30 +182,23 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
         let rows = resolvedSessions;
         if (filterArea) rows = rows.filter(r => matchesAreaFilter(r, filterArea));
         if (filterGrade) rows = rows.filter(r => r.grade === filterGrade);
-        if (filterSection) rows = rows.filter(r => String(r.section || '') === filterSection);
-        if (filterUnit) rows = rows.filter(r => String(r.unitNumber || '') === String(filterUnit));
-        return Array.from(new Set(rows.map(r => String(r.sessionNumber || '').trim()).filter(Boolean))).sort((a, b) => Number(a) - Number(b)).map(value => ({ value, label: `Sesion ${value}` }));
-    }, [resolvedSessions, filterArea, filterGrade, filterSection, filterUnit]);
+        if (filterSection) rows = rows.filter(row => matchesMergeSection(String(row.section || ''), filterSection));
+        if (filterUnits.length) rows = rows.filter(row => matchesMergeNumbers(row.unitNumber, filterUnits));
+        return Array.from(new Set(rows.map(r => String(r.sessionNumber || '').trim()).filter(Boolean))).sort((a, b) => Number(a) - Number(b)).map(value => ({ value, label: `Sesión ${value}` }));
+    }, [resolvedSessions, filterArea, filterGrade, filterSection, filterUnits]);
 
-    const sectionTokens = useMemo(() => splitSectionTokens(filterSection.toUpperCase()), [filterSection]);
-    const filteredList = useMemo(() => resolvedSessions.filter(row => {
-        const areaMatch = matchesAreaFilter(row, filterArea);
-        const gradeMatch = !filterGrade || row.grade === filterGrade;
-        const currentSection = String(row.section || '').trim().toUpperCase();
-        const exactSection = currentSection === String(filterSection || '').trim().toUpperCase();
-        const groupedSection = sectionTokens.length > 0 && splitSectionTokens(currentSection).some(piece => sectionTokens.includes(piece));
-        const sectionMatch = !filterSection || exactSection || groupedSection;
-        const unitMatch = !filterUnit || String(row.unitNumber || '') === String(filterUnit);
-        const sessionMatch = !filterSession || String(row.sessionNumber || '') === String(filterSession);
-        return areaMatch && gradeMatch && sectionMatch && unitMatch && sessionMatch;
-    }), [resolvedSessions, filterArea, filterGrade, filterSection, filterUnit, filterSession, sectionTokens]);
-
-    const allFilteredSelected = filteredList.length > 0 && selectedIds.length === filteredList.length;
+    const filteredList = useMemo(() => resolvedSessions.filter(row =>
+        matchesAreaFilter(row, filterArea) && (!filterGrade || row.grade === filterGrade)
+        && matchesMergeSection(String(row.section || ''), filterSection)
+        && matchesMergeNumbers(row.unitNumber, filterUnits)
+        && matchesMergeNumbers(row.sessionNumber, filterSessions)
+    ), [resolvedSessions, filterArea, filterGrade, filterSection, filterUnits, filterSessions]);
+    const visibleIds = filteredList.map(row => row.id);
+    const allFilteredSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.includes(id));
+    const hiddenSelectedCount = selectedIds.filter(id => !visibleIds.includes(id)).length;
     const percent = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
-    const dedupedTemplateFields = useMemo(() => dedupeMarkers(templateFields), [templateFields]);
-    const dedupedSessionMarkers = useMemo(() => dedupeMarkers(sessionMarkers), [sessionMarkers]);
 
-    const handleToggleAll = () => setSelectedIds(allFilteredSelected ? [] : filteredList.map(row => row.id));
+    const handleToggleAll = () => setSelectedIds(current => toggleVisibleSessionIds(current, visibleIds));
     const handleToggleOne = (id: string) => setSelectedIds(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]);
 
     const startPolling = () => {
@@ -275,8 +258,8 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
         setFilterArea('');
         setFilterGrade('');
         setFilterSection('');
-        setFilterUnit('');
-        setFilterSession('');
+        setFilterUnits([]);
+        setFilterSessions([]);
     };
 
     if (loading) {
@@ -284,17 +267,17 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
     }
 
     return (
-        <div className="animate-fade-in space-y-6 pb-20 overflow-visible">
+        <div className="session-word-merge min-w-0 animate-fade-in space-y-4 pb-20">
             {toast && <InternalToast message={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
 
-            <div className="bg-slate-900 text-white p-8 rounded-[3rem] shadow-2xl relative overflow-visible border border-slate-800">
-                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-fuchsia-500 via-violet-500 to-indigo-500 rounded-t-[3rem]"></div>
-                <div className="flex justify-between items-center relative z-10">
-                    <div className="flex items-center gap-5">
+            <div className="bg-slate-900 text-white p-5 rounded-3xl shadow-2xl relative overflow-hidden border border-slate-800">
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-fuchsia-500 via-violet-500 to-indigo-500" aria-hidden="true"></div>
+                <div className="flex flex-wrap justify-between items-center gap-3 relative z-10">
+                    <div className="flex min-w-0 items-center gap-3">
                         <button onClick={onBack} className="w-12 h-12 rounded-2xl bg-white/10 hover:bg-white/20 flex items-center justify-center transition-all group"><span className="text-xl group-hover:-translate-x-1 transition-transform">&larr;</span></button>
-                        <div>
-                            <h1 className="text-3xl font-black tracking-tight uppercase leading-none italic">Correspondencia Sesiones</h1>
-                            <p className="text-[10px] font-black text-fuchsia-300 uppercase tracking-[0.4em] mt-2">Exportacion Word desde Sesiones de Aprendizaje</p>
+                        <div className="min-w-0">
+                            <h1 className="break-words text-xl sm:text-2xl font-black tracking-tight uppercase leading-tight">Correspondencia Sesiones</h1>
+                            <p className="text-[10px] font-black text-fuchsia-300 uppercase tracking-widest mt-1">Exportacion Word desde Sesiones de Aprendizaje</p>
                         </div>
                     </div>
                     <div className="text-right">
@@ -304,31 +287,31 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 overflow-visible">
-                <div className="space-y-6">
-                    <div className="bg-white p-8 rounded-[3rem] shadow-xl border border-slate-200">
-                        <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mb-6 flex items-center gap-3"><span className="w-2 h-4 bg-fuchsia-500 rounded-full"></span> 1. Destino de Salida</h3>
-                        <div className="space-y-6">
+            <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(250px,300px)_minmax(0,1fr)]">
+                <div className="min-w-0 space-y-4">
+                    <div className="min-w-0 bg-white p-4 rounded-3xl shadow-lg border border-slate-200">
+                        <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-3"><span className="w-2 h-4 bg-fuchsia-500 rounded-full"></span> 1. Destino de Salida</h3>
+                        <div className="space-y-4">
                             <div>
                                 <label className="block text-[8px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">Carpeta de Exportacion</label>
-                                <div className="flex gap-2">
-                                    <input type="text" placeholder="Seleccione o escriba ruta..." className="flex-1 bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-fuchsia-500/20 focus:border-fuchsia-500 transition-all shadow-inner" value={customPath} onChange={(e) => setCustomPath(e.target.value)} />
-                                    <button onClick={handleFolderPick} className="w-12 h-12 bg-slate-100 hover:bg-fuchsia-600 hover:text-white border border-slate-200 rounded-2xl flex items-center justify-center transition-all shadow-sm" title="Seleccionar carpeta de destino"><span className="text-xl">+</span></button>
+                                <div className="flex min-w-0 gap-2">
+                                    <input type="text" placeholder="Seleccione o escriba ruta..." className="min-w-0 flex-1 bg-slate-50 border border-slate-200 rounded-2xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-fuchsia-500/20 focus:border-fuchsia-500 transition-all shadow-inner" value={customPath} onChange={(e) => setCustomPath(e.target.value)} />
+                                    <button onClick={handleFolderPick} className="w-10 h-10 shrink-0 bg-slate-100 hover:bg-fuchsia-600 hover:text-white border border-slate-200 rounded-2xl flex items-center justify-center transition-all shadow-sm" title="Seleccionar carpeta de destino"><span className="text-xl">+</span></button>
                                 </div>
                             </div>
-                            <div className="flex items-center gap-3 p-4 bg-fuchsia-50 rounded-2xl border border-fuchsia-100 cursor-pointer" onClick={() => setAnchorPath(!anchorPath)}>
-                                <div className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all ${anchorPath ? 'bg-fuchsia-600 border-fuchsia-600 shadow-md' : 'bg-white border-fuchsia-200'}`}>{anchorPath && <span className="text-white text-xs font-black">OK</span>}</div>
-                                <span className="text-[10px] font-black text-fuchsia-700 uppercase tracking-tight">Recordar esta ruta</span>
-                            </div>
-                            <div className="flex gap-3 h-16">
-                                <button onClick={handleGenerate} disabled={progress.active || selectedIds.length === 0} className={`flex-1 rounded-[2rem] text-white transition-all flex items-center justify-center shadow-2xl bg-fuchsia-600 ${progress.active || selectedIds.length === 0 ? 'opacity-50 grayscale' : 'hover:scale-105 active:scale-95'}`} title="Iniciar exportacion de sesiones">{progress.active ? <div className="w-6 h-6 border-3 border-white/30 border-t-white rounded-full animate-spin"></div> : <span className="text-2xl">DOC</span>}</button>
+                            <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-600 transition-colors hover:text-violet-700">
+                                <input type="checkbox" checked={anchorPath} onChange={event => setAnchorPath(event.target.checked)} className="h-4 w-4 shrink-0 rounded border-slate-300 accent-violet-600" />
+                                <span>Recordar esta ruta</span>
+                            </label>
+                            <div className="flex gap-2 h-11">
+                                <button onClick={handleGenerate} disabled={progress.active || selectedIds.length === 0} className={`flex-1 rounded-[2rem] text-white transition-all flex items-center justify-center shadow-2xl bg-fuchsia-600 ${progress.active || selectedIds.length === 0 ? 'opacity-50 grayscale' : 'hover:scale-105 active:scale-95'}`} title="Iniciar exportacion de sesiones">{progress.active ? <div className="w-6 h-6 border-3 border-white/30 border-t-white rounded-full animate-spin"></div> : <span className="text-xs font-black">Exportar Word</span>}</button>
                                 {finished && !progress.active && <button onClick={() => openSessionWordFolder(progress.outputPath || customPath)} className="w-16 bg-white border border-slate-200 rounded-[2rem] flex items-center justify-center hover:bg-slate-50 transition-all shadow-lg text-[10px] font-black uppercase tracking-widest" title="Abrir Carpeta">Abrir</button>}
                             </div>
                         </div>
                     </div>
 
                     {(progress.active || finished || !!progress.error) && (
-                        <div className="bg-slate-900 p-8 rounded-[3rem] shadow-2xl border border-slate-800 animate-fade-in relative overflow-hidden">
+                        <div className="bg-slate-900 p-4 rounded-3xl shadow-lg border border-slate-800 animate-fade-in relative overflow-hidden">
                             <div className="flex justify-between items-center mb-6 relative z-10"><span className="text-[10px] font-black text-white uppercase tracking-widest">Progreso de Generacion</span>{progress.active && <span className="text-xl font-black font-mono text-fuchsia-400">{percent}%</span>}</div>
                             <div className="h-4 bg-white/10 rounded-full overflow-hidden border border-white/5 mb-4 shadow-inner"><div className="h-full transition-all duration-700 ease-out bg-gradient-to-r from-fuchsia-500 to-indigo-500" style={{ width: `${progress.active ? percent : finished ? 100 : 0}%` }}></div></div>
                             <div className="flex flex-col gap-1 relative z-10">
@@ -338,55 +321,39 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
                         </div>
                     )}
 
-                    <div className="bg-white p-8 rounded-[3rem] shadow-xl border border-slate-200">
-                        <div className="flex items-center justify-between gap-4 mb-5">
-                            <div>
-                                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">2. Campos de Plantilla</h3>
-                                <p className="text-[10px] font-bold text-slate-500 mt-2">Use los campos con el formato <span className="font-mono text-slate-700">&lt;&lt;campo&gt;&gt;</span> en la plantilla de sesion.</p>
-                            </div>
-                            <div className="px-3 py-2 rounded-2xl bg-slate-100 border border-slate-200 text-[10px] font-black text-slate-600">{dedupedTemplateFields.length + dedupedSessionMarkers.length} marcador(es)</div>
-                        </div>
-                        <div className="max-h-80 overflow-y-auto pr-2 custom-scrollbar space-y-4">
-                            <div>
-                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2">Campos Word</p>
-                                <div className="flex flex-wrap gap-2">{dedupedTemplateFields.length > 0 ? dedupedTemplateFields.map(marker => <button key={marker} type="button" onClick={() => navigator.clipboard?.writeText(`<<${marker}>>`)} className="px-3 py-2 rounded-2xl bg-slate-50 hover:bg-fuchsia-50 border border-slate-200 hover:border-fuchsia-200 text-[10px] font-mono font-bold text-slate-700 transition-colors">{`<<${marker}>>`}</button>) : <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-[10px] font-bold text-slate-400 uppercase tracking-wider text-center w-full">No se pudieron leer los campos de la plantilla.</div>}</div>
-                            </div>
-                            <div>
-                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2">Marcadores Sugeridos</p>
-                                <div className="flex flex-wrap gap-2">{dedupedSessionMarkers.length > 0 ? dedupedSessionMarkers.map(marker => <button key={marker} type="button" onClick={() => navigator.clipboard?.writeText(`<<${marker}>>`)} className="px-3 py-2 rounded-2xl bg-fuchsia-50 hover:bg-fuchsia-100 border border-fuchsia-200 text-[10px] font-mono font-bold text-fuchsia-800 transition-colors">{`<<${marker}>>`}</button>) : <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-[10px] font-bold text-slate-400 uppercase tracking-wider text-center w-full">No se pudieron leer los bloques especiales de la plantilla.</div>}</div>
-                            </div>
-                        </div>
-                    </div>
+                    <WordMarkerGroups templateFields={templateFields} suggested={sessionMarkers} onError={msg => setToast({ msg, type: 'warning' })} />
                 </div>
 
-                <div className="lg:col-span-2 bg-white rounded-[3.5rem] shadow-2xl border border-slate-200 overflow-visible flex flex-col min-h-[600px]">
-                    <div className="bg-slate-50 p-8 border-b border-slate-100 flex flex-col md:flex-row justify-between items-center gap-6 overflow-visible rounded-t-[3.5rem]">
-                        <div className="flex flex-col">
-                            <h4 className="text-xl font-black text-slate-800 uppercase tracking-tighter">Registros de Sesiones</h4>
-                            <span className="text-[10px] font-black text-fuchsia-500 uppercase tracking-[0.2em] mt-1">{selectedIds.length} marcados para exportar</span>
+                <div className="min-w-0 bg-white rounded-3xl shadow-lg border border-slate-200 flex flex-col min-h-[520px]">
+                    <div className="rounded-t-3xl border-b border-slate-100 bg-slate-50 p-4">
+                        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                            <div className="min-w-0"><h4 className="text-base font-black text-slate-800">Registros de sesiones</h4><p className="mt-0.5 text-[11px] font-semibold text-slate-500">{filteredList.length} visibles · <span className="text-violet-700">{selectedIds.length} marcadas para exportar</span>{hiddenSelectedCount > 0 && <span className="text-amber-700"> · {hiddenSelectedCount} fuera del filtro</span>}</p></div>
+                            <div className="flex flex-wrap gap-2 text-[10px] font-bold">
+                                {selectedIds.length > 0 && <button type="button" onClick={() => setSelectedIds([])} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-slate-600">Limpiar selección</button>}
+                                {(filterArea || filterGrade || filterSection || filterUnits.length > 0 || filterSessions.length > 0) && <button type="button" onClick={clearFilters} className="rounded-lg bg-violet-100 px-2.5 py-1.5 text-violet-700">Limpiar filtros</button>}
+                            </div>
                         </div>
-                        <div className="flex items-center gap-3 flex-1 justify-end overflow-visible">
-                            <div className="w-40"><Select label="Area" name="area" options={uniqueAreas} value={filterArea} onChange={(e) => { setFilterArea(e.target.value); setFilterGrade(''); setFilterSection(''); setFilterUnit(''); setFilterSession(''); }} searchable={true} placeholder="Todas..." className="h-auto" labelClassName="text-[8px] font-black text-slate-400" /></div>
-                            <div className="w-24"><Select label="Grado" name="grade" options={uniqueGrades} value={filterGrade} onChange={(e) => { setFilterGrade(e.target.value); setFilterSection(''); setFilterUnit(''); setFilterSession(''); }} searchable={true} placeholder="Todos..." className="h-auto" labelClassName="text-[8px] font-black text-slate-400" /></div>
-                            <div className="w-24"><Select label="Seccion" name="section" options={uniqueSections} value={filterSection} onChange={(e) => { setFilterSection(e.target.value); setFilterUnit(''); setFilterSession(''); }} searchable={true} placeholder="Todas..." className="h-auto" labelClassName="text-[8px] font-black text-slate-400" /></div>
-                            <div className="w-24"><Select label="Unidad" name="unit" options={uniqueUnits} value={filterUnit} onChange={(e) => { setFilterUnit(e.target.value); setFilterSession(''); }} searchable={true} placeholder="Todas..." className="h-auto" labelClassName="text-[8px] font-black text-slate-400" /></div>
-                            <div className="w-24"><Select label="Sesion" name="session" options={uniqueSessionNumbers} value={filterSession} onChange={(e) => setFilterSession(e.target.value)} searchable={true} placeholder="Todas..." className="h-auto" labelClassName="text-[8px] font-black text-slate-400" /></div>
-                            {(filterArea || filterGrade || filterSection || filterUnit || filterSession) && <button onClick={clearFilters} className="h-8 w-8 shrink-0 flex items-center justify-center bg-slate-200 hover:bg-slate-300 rounded-full transition-colors text-sm text-slate-600" title="Limpiar Filtros">x</button>}
+                        <div className="flex min-w-0 flex-wrap items-end gap-x-3 gap-y-2">
+                            <div className="w-full min-w-0 sm:w-56"><Select label="Área" name="area" options={uniqueAreas} value={filterArea} onChange={(e) => { setFilterArea(e.target.value); setFilterGrade(''); setFilterSection(''); setFilterUnits([]); setFilterSessions([]); }} searchable variant="compact" placeholder="Todas" /></div>
+                            <div className="w-20 min-w-0"><Select label="Grado" name="grade" options={uniqueGrades} value={filterGrade} onChange={(e) => { setFilterGrade(e.target.value); setFilterSection(''); setFilterUnits([]); setFilterSessions([]); }} searchable variant="compact" placeholder="Todos" /></div>
+                            <div className="w-24 min-w-0"><Select label="Sección" name="section" options={uniqueSections} value={filterSection} onChange={(e) => { setFilterSection(e.target.value); setFilterUnits([]); setFilterSessions([]); }} searchable variant="compact" placeholder="Todas" /></div>
+                            <div className="w-28 min-w-0"><WordNumberFilter label="Unidad" prefix="U" options={uniqueUnits} values={filterUnits} onChange={values => { setFilterUnits(values); setFilterSessions([]); }} /></div>
+                            <div className="w-28 min-w-0"><WordNumberFilter label="Sesión" prefix="S" options={uniqueSessionNumbers} values={filterSessions} onChange={setFilterSessions} /></div>
                         </div>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto custom-scrollbar">
-                        <table className="w-full text-left border-collapse table-fixed">
+                    <div className="min-w-0 flex-1 overflow-auto rounded-b-3xl custom-scrollbar">
+                        <table className="w-full min-w-[640px] text-left border-collapse table-fixed">
                             <thead className="bg-slate-900 text-white text-[9px] font-black uppercase tracking-widest sticky top-0 z-20 shadow-md">
                                 <tr className="divide-x divide-white/10">
-                                    <th className="p-4 w-12 text-center"><button onClick={handleToggleAll} className={`w-5 h-5 rounded border-2 transition-all flex items-center justify-center ${allFilteredSelected ? 'bg-fuchsia-600 border-fuchsia-600 shadow-lg' : 'bg-white/10 border-white/20'}`}>{allFilteredSelected && <span className="text-[10px]">OK</span>}</button></th>
-                                    <th className="p-4 w-12 text-center">N</th>
-                                    <th className="p-4">Area</th>
-                                    <th className="p-4 w-20 text-center">Grado</th>
-                                    <th className="p-4 w-20 text-center">Secc.</th>
-                                    <th className="p-4 w-20 text-center">Unidad</th>
-                                    <th className="p-4 w-20 text-center">Sesion</th>
-                                    <th className="p-4">Titulo</th>
+                                    <th className="p-3 w-10 text-center"><button type="button" aria-label={allFilteredSelected ? 'Desmarcar sesiones visibles' : 'Marcar sesiones visibles'} onClick={handleToggleAll} className={`w-5 h-5 rounded border-2 transition-all flex items-center justify-center ${allFilteredSelected ? 'bg-fuchsia-600 border-fuchsia-600 shadow-lg' : 'bg-white/10 border-white/20'}`}>{allFilteredSelected && <span className="text-[10px]">OK</span>}</button></th>
+                                    <th className="p-3 w-10 text-center">N</th>
+                                    <th className="p-3">Area</th>
+                                    <th className="p-3 w-16 text-center">Grado</th>
+                                    <th className="p-3 w-16 text-center">Secc.</th>
+                                    <th className="p-3 w-16 text-center">Unidad</th>
+                                    <th className="p-3 w-16 text-center">Sesion</th>
+                                    <th className="p-3">Titulo</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-50">
@@ -397,14 +364,14 @@ export const SessionTemplateMergeView: React.FC<Props> = ({
                                     const areaLabel = String(row.areaName || row.areaId || '').trim() || 'Sin area';
                                     return (
                                         <tr key={row.id} onClick={() => handleToggleOne(row.id)} className={`cursor-pointer transition-colors group ${checked ? 'bg-fuchsia-50/50' : 'hover:bg-slate-50'}`}>
-                                            <td className="p-4 text-center"><div className={`mx-auto w-5 h-5 rounded border-2 transition-all flex items-center justify-center ${checked ? 'bg-fuchsia-600 border-fuchsia-600 shadow-md text-white text-[9px] font-black' : 'bg-slate-100 border-slate-300'}`}>{checked && 'OK'}</div></td>
-                                            <td className="p-4 text-center font-mono text-[10px] text-slate-400">{index + 1}</td>
-                                            <td className={`p-4 font-black uppercase text-[11px] ${checked ? 'text-fuchsia-700' : 'text-slate-700'}`}>{areaLabel}</td>
-                                            <td className="p-4 text-center text-[11px] font-bold text-slate-600">{row.grade || '-'}</td>
-                                            <td className="p-4 text-center text-[11px] font-bold text-slate-600">{row.section || '-'}</td>
-                                            <td className="p-4 text-center text-[11px] font-bold text-slate-600">U{row.unitNumber || '-'}</td>
-                                            <td className="p-4 text-center text-[11px] font-bold text-slate-600">S{row.sessionNumber || '-'}</td>
-                                            <td className="p-4 text-[11px] font-bold text-slate-600 truncate">{row.title || 'Sin titulo'}</td>
+                                            <td className="p-3 text-center"><div className={`mx-auto w-5 h-5 rounded border-2 transition-all flex items-center justify-center ${checked ? 'bg-fuchsia-600 border-fuchsia-600 shadow-md text-white text-[9px] font-black' : 'bg-slate-100 border-slate-300'}`}>{checked && 'OK'}</div></td>
+                                            <td className="p-3 text-center font-mono text-[10px] text-slate-400">{index + 1}</td>
+                                            <td className={`p-3 font-black uppercase text-[11px] ${checked ? 'text-fuchsia-700' : 'text-slate-700'}`}>{areaLabel}</td>
+                                            <td className="p-3 text-center text-[11px] font-bold text-slate-600">{row.grade || '-'}</td>
+                                            <td className="p-3 text-center text-[11px] font-bold text-slate-600">{row.section || '-'}</td>
+                                            <td className="p-3 text-center text-[11px] font-bold text-slate-600">U{row.unitNumber || '-'}</td>
+                                            <td className="p-3 text-center text-[11px] font-bold text-slate-600">S{row.sessionNumber || '-'}</td>
+                                            <td className="p-3 text-[11px] font-bold text-slate-600 truncate" title={row.title || 'Sin título'}>{row.title || 'Sin titulo'}</td>
                                         </tr>
                                     );
                                 })}

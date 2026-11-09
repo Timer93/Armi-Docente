@@ -1,0 +1,52 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import { planWorkbookImport, importWorkbookConclusions } from './import-bimester-conclusions.mjs';
+
+const [databasePath, input] = process.argv.slice(2);
+assert.ok(databasePath && input);
+const extracted = JSON.parse(fs.readFileSync(input, 'utf8'));
+const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'armi-import-conclusions-'));
+const copy = path.join(folder, 'test.db');
+const source = new Database(databasePath, { readonly: true });
+await source.backup(copy); source.close();
+const db = new Database(copy);
+try {
+  const plan = planWorkbookImport(db, extracted);
+  assert.equal(plan.changes.length, 333);
+  assert.equal(plan.summary.maxLength, 219);
+  assert.equal(plan.summary.blankActive.length, 3);
+  assert.equal(plan.summary.blankInactive, 78);
+  const originalGrades = db.prepare('SELECT * FROM evaluacion_registros ORDER BY id').all();
+  const originalConclusions = db.prepare('SELECT * FROM evaluacion_conclusiones ORDER BY id').all();
+  const long = structuredClone(extracted); long.sheets[0].rows[3].cells.C4.value = 'a'.repeat(251);
+  assert.throws(() => planWorkbookImport(db, long), /superior a 250/);
+  const unknown = structuredClone(extracted); unknown.sheets[0].rows[3].cells.A4.value = 'Nombre sin coincidencia';
+  assert.throws(() => planWorkbookImport(db, unknown), /inexistente o ambiguo/);
+  const duplicate = structuredClone(extracted); duplicate.sheets[0].rows[4].cells.A5.value = duplicate.sheets[0].rows[3].cells.A4.value;
+  assert.throws(() => planWorkbookImport(db, duplicate), /duplicado/);
+  const wrongLevel = structuredClone(extracted); wrongLevel.sheets[0].rows[3].cells.B4.value = 'AD';
+  assert.throws(() => planWorkbookImport(db, wrongLevel), /Nivel de Excel distinto/);
+  const formula = structuredClone(extracted); formula.sheets[0].rows[3].cells.C4.formula = 'A1';
+  assert.throws(() => planWorkbookImport(db, formula), /no una f/);
+  db.exec('CREATE TRIGGER test_import_guard AFTER UPDATE ON evaluacion_conclusiones BEGIN UPDATE evaluacion_registros SET numeric_score=99 WHERE id=(SELECT min(id) FROM evaluacion_registros); END');
+  await assert.rejects(importWorkbookConclusions({ databasePath: copy, extracted, backupRoot: folder }), /Cambio no autorizado/);
+  assert.deepEqual(db.prepare('SELECT * FROM evaluacion_conclusiones ORDER BY id').all(), originalConclusions, 'Import must roll back completely');
+  assert.deepEqual(db.prepare('SELECT * FROM evaluacion_registros ORDER BY id').all(), originalGrades);
+  db.exec('DROP TRIGGER test_import_guard');
+  const report = await importWorkbookConclusions({ databasePath: copy, extracted, backupRoot: folder });
+  assert.equal(report.changes.length, 333);
+  assert.equal(report.gradesChanged, 0);
+  assert.deepEqual(db.prepare('SELECT * FROM evaluacion_registros ORDER BY id').all(), originalGrades);
+  const backup = new Database(report.backup, { readonly: true });
+  assert.deepEqual(backup.prepare('SELECT * FROM evaluacion_conclusiones ORDER BY id').all(), originalConclusions); backup.close();
+  const all = db.prepare('SELECT * FROM evaluacion_conclusiones').all();
+  for (const row of plan.changes) assert.equal(all.find(stored => stored.year === row.year && stored.grade === row.grade && stored.section === row.section && stored.student_id === row.studentId && stored.competency_key === row.competencyKey && stored.scope_type === 'bimester' && stored.scope_value === 'III')?.conclusion_text, row.text);
+  console.log('OK: 333 exact texts, scoped identity, 250 limit, blank preservation, level validation, complete backup and atomic rollback; grades untouched.');
+} finally {
+  db.close();
+  assert.ok(folder.startsWith(path.join(os.tmpdir(), 'armi-import-conclusions-')));
+  fs.rmSync(folder, { recursive: true, force: true });
+}

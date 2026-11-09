@@ -1,10 +1,12 @@
+import { withSessionRegisterScope, type SessionRegisterTarget } from '../utils/sessionRegisterNavigation';
 ﻿
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import 'react-quill-new/dist/quill.bubble.css';
 import { TeachingAssignment, GeneralData, Student, SessionAssessmentModel } from '../types';
-import { getAllSesiones, deleteSesion, getDatosGenerales, getProgramacionesAnuales, saveDatosGenerales, getInstrumentos, getEstudiantes, getEvaluacionRegistros } from '../services/apiService';
+import { getAllSesiones, deleteSesion, getDatosGenerales, getProgramacionesAnuales, saveDatosGenerales, getInstrumentos, getEstudiantes, getEvaluacionRegistros, saveImportedSessionActivity } from '../services/apiService';
 import { SessionTemplateMergeView } from './SessionTemplateMergeView';
+import { SessionManager } from './sessions-view/SessionManager';
 import { SessionRegisterPanel } from './sessions-view/SessionRegisterPanel';
 import { createGeminiClient, generateGeminiContent } from '../utils/gemini';
 import { getAiUsageProgress, registerAiUsage, type AiUsageProgress } from '../utils/aiUsage';
@@ -65,24 +67,31 @@ import { useSessionGradingPersistence } from './sessions-view/useSessionGradingP
 import { getSessionDynamicHoursLabel } from './sessions-view/sessionSchedule';
 import { useSessionLearningResourceActions } from './sessions-view/useSessionLearningResourceActions';
 import { SessionInstrumentSection } from './sessions-view/SessionInstrumentSection';
+import { SessionInteractiveHtml } from './sessions-view/SessionInteractiveHtml';
+import { SessionEvidenceTemplates } from './sessions-view/SessionEvidenceTemplates';
 
 interface Props {
+  navigationTarget?: SessionRegisterTarget | null;
   activeSection: string;
   onSuccess: () => void;
 }
 
 const SESSIONS_VIEW_SELECTION_STORAGE_KEY = 'armi_view_selection_sesiones_v1';
-export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
-    const initialSelection = useMemo(() => readStoredViewSelection(SESSIONS_VIEW_SELECTION_STORAGE_KEY), []);
-    const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
+export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess, navigationTarget }) => {
+    const initialSelection = useMemo(() => navigationTarget ? {
+        areaName: navigationTarget.areaName, grade: navigationTarget.grade, section: navigationTarget.section,
+        unitNumber: navigationTarget.unitNumber, sessionNumber: navigationTarget.sessionNumber, year: navigationTarget.year
+    } : readStoredViewSelection(SESSIONS_VIEW_SELECTION_STORAGE_KEY), []);
+    const [assignments, setAssignments] = useState<TeachingAssignment[]>(() => withSessionRegisterScope([], navigationTarget));
     const [assignmentsLoaded, setAssignmentsLoaded] = useState(false);
     const [competenciasBase, setCompetenciasBase] = useState<any[]>([]);
-    const [sessionMode, setSessionMode] = useState<'planificacion' | 'calificacion'>('planificacion');
+    const [sessionMode, setSessionMode] = useState<'planificacion' | 'calificacion'>(navigationTarget ? 'calificacion' : 'planificacion');
     const [students, setStudents] = useState<Student[]>([]);
     const [gradingRecords, setGradingRecords] = useState<Record<string, { level: string; observation: string }>>({});
     const [gradingLoading, setGradingLoading] = useState(false);
     const [gradingSaving, setGradingSaving] = useState(false);
-    const [activeGradingSection, setActiveGradingSection] = useState('');
+    const [gradingSaveRevision, setGradingSaveRevision] = useState(0);
+    const [activeGradingSection, setActiveGradingSection] = useState(navigationTarget?.studentSection || '');
     const [expandedSessionRegisterObservations, setExpandedSessionRegisterObservations] = useState<Record<string, boolean>>({});
     const gradingAutosaveRef = useRef<{ initialized: boolean; lastSaved: string; saving: boolean }>({ initialized: false, lastSaved: '', saving: false });
     
@@ -102,6 +111,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     const [themeColor, setThemeColor] = useState(localStorage.getItem('armi_sessions_theme') || '#6b21a8');
     const [toasts, setToasts] = useState<Array<{ id: string; msg: string; type: 'success' | 'error' | 'warning'; usage?: AiUsageProgress | null }>>([]);
     const [allSavedPrograms, setAllSavedPrograms] = useState<Record<string, any>>({});
+    const [sessionSourcesReady, setSessionSourcesReady] = useState(false);
     const [generalData, setGeneralData] = useState<GeneralData | null>(null);
     const [isGeneratingIA, setIsGeneratingIA] = useState(false);
     const [aiUsageProgress, setAiUsageProgress] = useState<AiUsageProgress>(() => getAiUsageProgress());
@@ -388,19 +398,25 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     }, [sessionData]);
 
     useEffect(() => {
+        let active = true;
         const load = async () => {
             const saved = localStorage.getItem('armi_assignments');
-            if (saved) setAssignments(JSON.parse(saved));
+            if (saved) setAssignments(withSessionRegisterScope(JSON.parse(saved), navigationTarget));
             setAssignmentsLoaded(true);
-            const gd = await getDatosGenerales();
+            // Student records can be large. Load them independently so they do
+            // not delay the lesson sources, or wait for those sources to finish.
+            const generalRequest = getDatosGenerales();
+            const programsRequest = getProgramacionesAnuales();
+            void getEstudiantes().then(rows => { if (active) setStudents(rows); });
+            const [gd, progs] = await Promise.all([generalRequest, programsRequest]);
+            if (!active) return;
             setGeneralData(gd);
             if (!initialSelection.year && gd.year) setYear(gd.year);
-            const progs = await getProgramacionesAnuales();
             setAllSavedPrograms(progs);
-            const studentRows = await getEstudiantes();
-            setStudents(studentRows);
+            setSessionSourcesReady(true);
         };
         load();
+        return () => { active = false; };
     }, [initialSelection.year]);
 
     const uniqueAreas = useMemo(() => Array.from(new Set(assignments.map(a => a.areaName))).sort(), [assignments]);
@@ -410,15 +426,18 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     [assignments, selArea]);
     
     const availableSections = useMemo(() => {
-        const baseSections = Array.from(new Set(assignments.filter(a => a.areaName === selArea && a.grade === selGrade).map(a => a.section))).sort();
+        const baseSections = Array.from(new Set(assignments.filter(a => a.areaName === selArea && a.grade === selGrade).flatMap(a => String(a.section).split(/,| y /).map(section => section.trim()).filter(Boolean)))).sort();
         let options = baseSections.map(s => ({ value: s, label: s }));
         
         if (baseSections.length > 1) {
             const joinedLabel = baseSections.join(', ').replace(/, ([^,]*)$/, ' y $1');
             options.push({ value: joinedLabel, label: joinedLabel });
         }
+        if (navigationTarget && selArea === navigationTarget.areaName && selGrade === navigationTarget.grade && !options.some(option => option.value === navigationTarget.section)) {
+            options.push({ value: navigationTarget.section, label: navigationTarget.section });
+        }
         return options;
-    }, [assignments, selArea, selGrade]);
+    }, [assignments, selArea, selGrade, navigationTarget]);
 
     useEffect(() => {
         writeStoredViewSelection(SESSIONS_VIEW_SELECTION_STORAGE_KEY, {
@@ -685,6 +704,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
     };
 
     useSessionLoader({
+        ready: sessionSourcesReady,
         selArea,
         selGrade,
         selSection,
@@ -876,6 +896,8 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             if (res.success) {
                 setAllSavedSessionsList(prev => prev.filter(s => s.id !== id));
                 setToast({ msg: "Sesión eliminada", type: 'success' });
+            } else {
+                throw new Error(res.message || 'No se pudo eliminar la sesión.');
             }
         }
     };
@@ -922,8 +944,9 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
 
     const currentSessionId = useMemo(() => {
         if (!(year && currentAreaId && selGrade && selSection && unitNumber && sessionNumber)) return '';
+        if (navigationTarget && year === navigationTarget.year && String(currentAreaId) === navigationTarget.areaId && selGrade === navigationTarget.grade && selSection === navigationTarget.section && unitNumber === navigationTarget.unitNumber && sessionNumber === navigationTarget.sessionNumber) return navigationTarget.sessionId;
         return `${year}-${currentAreaId}-${selGrade}-${selSection}-U${unitNumber}-S${sessionNumber}`;
-    }, [year, currentAreaId, selGrade, selSection, unitNumber, sessionNumber]);
+    }, [year, currentAreaId, selGrade, selSection, unitNumber, sessionNumber, navigationTarget]);
 
     const currentUnitId = useMemo(() => {
         if (!(year && currentAreaId && selGrade && selSection && unitNumber)) return '';
@@ -980,6 +1003,8 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         handleGenerateAllResources,
         handleUploadResource
     } = useSessionLearningResourceActions({
+        year,
+        areaId: currentAreaId,
         currentSessionId,
         selArea,
         selGrade,
@@ -1033,6 +1058,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         gradingStudents,
         gradingSessionGroups,
         gradingRecords,
+        gradingAutosaveRef,
         sessionData,
         setGradingRecords,
         setGradingSaving,
@@ -1058,35 +1084,46 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             return;
         }
         let cancelled = false;
-        const loadGradingRecords = async () => {
-            setGradingLoading(true);
+        gradingAutosaveRef.current = { initialized: false, lastSaved: '', saving: false };
+        let reading = false;
+        const loadGradingRecords = async (initial = false) => {
+            if (reading || (!initial && document.visibilityState !== 'visible')) return;
+            const baseline = gradingAutosaveRef.current.lastSaved;
+            if (!initial && gradingAutosaveRef.current.saving) return;
+            reading = true;
+            if (initial) setGradingLoading(true);
             try {
                 const res = await getEvaluacionRegistros({ sessionId: currentSessionId });
                 if (cancelled) return;
                 if (!res.success) {
-                    setGradingRecords({});
-                    setToast({ msg: `No se pudieron cargar registros de calificación: ${res.message || 'error'}`, type: 'error' });
+                    if (initial) setToast({ msg: `No se pudieron cargar registros de calificaci?n: ${res.message || 'error'}`, type: 'error' });
                     return;
                 }
                 const nextRecords: Record<string, { level: string; observation: string }> = {};
                 (res.data || []).forEach((record: any) => {
                     nextRecords[`${record.student_id}::${record.criteria_id}`] = {
-                        level: String(record.level || ''),
-                        observation: String(record.observation || '')
+                        level: String(record.level || ''), observation: String(record.observation || '')
                     };
                 });
-                gradingAutosaveRef.current = {
-                    initialized: true,
-                    lastSaved: serializeGradingRecords(nextRecords),
-                    saving: false
-                };
-                setGradingRecords(nextRecords);
+                setGradingRecords(current => {
+                    // A read started before a local edit/save cannot replace it.
+                    const saved = gradingAutosaveRef.current;
+                    if (!initial && (saved.saving || saved.lastSaved !== baseline
+                        || serializeGradingRecords(current) !== baseline)) return current;
+                    const snapshot = serializeGradingRecords(nextRecords);
+                    gradingAutosaveRef.current = { initialized: true, lastSaved: snapshot, saving: false };
+                    return snapshot === serializeGradingRecords(current) ? current : nextRecords;
+                });
             } finally {
-                if (!cancelled) setGradingLoading(false);
+                reading = false;
+                if (!cancelled && initial) setGradingLoading(false);
             }
         };
-        loadGradingRecords();
-        return () => { cancelled = true; };
+        void loadGradingRecords(true);
+        const refresh = () => { void loadGradingRecords(); };
+        const timer = window.setInterval(refresh, 5_000);
+        window.addEventListener('focus', refresh);
+        return () => { cancelled = true; window.clearInterval(timer); window.removeEventListener('focus', refresh); };
     }, [sessionMode, currentSessionId, serializeGradingRecords]);
 
     useEffect(() => {
@@ -1098,21 +1135,25 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
         }
         if (snapshot === gradingAutosaveRef.current.lastSaved || gradingAutosaveRef.current.saving) return;
         const timeout = window.setTimeout(async () => {
-            gradingAutosaveRef.current = { ...gradingAutosaveRef.current, saving: true, lastSaved: snapshot };
+            gradingAutosaveRef.current = { ...gradingAutosaveRef.current, saving: true };
             const ok = await handleSaveGrading({ silent: true });
             if (ok) {
                 gradingAutosaveRef.current = { initialized: true, lastSaved: snapshot, saving: false };
             } else {
                 gradingAutosaveRef.current = { ...gradingAutosaveRef.current, saving: false };
             }
+            // Edits made while this request was running need a new save pass.
+            setGradingSaveRevision(value => value + 1);
         }, 900);
         return () => window.clearTimeout(timeout);
-    }, [gradingRecords, sessionMode, currentSessionId, gradingLoading, serializeGradingRecords]);
+    }, [gradingRecords, sessionMode, currentSessionId, gradingLoading, serializeGradingRecords, gradingSaveRevision]);
 
-    const renderSessionRegisterPanel = () => {
+    const renderSessionRegisterPanel = (performanceText?: string) => {
         return (
             <SessionRegisterPanel
+                navigationTarget={currentSessionId === navigationTarget?.sessionId ? navigationTarget : null}
                 currentSessionId={currentSessionId}
+                performanceText={performanceText}
                 bimesterLabel={bimesterLabel}
                 filteredStudents={filteredStudents}
                 generalData={generalData}
@@ -1128,6 +1169,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                         onChange={setActiveGradingSection}
                     />
                 )}
+                activeGradingSection={activeGradingSection}
                 gradingSessionGroups={gradingSessionGroups}
                 gradingCodeToStoredLevel={gradingCodeToStoredLevel}
                 normalizeGradingLevelToCode={normalizeGradingLevelToCode}
@@ -1176,18 +1218,13 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                         <span className="opacity-50">|</span>
                         <span className="text-white/85">{sessionInstrumentName}</span>
                     </div>
-                    <div className="p-6 space-y-4">
-                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 print:hidden">
-                            <p className="text-[10px] font-black uppercase text-slate-500">Desempeño</p>
-                            <p className="text-sm font-bold text-slate-700 mt-2 leading-relaxed">{sessionPerformanceText || '-'}</p>
-                        </div>
-
+                    <div className="p-4 space-y-2">
                         {!currentSessionId ? (
                             <div className="p-8 text-center text-slate-400 font-bold">Seleccione una sesión para comenzar a calificar.</div>
                         ) : !sessionData?.instrumentoTemplate ? (
                             <div className="p-8 text-center text-slate-400 font-bold">La sesión seleccionada no tiene plantilla de instrumento cargada.</div>
                         ) : ['lista_cotejo', 'rubrica', 'guia_observacion', 'escala_valoracion'].includes(templateType) ? (
-                            renderSessionRegisterPanel()
+                            renderSessionRegisterPanel(sessionPerformanceText)
                         ) : (
                             <div className="p-8 text-center text-slate-400 font-bold">Por ahora la calificación en Sesiones está habilitada para instrumentos con núcleo de evaluación compatible.</div>
                         )}
@@ -1270,6 +1307,7 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             )}
 
             <SessionPlanningHeader
+                activeGradingSection={activeGradingSection}
                 themeColor={themeColor}
                 setThemeColor={setThemeColor}
                 year={year}
@@ -1398,6 +1436,29 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
                             }}
                         />
                     </div>
+
+                    <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+                    <SessionInteractiveHtml
+                        themeColor={themeColor}
+                        currentSessionId={currentSessionId}
+                        students={students}
+                        activities={Array.isArray(sessionData?.interactiveActivities) ? sessionData.interactiveActivities : []}
+                        assessmentModel={sessionAssessmentModel}
+                        sessionData={sessionData}
+                        context={{ area: selArea, grade: selGrade, section: selSection, sessionNumber }}
+                        onImport={async (activity) => {
+                            const response = await saveImportedSessionActivity({
+                                year, areaId: currentAreaId, grade: selGrade, section: selSection,
+                                unitNumber, sessionNumber, activity,
+                                sessionData: { ...sessionData, sessionAssessmentModel, date: sessionDate || sessionData?.date || '' }
+                            });
+                            if (!response.success) throw new Error(response.message || 'No se pudo guardar el HTML. Inténtalo otra vez.');
+                        }}
+                        onChange={(activities) => handleInputChange('interactiveActivities', activities)}
+                        setToast={setToast}
+                    />
+                    <SessionEvidenceTemplates currentSessionId={currentSessionId} sessionData={sessionData} grade={selGrade} themeColor={themeColor} setToast={setToast}/>
+                    </div>
                 </>
                 )
             ) : (
@@ -1408,58 +1469,15 @@ export const SessionsView: React.FC<Props> = ({ activeSection, onSuccess }) => {
             )}
             
             {/* MODAL DE GESTIÓN DE SESIONES */}
-            {isManageModalOpen && (
-                <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-sm animate-fade-in">
-                    <div className="bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col h-[80vh]">
-                        <div className="p-8 text-white flex justify-between items-center" style={{ backgroundColor: themeColor }}>
-                            <div>
-                                <h3 className="text-2xl font-black uppercase tracking-tight leading-none italic">Gestor de Sesiones</h3>
-                                <p className="text-[10px] font-bold text-white/70 mt-2 uppercase tracking-[0.2em]">Registros guardados en Servidor SQL</p>
-                            </div>
-                            <button onClick={() => setIsManageModalOpen(false)} className="w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-2xl transition-all">x</button>
-                        </div>
-                        <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
-                            {allSavedSessionsList.length === 0 ? (
-                                <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-4 opacity-50 italic">
-                                    <span className="text-6xl"></span>
-                                    <p className="font-black text-xs uppercase tracking-widest">No hay sesiones guardadas todavía.</p>
-                                </div>
-                            ) : (
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {allSavedSessionsList.map((s, idx) => (
-                                        <div 
-                                            key={idx} 
-                                            onClick={() => handleLoadSpecific(s)}
-                                            className="group bg-slate-50 border border-slate-200 p-5 rounded-[2rem] hover:bg-white hover:border-blue-300 hover:shadow-xl transition-all cursor-pointer relative overflow-hidden"
-                                        >
-                                            <div className="flex items-center gap-4 relative z-10">
-                                                <div className="w-14 h-14 rounded-2xl bg-white flex flex-col items-center justify-center shadow-sm border border-slate-100 shrink-0">
-                                                    <span className="text-[8px] font-black text-slate-400 uppercase">AÑO</span>
-                                                    <span className="text-lg font-black text-blue-600">{s.year}</span>
-                                                </div>
-                                                <div className="flex-1 min-w-0">
-                                                    <h4 className="font-black text-slate-800 text-sm uppercase truncate pr-4">{s.title}</h4>
-                                                    <div className="flex items-center gap-2 mt-1">
-                                                        <span className="px-2 py-0.5 rounded-lg bg-slate-200 text-slate-600 text-[9px] font-black uppercase">{s.grade} {s.section}</span>
-                                                        <span className="px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-700 text-[9px] font-black uppercase">U{s.unitNumber} S{s.sessionNumber}</span>
-                                                    </div>
-                                                </div>
-                                                <button 
-                                                    onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.id); }}
-                                                    className="w-10 h-10 rounded-full bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white transition-all flex items-center justify-center opacity-0 group-hover:opacity-100 shadow-md"
-                                                >
-                                                    
-                                                </button>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </div>
-            )}
-            
+            {isManageModalOpen && <SessionManager
+                sessions={allSavedSessionsList}
+                assignments={assignments}
+                themeColor={themeColor}
+                onClose={() => setIsManageModalOpen(false)}
+                onLoad={handleLoadSpecific}
+                onDelete={handleDeleteSession}
+            />}
+
             <style dangerouslySetInnerHTML={{ __html: `
                 @keyframes scaleIn {
                     from { opacity: 0; transform: scale(0.95) translateY(10px); }

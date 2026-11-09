@@ -1,5 +1,7 @@
+import '../styles/ai-provider-dialog.css';
 ﻿
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 import { createGeminiClient, generateGeminiContentStream } from '../utils/gemini';
 import { DiagnosticEvaluationView } from './DiagnosticEvaluationView';
@@ -445,9 +447,9 @@ const AuthOverlay: React.FC<{
     }, [provider, geminiKey, openaiKey]);
 
     return (
-        <div className="fixed inset-0 z-[5000] flex items-start justify-center overflow-y-auto overscroll-contain p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
-            <div className="my-2 bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col lg:flex-row">
-                <div className="bg-blue-600 w-full md:w-60 p-6 text-white flex flex-col">
+        <div role="dialog" aria-modal="true" aria-label="Configuración de proveedor IA" className="ai-provider-overlay fixed inset-0 z-[5000] flex items-start justify-center overflow-y-auto overscroll-contain p-4 bg-slate-900/80 backdrop-blur-xl animate-fade-in">
+            <div className="ai-provider-dialog my-2 bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-200 flex flex-col lg:flex-row">
+                <div className="ai-provider-aside bg-blue-600 w-full md:w-60 p-6 text-white flex flex-col">
                     <div>
                         <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center text-3xl mb-6 shadow-inner">🤖</div>
                         <h3 className="text-xl font-black uppercase tracking-tight leading-tight mb-4">Asistente IA Armi</h3>
@@ -469,16 +471,16 @@ const AuthOverlay: React.FC<{
                     </div>
                 </div>
 
-                <div className="flex-1 p-6 flex flex-col">
+                <div className="ai-provider-content flex-1 p-6 flex flex-col">
                     <div className="flex justify-between items-start mb-8">
                         <div>
                             <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">Motor IA</h4>
                             <h2 className="text-2xl font-black text-slate-800 uppercase tracking-tighter">Configuración de Proveedor</h2>
                         </div>
-                        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">✕</button>
+                        <button type="button" aria-label="Cerrar configuración de IA" onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">✕</button>
                     </div>
 
-                    <div className="space-y-4 flex-1">
+                    <div className="ai-provider-fields space-y-4 flex-1">
                         <div>
                             <label className="block text-[10px] font-black text-slate-500 mb-3 ml-1 uppercase tracking-widest">Proveedor IA activo:</label>
                             <div className="grid grid-cols-2 gap-3">
@@ -930,10 +932,10 @@ export const AnnualProgramView: React.FC<{
                 const fetchTransversals = async () => {
                     const names = ["Se desenvuelve en los entornos virtuales generados por las TIC.", "Gestiona su aprendizaje de manera autónoma."];
                     const newMap: Record<string, string> = {};
-                    for (const name of names) {
+                    await Promise.all(names.map(async name => {
                         const res = await getEstandares(selectedGrade, name);
                         newMap[name] = (res && res.length > 0) ? getFlexValue(res[0], 'estandar') : '⚠️ Estándar no hallado.';
-                    }
+                    }));
                     setTransversalTextMap(newMap);
                 };
                 fetchTransversals();
@@ -1681,7 +1683,7 @@ Instrucciones:
         <>
             {toast && <InternalToast message={toast.msg} type={toast.type} usage={toast.usage} onClose={() => setToast(null)} />}
             {goalToastMsg && <InfoToast message={goalToastMsg} onClose={() => setGoalToastMsg(null)} />}
-            {showAuthScreen && (
+            {typeof document !== 'undefined' && showAuthScreen && createPortal(
                 <AuthOverlay
                     onSave={handleSaveIAKey}
                     onClose={() => setShowAuthScreen(false)}
@@ -1694,7 +1696,8 @@ Instrucciones:
                     initialAiPedagogicalRoute={(generalData as any)?.ai_pedagogical_route || ''}
                     initialInstitutionalProblems={(generalData as any)?.ai_institutional_problems || ''}
                     initialUnitPedagogicalFocus={(generalData as any)?.ai_unit_pedagogical_focus || ''}
-                />
+                />,
+                document.body
             )}
             
             <div className="animate-fade-in pb-20 space-y-6 relative">

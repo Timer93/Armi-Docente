@@ -273,7 +273,7 @@ export const DatabaseManager: React.FC = () => {
                 <div className="flex items-center gap-4">
                     <div className="bg-white/10 p-4 rounded-3xl border border-white/20 shadow-inner text-3xl">⚙️</div>
                     <div>
-                        <h2 className="text-3xl font-black tracking-tight uppercase leading-none">SQL Console v5.0</h2>
+                        <h2 className="text-3xl font-black tracking-tight uppercase leading-none">Bases de Datos</h2>
                         <div className="flex items-center gap-2 mt-2">
                              <div className={`w-2 h-2 rounded-full ${health?.success ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}></div>
                              <p className="text-blue-400 text-[9px] font-black uppercase tracking-[0.3em]">{health?.success ? 'Sistema Online' : 'Fallo de Conexión'}</p>

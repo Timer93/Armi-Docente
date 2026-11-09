@@ -35,6 +35,27 @@
   const approvedInputs = new WeakSet();
   const approvedBulkHeaders = new WeakSet();
   const recordCache = new Map();
+  const pendingScores = new Map();
+  const scoreRevisions = new Map();
+  let loadedDataEpoch = null;
+  let dataRefreshRequired = false;
+  const observeGradeEpoch = (response) => {
+    const epoch = response.headers.get('X-ARMI-Data-Epoch') || 'legacy';
+    if (loadedDataEpoch !== null && loadedDataEpoch !== epoch) dataRefreshRequired = true;
+    else loadedDataEpoch = epoch;
+  };
+  const gradeWriteHeaders = (headers) => {
+    if (dataRefreshRequired) throw new Error('Los datos cambiaron. Recarga la vista antes de modificar las notas.');
+    const result = new Headers(headers);
+    let epoch = loadedDataEpoch;
+    if (epoch === null) { try { epoch = window.sessionStorage.getItem('armi_backend_data_epoch'); } catch {} }
+    result.set('X-ARMI-Data-Epoch', epoch || 'legacy');
+    return result;
+  };
+  const stageScore = (key, score) => {
+    pendingScores.set(key, score);
+    scoreRevisions.set(key, (scoreRevisions.get(key) || 0) + 1);
+  };
 
   const readScores = () => {
     try { return JSON.parse(localStorage.getItem(SCORE_KEY) || '{}'); } catch { return {}; }
@@ -132,11 +153,16 @@
   };
 
   const createButton = () => {
-    if (modeButton || !document.body) return;
+    const host = document.getElementById('armi-grading-mode-control');
+    if (!host) { modeButton?.remove(); return; }
+    if (modeButton) {
+      if (modeButton.parentElement !== host) host.appendChild(modeButton);
+      return;
+    }
     modeButton = document.createElement('button');
     modeButton.type = 'button';
     modeButton.setAttribute('data-armi-grading-mode', 'true');
-    modeButton.style.cssText = 'position:fixed;right:116px;bottom:20px;z-index:99990;display:flex;width:36px;height:36px;align-items:center;justify-content:center;border:1px solid #cbd5e1;border-radius:999px;padding:0;background:rgba(255,255,255,.95);box-shadow:0 16px 40px rgba(15,23,42,.16);backdrop-filter:blur(8px);cursor:pointer;transition:transform .2s ease,background .2s ease,border-color .2s ease';
+    modeButton.style.cssText = 'display:flex;flex-shrink:0;width:36px;height:36px;align-items:center;justify-content:center;border:1px solid #cbd5e1;border-radius:999px;padding:0;background:rgba(255,255,255,.95);box-shadow:0 16px 40px rgba(15,23,42,.16);backdrop-filter:blur(8px);cursor:pointer;transition:background .2s ease,border-color .2s ease';
     const icon = document.createElement('img');
     icon.src = '/mode.png';
     icon.alt = '';
@@ -144,10 +170,10 @@
     icon.draggable = false;
     icon.style.cssText = 'width:20px;height:20px;object-fit:contain;pointer-events:none';
     modeButton.appendChild(icon);
-    modeButton.addEventListener('mouseenter', () => { modeButton.style.transform = 'translateY(-2px)'; modeButton.style.background = '#ffffff'; });
-    modeButton.addEventListener('mouseleave', () => { modeButton.style.transform = ''; modeButton.style.background = 'rgba(255,255,255,.95)'; });
+    modeButton.addEventListener('mouseenter', () => { modeButton.style.background = '#ffffff'; });
+    modeButton.addEventListener('mouseleave', () => { modeButton.style.background = 'rgba(255,255,255,.95)'; });
     modeButton.addEventListener('click', showModeModal);
-    document.body.appendChild(modeButton);
+    host.appendChild(modeButton);
     updateButton();
   };
 
@@ -177,27 +203,31 @@
     popover = null;
   };
 
-  const persistNumericScore = async (identity, level, score) => {
-    const key = scoreKey(currentSessionId, identity.studentId, identity.criteriaId);
-    const cached = recordCache.get(key);
-    if (!cached) return;
-    const record = {
-      ...cached,
-      level,
-      grading_mode: 'hybrid_vigesimal',
-      numeric_score: score,
-    };
+  const persistNumericScores = async (entries, sessionId = currentSessionId) => {
+    const records = entries.flatMap(({ identity, level, score }) => {
+      const cached = recordCache.get(scoreKey(sessionId, identity.studentId, identity.criteriaId));
+      return cached ? [{ ...cached, level, grading_mode: 'hybrid_vigesimal', numeric_score: score }] : [];
+    });
+    if (!records.length) return;
     const response = await window.__armiOriginalFetch('/api/evaluacion/registros', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gradingMode: 'hybrid_vigesimal', records: [record] }),
+      headers: gradeWriteHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ gradingMode: 'hybrid_vigesimal', records }),
     });
-    if (!response.ok) throw new Error('No se pudo guardar la nota vigesimal.');
-    recordCache.set(key, record);
+    const result = await response.json();
+    if (!response.ok || !result.success) throw new Error(result.message || 'No se pudo guardar la nota vigesimal.');
+    records.forEach(record => {
+      const key = scoreKey(record.session_id, record.student_id, record.criteria_id);
+      recordCache.set(key, record);
+      if (pendingScores.get(key) === record.numeric_score) pendingScores.delete(key);
+      scoreRevisions.set(key, (scoreRevisions.get(key) || 0) + 1);
+    });
   };
 
   const showScorePopover = (input, identity) => {
     closePopover();
+    const sessionIdAtOpen = currentSessionId;
+    const epochAtOpen = loadedDataEpoch;
     const rect = input.getBoundingClientRect();
     popover = document.createElement('div');
     popover.style.cssText = `position:fixed;z-index:100001;left:${Math.min(rect.left, window.innerWidth - 265)}px;top:${Math.min(rect.bottom + 7, window.innerHeight - 175)}px;width:250px;background:white;border:2px solid #7c3aed;border-radius:18px;padding:14px;box-shadow:0 18px 45px rgba(15,23,42,.3);font-family:Segoe UI,Arial,sans-serif`;
@@ -207,9 +237,16 @@
     const error = popover.querySelector('[data-error]');
     const existing = readScores()[scoreKey(currentSessionId, identity.studentId, identity.criteriaId)];
     if (existing !== undefined) scoreInput.value = String(existing).replace('.', ',');
+    let saving = false;
     const save = async () => {
-      const score = Number(String(scoreInput.value || '').replace(',', '.'));
-      if (!Number.isFinite(score) || score < 0 || score > 20) {
+      if (saving) return;
+      if (currentSessionId !== sessionIdAtOpen || loadedDataEpoch !== epochAtOpen || dataRefreshRequired || !document.contains(input)) {
+        error.textContent = 'La sesión o los datos cambiaron. Cierra esta ventana y vuelve a abrir el criterio.';
+        return;
+      }
+      const entered = String(scoreInput.value || '').trim();
+      const score = Number(entered.replace(',', '.'));
+      if (!entered || !Number.isFinite(score) || score < 0 || score > 20) {
         error.textContent = 'Ingrese una nota válida entre 0 y 20.';
         scoreInput.focus();
         return;
@@ -217,20 +254,36 @@
       const level = getLevel(score);
       const target = getRadioGroup(input)[['c', 'b', 'a', 'ad'].indexOf(level)] || input;
       const scores = readScores();
-      scores[scoreKey(currentSessionId, identity.studentId, identity.criteriaId)] = score;
+      const key = scoreKey(sessionIdAtOpen, identity.studentId, identity.criteriaId);
+      const previousScore = scores[key];
+      const previousPending = pendingScores.get(key);
+      const hadPending = pendingScores.has(key);
+      scores[key] = score;
+      stageScore(key, score);
+      const stagedRevision = scoreRevisions.get(key);
       writeScores(scores);
       error.textContent = 'Guardando...';
+      saving = true;
       try {
-        if (target.checked) {
-          await persistNumericScore(identity, level, score);
-        } else {
+        // Persist the pair before React's deferred autosave can read an older cache.
+        await persistNumericScores([{identity, level, score}], sessionIdAtOpen);
+        if (!target.checked) {
           approvedInputs.add(target);
           target.click();
         }
         closePopover();
         window.setTimeout(decorateScores, 80);
       } catch (saveError) {
+        if (scoreRevisions.get(key) === stagedRevision) {
+          const restored = readScores();
+          if (previousScore === undefined) delete restored[key]; else restored[key] = previousScore;
+          writeScores(restored);
+          if (hadPending) pendingScores.set(key, previousPending); else pendingScores.delete(key);
+          scoreRevisions.set(key, stagedRevision + 1);
+        }
         error.textContent = saveError.message || 'No se pudo guardar la nota.';
+      } finally {
+        saving = false;
       }
     };
     popover.querySelector('[data-save]').addEventListener('click', save);
@@ -288,6 +341,8 @@
 
   const showBulkScorePopover = (context) => {
     closePopover();
+    const sessionIdAtOpen = currentSessionId;
+    const epochAtOpen = loadedDataEpoch;
     const ranges = {
       c: { label: '0 a 10,9', placeholder: 'Ejemplo: 10' },
       b: { label: '11 a 13,9', placeholder: 'Ejemplo: 13' },
@@ -302,9 +357,16 @@
     document.body.appendChild(popover);
     const scoreInput = popover.querySelector('[data-score-input]');
     const error = popover.querySelector('[data-error]');
-    const save = () => {
-      const score = Number(String(scoreInput.value || '').replace(',', '.'));
-      if (!Number.isFinite(score) || score < 0 || score > 20 || getLevel(score) !== context.level) {
+    let saving = false;
+    const save = async () => {
+      if (saving) return;
+      if (currentSessionId !== sessionIdAtOpen || loadedDataEpoch !== epochAtOpen || dataRefreshRequired || !document.contains(context.header)) {
+        error.textContent = 'La sesión o los datos cambiaron. Vuelve a abrir la columna.';
+        return;
+      }
+      const entered = String(scoreInput.value || '').trim();
+      const score = Number(entered.replace(',', '.'));
+      if (!entered || !Number.isFinite(score) || score < 0 || score > 20 || getLevel(score) !== context.level) {
         error.textContent = `Ingrese una nota válida del nivel ${context.level.toUpperCase()} (${range.label}).`;
         scoreInput.focus();
         return;
@@ -314,17 +376,37 @@
         return;
       }
       const scores = readScores();
+      const previous = [];
       context.targets.forEach(({ identity }) => {
-        scores[scoreKey(currentSessionId, identity.studentId, identity.criteriaId)] = score;
+        const key = scoreKey(sessionIdAtOpen, identity.studentId, identity.criteriaId);
+        const old = {key,score:scores[key],pending:pendingScores.get(key),hadPending:pendingScores.has(key)};
+        scores[key] = score;
+        stageScore(key, score);
+        previous.push({...old,revision:scoreRevisions.get(key)});
       });
       writeScores(scores);
-      approvedBulkHeaders.add(context.header);
-      context.header.click();
-      closePopover();
-      window.setTimeout(() => {
-        decorateScores();
-        decorateNlTitles();
-      }, 100);
+      saving = true;
+      error.textContent = 'Guardando...';
+      try {
+        // Numeric-only edits must persist even if React's letter stays the same.
+        await persistNumericScores(context.targets.map(({identity})=>({identity,level:context.level,score})),sessionIdAtOpen);
+        if (currentSessionId === sessionIdAtOpen && document.contains(context.header)) {
+          approvedBulkHeaders.add(context.header);
+          context.header.click();
+        }
+        closePopover();
+        window.setTimeout(() => { decorateScores(); decorateNlTitles(); }, 100);
+      } catch (saveError) {
+        const restored = readScores();
+        previous.forEach(old=>{
+          if(scoreRevisions.get(old.key)!==old.revision)return;
+          if(old.score===undefined)delete restored[old.key];else restored[old.key]=old.score;
+          if(old.hadPending)pendingScores.set(old.key,old.pending);else pendingScores.delete(old.key);
+          scoreRevisions.set(old.key,old.revision+1);
+        });
+        writeScores(restored);
+        error.textContent = saveError.message || 'No se pudieron guardar las notas.';
+      } finally { saving = false; }
     };
     popover.querySelector('[data-save]').addEventListener('click', save);
     popover.querySelector('[data-cancel]').addEventListener('click', closePopover);
@@ -392,7 +474,8 @@
         badge.style.cssText = 'display:inline-flex;align-items:center;margin-left:6px;padding:2px 7px;border-radius:999px;color:white;font-size:10px;font-weight:900;line-height:1.2;vertical-align:middle';
         tooltipHeader.appendChild(badge);
       }
-      const formattedScore = formatScore(score);
+      const inconsistent = getInputLevel(input) !== level;
+      const formattedScore = inconsistent ? `${formatScore(score)} · Revisar letra/nota` : formatScore(score);
       if (badge.textContent !== formattedScore) badge.textContent = formattedScore;
       if (badge.dataset.level !== level) {
         badge.dataset.level = level;
@@ -469,7 +552,8 @@
 
       if (complete) {
         numericScore = numericValues.reduce((sum, value) => sum + Number(value), 0) / numericValues.length;
-        level = getLevel(numericScore);
+        const scoreForLevel = cell.closest('[data-numeric-average-rounding="nearest_integer"]') ? Math.round(numericScore) : numericScore;
+        level = getLevel(scoreForLevel);
       }
 
       let tooltip = cell.querySelector(':scope > [data-armi-nl-tooltip="true"]');
@@ -514,6 +598,17 @@
   };
 
   document.addEventListener('contextmenu', (event) => {
+    if (activeMode === 'hybrid_vigesimal' && event.target instanceof Element) {
+      const input = event.target.closest('td')?.querySelector('input[type="radio"]');
+      const identity = input && !input.disabled ? getRadioIdentity(input) : null;
+      if (identity) {
+        const key = scoreKey(currentSessionId, identity.studentId, identity.criteriaId);
+        const scores = readScores();
+        delete scores[key];
+        stageScore(key, null);
+        writeScores(scores);
+      }
+    }
     const header = event.target instanceof Element ? event.target.closest('th[data-armi-bulk-header="true"]') : null;
     if (!header) return;
     const context = getBulkHeaderContext(header);
@@ -561,18 +656,23 @@
       currentSessionId = parsed.searchParams.get('sessionId') || currentSessionId;
       currentScope = parseSessionScope(currentSessionId) || currentScope;
       url = parsed.href;
+      const revisionsAtRead = new Map(scoreRevisions);
       const response = await window.__armiOriginalFetch(url, init);
+      if (response.ok) observeGradeEpoch(response);
       if (activeMode === 'hybrid_vigesimal') {
-        response.clone().json().then((payload) => {
+        try {
+          const payload = await response.clone().json();
           const scores = readScores();
           (payload?.data || []).forEach((record) => {
-            recordCache.set(scoreKey(record.session_id, record.student_id, record.criteria_id), record);
-            if (record.numeric_score === null || record.numeric_score === undefined) return;
-            scores[scoreKey(record.session_id, record.student_id, record.criteria_id)] = Number(record.numeric_score);
+            const key = scoreKey(record.session_id, record.student_id, record.criteria_id);
+            if (pendingScores.has(key) || (revisionsAtRead.get(key) || 0) !== (scoreRevisions.get(key) || 0)) return;
+            recordCache.set(key, record);
+            if (record.numeric_score === null || record.numeric_score === undefined) delete scores[key];
+            else scores[key] = Number(record.numeric_score);
           });
           writeScores(scores);
           window.setTimeout(decorateScores, 30);
-        }).catch(() => {});
+        } catch {}
       }
       return response;
     }
@@ -583,20 +683,31 @@
         payload.gradingMode = activeMode;
         if (activeMode === 'hybrid_vigesimal') {
           const scores = readScores();
-          (payload.records || []).forEach((record) => {
-            const value = scores[scoreKey(record.session_id, record.student_id, record.criteria_id)];
-            if (value !== undefined) record.numeric_score = value;
-          });
+          for (const record of (payload.records || [])) {
+            const key = scoreKey(record.session_id, record.student_id, record.criteria_id);
+            const value = pendingScores.has(key) ? pendingScores.get(key) : scores[key];
+            record.numeric_score = String(record.level || '').trim() ? (value ?? record.numeric_score ?? null) : null;
+            const score = record.numeric_score;
+            if (String(record.level || '').trim() && (score === null || !Number.isFinite(Number(score)) || Number(score) < 0 || Number(score) > 20 || normalizeLevel(record.level) !== getLevel(Number(score)))) {
+              return new Response(JSON.stringify({ success: false, message: 'La letra y la nota numérica no coinciden. Abra el criterio e ingrese la nota correcta antes de guardar.' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+            }
+          }
         }
         recordsToCache = Array.isArray(payload.records) ? payload.records : [];
         init = { ...init, body: JSON.stringify(payload) };
       } catch {}
     }
 
+    if (/\/api\/evaluacion\/modo-calificacion(?:\?|$)/.test(url) && method === 'POST') {
+      init = { ...init, headers: gradeWriteHeaders(init?.headers) };
+    }
     const response = await window.__armiOriginalFetch(url, init);
     if (isRecords && method === 'POST' && response.ok) {
       recordsToCache.forEach((record) => {
-        recordCache.set(scoreKey(record.session_id, record.student_id, record.criteria_id), record);
+        const key = scoreKey(record.session_id, record.student_id, record.criteria_id);
+        recordCache.set(key, record);
+        if (pendingScores.get(key) === record.numeric_score) pendingScores.delete(key);
+        scoreRevisions.set(key, (scoreRevisions.get(key) || 0) + 1);
       });
     }
     return response;

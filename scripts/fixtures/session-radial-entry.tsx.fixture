@@ -1,0 +1,23 @@
+import React, {useState,useRef} from 'react';
+import {createRoot} from 'react-dom/client';
+import {SessionPlanningHeader} from '/components/sessions-view/SessionPlanningHeader.tsx';
+import {SessionActions} from '/components/sessions-view/SessionActions.tsx';
+import '/index.css';
+window.audioNotes=[];window.audioContexts=0;window.saveCalls=0;window.saveResult=true;window.deferSave=false;
+class TestAudio {
+  state='running';currentTime=0;destination={};
+  constructor(){window.audioContexts++;}
+  createOscillator(){const node={type:'sine',frequency:{value:0},connect(){},disconnect(){},onended:null,start(){window.audioNotes.push(node.frequency.value)},stop(){node.onended?.()}};return node;}
+  createGain(){return {gain:{setValueAtTime(){},exponentialRampToValueAtTime(){}},connect(){},disconnect(){}};}
+  resume(){this.state='running';return Promise.resolve();} suspend(){this.state='suspended';return Promise.resolve();} close(){this.state='closed';return Promise.resolve();}
+}
+window.AudioContext=TestAudio;
+function UnitFixture(){const headerRef=useRef(null);const[color,setColor]=useState('#d35400');const[stored,setStored]=useState(false);const[ready,setReady]=useState(true);window.setUnitsStored=setStored;window.setUnitsReady=setReady;const action=name=>()=>{window.lastAction='unit-'+name;};
+return <div style={{padding:24}}><div ref={headerRef} style={{padding:24,background:color,borderRadius:24,color:'white'}}><h1>Unidades Didácticas 2026</h1><SessionActions module="units" headerRef={headerRef} themeColor={color} setThemeColor={setColor} contextLabel="5to B · U7" headerFilled={ready} isGeneratingIA={false} aiTokenLabel="Disponible" saveDisabled={!ready} managerDisabled={!stored} templateDisabled={!stored} onAI={action('ai')} onAISettings={action('settings')} onSave={async()=>{window.lastAction='unit-save';return window.saveResult}} onManager={action('manager')} onTemplate={action('template')}/></div><div style={{background:'white',padding:24,marginTop:24}}><h2>Planificación de la unidad · vista de prueba</h2>{Array.from({length:60},(_,i)=><div key={i} style={{padding:20,borderBottom:'1px solid #e2e8f0'}}>Contenido de la unidad · sección {i+1}</div>)}</div></div>}
+function Fixture(){const[mode,setMode]=useState('calificacion');const[color,setColor]=useState('#8200a1');const[busy,setBusy]=useState(false);const[module,setModule]=useState('sessions');window.setModule=setModule;window.setBusy=setBusy;
+const action=name=>()=>{window.lastAction=name;};
+const save=async()=>{window.lastAction='save';window.saveCalls++;if(window.deferSave)await new Promise(resolve=>window.finishSave=resolve);return window.saveResult;};
+if(module==='units')return <UnitFixture/>;
+return <div style={{position:'relative',padding:24}}><SessionPlanningHeader themeColor={color} setThemeColor={setColor} year={2026} bimesterLabel="IV" headerFilled={true} isGeneratingIA={busy} aiUsageProgress={{tokenLabel:'Disponible'}} handleGenerateAI={action('ai')} setShowAuthScreen={action('settings')} handleSave={save} setSessionData={action('clear')} handleOpenManager={action('manager')} handleOpenTemplateMode={action('template')} dynamicHoursLabel="2 horas" uniqueAreas={['Educación para el Trabajo']} selArea="Educación para el Trabajo" setSelArea={()=>{}} availableGrades={['5to']} selGrade="5to" setSelGrade={()=>{}} availableSections={[{value:'A y B',label:'A y B'}]} selSection="A y B" setSelSection={()=>{}} unitNumber="7" setUnitNumber={()=>{}} maxSessionsInUnit={8} sessionNumber="1" setSessionNumber={()=>{}} dateOptions={[{value:'2026-11-08',label:'08/11/2026'}]} sessionDate="2026-11-08" isDatePickerOpen={false} setIsDatePickerOpen={()=>{}} triggerDateChange={()=>{}} sessionMode={mode} setSessionMode={setMode} activeGradingSection="B"/>
+<div style={{marginTop:24,padding:20,background:'white',borderRadius:20}}><h2>Registro por sesión · vista de prueba</h2>{Array.from({length:60},(_,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',padding:14,borderBottom:'1px solid #e2e8f0'}}><span>Estudiante de ejemplo {i+1}</span><span>C　B　A　AD</span></div>)}</div></div>};
+createRoot(document.getElementById('root')).render(<Fixture/>);

@@ -23,6 +23,18 @@ Para usarlo usar Visual Studio code e inatalar todas las dependecias necesarias.
 
 `npm run dev`
 
+Para probar la web con los datos de una instalación existente, crea un archivo
+`armi-dev.local` en la raíz del proyecto con este contenido (ajusta el usuario):
+
+```json
+{"dataRoot":"C:/Users/TU_USUARIO/AppData/Roaming/ARMI Docente"}
+```
+
+Reinicia `npm run dev`. La consola muestra la carpeta elegida. La web utilizará
+la misma base, archivos y configuración del instalable; los cambios se comparten.
+El archivo de configuración es local y Git lo ignora. Una variable de entorno
+`ARMI_DATA_ROOT` tiene prioridad. Sin configuración se usan los datos del proyecto.
+
 ## Modo local y modo espejo de Google Drive
 
 Este proyecto ahora admite dos modos de almacenamiento:

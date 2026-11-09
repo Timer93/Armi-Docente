@@ -84,24 +84,28 @@ export const AuxiliaryRegister: React.FC = () => {
           <Select 
             label="Grado" 
             options={Array.from(new Set(students.map(s => s.grade))).map(g => ({ value: g, label: g }))}
+            name="auxiliary-grade"
             value={selGrade}
             onChange={e => setSelGrade(e.target.value)}
           />
           <Select 
             label="Sección" 
             options={Array.from(new Set(students.map(s => s.section))).map(s => ({ value: s, label: s }))}
+            name="auxiliary-section"
             value={selSection}
             onChange={e => setSelSection(e.target.value)}
           />
           <Select 
             label="Unidad" 
             options={Array.from({ length: 8 }, (_, i) => ({ value: (i + 1).toString(), label: `U${i + 1}` }))}
+            name="auxiliary-unit"
             value={selUnit}
             onChange={e => setSelUnit(e.target.value)}
           />
           <Select 
             label="Sesión" 
             options={Array.from({ length: 15 }, (_, i) => ({ value: (i + 1).toString(), label: `S${i + 1}` }))}
+            name="auxiliary-session"
             value={selSession}
             onChange={e => setSelSession(e.target.value)}
           />

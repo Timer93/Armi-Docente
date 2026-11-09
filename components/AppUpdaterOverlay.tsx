@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 export const APP_UPDATER_EXPANDED_EVENT = 'armi-app-updater-expanded';
 
@@ -96,9 +97,9 @@ export const AppUpdaterOverlay: React.FC = () => {
 
   return (
     <>
-      <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-3 print:hidden">
+      <div className="relative flex flex-col items-end gap-3 print:hidden">
         {expanded ? (
-          <div className="w-[19rem] rounded-[1.75rem] border border-slate-200 bg-white/95 p-4 text-xs shadow-[0_18px_50px_rgba(15,23,42,0.16)] backdrop-blur">
+          <div className="absolute bottom-full right-0 mb-3 w-[19rem] rounded-[1.75rem] border border-slate-200 bg-white/95 p-4 text-xs shadow-[0_18px_50px_rgba(15,23,42,0.16)] backdrop-blur">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="font-black uppercase tracking-[0.18em] text-slate-400">Actualizaciones</p>
@@ -149,12 +150,12 @@ export const AppUpdaterOverlay: React.FC = () => {
               </button>
             </div>
           </div>
-        ) : (
+        ) : null}
           <button
             type="button"
-            onClick={() => setExpanded(true)}
+            onClick={() => setExpanded(value => !value)}
             title={`Actualizaciones${snapshot.currentVersion ? ` - ${snapshot.currentVersion}` : ''}`}
-            className={`relative flex h-9 w-9 items-center justify-center rounded-full border bg-white/95 text-slate-800 shadow-[0_16px_40px_rgba(15,23,42,0.16)] backdrop-blur transition hover:-translate-y-0.5 hover:border-slate-300 ${hasAttention ? 'border-sky-300' : 'border-slate-200'}`}
+            className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border bg-white/95 text-slate-800 shadow-[0_16px_40px_rgba(15,23,42,0.16)] backdrop-blur transition hover:border-slate-300 ${hasAttention ? 'border-sky-300' : 'border-slate-200'}`}
           >
             <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-900 text-white">
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -166,10 +167,9 @@ export const AppUpdaterOverlay: React.FC = () => {
               <span className="absolute right-0.5 top-0.5 h-3 w-3 rounded-full border border-white bg-sky-500" />
             ) : null}
           </button>
-        )}
       </div>
 
-      {isVisible ? (
+      {isVisible ? createPortal(
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-6 backdrop-blur-sm">
           <div className="relative w-full max-w-xl rounded-[2rem] bg-white p-8 shadow-[0_28px_80px_rgba(15,23,42,0.28)]">
             {canDismissModal ? (
@@ -258,7 +258,7 @@ export const AppUpdaterOverlay: React.FC = () => {
             ) : null}
           </div>
         </div>
-      ) : null}
+      , document.body) : null}
     </>
   );
 };

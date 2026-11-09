@@ -18,6 +18,7 @@ import {
     type LucideIcon
 } from 'lucide-react';
 import { ResourceImagePreview } from './ResourceImagePreview';
+import type { SessionResourceCurricularRow } from './resource-prompts/sessionResourceCurriculum';
 
 export type SessionResourceKey = 'instructive' | 'annex1' | 'annex2';
 
@@ -47,6 +48,7 @@ export type SessionResourceAIContent = {
         capacities: string;
         criterion: string;
         evidence: string;
+        curricularRows?: SessionResourceCurricularRow[];
     };
     visualBrief?: {
         layoutIdea: string;

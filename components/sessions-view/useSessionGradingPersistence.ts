@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { saveEvaluacionRegistros } from '../../services/apiService';
 import { normalizeLoose } from './shared';
+import { selectChangedSessionGrades } from '../../utils/sessionGradeChanges';
 
 type GradingRecord = { level: string; observation: string };
 
@@ -11,6 +12,7 @@ interface UseSessionGradingPersistenceParams {
     gradingStudents: any[];
     gradingSessionGroups: any;
     gradingRecords: Record<string, GradingRecord>;
+    gradingAutosaveRef: { current: { initialized: boolean; lastSaved: string; saving: boolean } };
     sessionData: any;
     setGradingRecords: (value: any) => void;
     setGradingSaving: (value: boolean) => void;
@@ -24,6 +26,7 @@ export const useSessionGradingPersistence = ({
     gradingStudents,
     gradingSessionGroups,
     gradingRecords,
+    gradingAutosaveRef,
     sessionData,
     setGradingRecords,
     setGradingSaving,
@@ -100,11 +103,14 @@ export const useSessionGradingPersistence = ({
     
         if (!silent) setGradingSaving(true);
         try {
-            const res = await saveEvaluacionRegistros({ records });
+            const changedRecords = selectChangedSessionGrades(records, gradingAutosaveRef.current.lastSaved);
+            if (!changedRecords.length) return true;
+            const res = await saveEvaluacionRegistros({ records: changedRecords });
             if (!res.success) {
                 if (!silent) setToast({ msg: `No se pudo guardar la calificación: ${res.message || 'error'}`, type: 'error' });
                 return false;
             }
+            gradingAutosaveRef.current = { initialized: true, lastSaved: serializeGradingRecords(gradingRecords), saving: false };
             if (!silent) setToast({ msg: 'Calificación guardada correctamente.', type: 'success' });
             return true;
         } finally {

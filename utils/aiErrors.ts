@@ -14,11 +14,11 @@ export const classifyAiIssue = (error: unknown): { kind: AiIssueKind; raw: strin
   const raw = String((error as any)?.message || error || '').trim();
   const msg = raw.toLowerCase();
 
-  if (msg.includes('billing details') || msg.includes('limit: 0') || msg.includes('billing account')) {
+  if (msg.includes('limit: 0') || msg.includes('billing account required') || msg.includes('billing must be enabled')) {
     return {
       kind: 'billing_required',
       raw,
-      userMessage: 'La generación de imágenes no tiene cuota habilitada en este proyecto. Debes activar la facturación de Gemini API o usar una clave perteneciente a un proyecto con cuota de imágenes.'
+      userMessage: 'La generación no tiene cuota habilitada en este proyecto. Activa la facturación de Gemini API o usa una clave perteneciente a un proyecto con cuota.'
     };
   }
   if (msg.includes('401') || msg.includes('403') || msg.includes('api key') || msg.includes('unauthorized') || msg.includes('permission')) {

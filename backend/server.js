@@ -1,14 +1,31 @@
 import express from 'express';
+import { importSessionActivity } from './importSessionActivity.js';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
+import sharp from 'sharp';
 import { execFile } from 'child_process';
+import { Worker } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import db, { deleteStudentPortalSessions, setPortalSessionToken } from './db.js';
-import { appRoot, uploadsRoot, ensureDir } from './paths.js';
+import { createAccessControlRouter } from './routes/accessControl.routes.js';
+import { createAccessExtensionService } from './accessExtension.js';
+import { createAccessExtensionRouter } from './routes/accessExtension.routes.js';
+import { createStudentAgentService } from './studentAgent.js';
+import { createStudentAgentRouter } from './routes/studentAgent.routes.js';
+import {startStudentDiscovery} from './studentDiscovery.js';
+import { hybridGradeIssue } from './shared/hybridGradeIntegrity.js';
+import { teacherGradeRecords } from './shared/teacherGradeSource.js';
+import { createDataEpochFence } from './dataEpochFence.js';
+import { createSyncReferenceIdentity } from './syncReferenceIdentity.js';
+import { createEvidenceFolderRecovery } from './evidenceFolderRecovery.js';
+import { buildEvidenceRecoveryInventory, calculateEvidenceRecoveryStatus } from './evidenceRecoveryInventory.js';
+import { listEvidenceTombstoneKeys } from './evidenceMirrorIndex.js';
+import { createPortableBootstrapJobs } from './portableBootstrapJobs.js';
+import { appRoot, uploadsRoot, syncRuntimeRoot, ensureDir } from './paths.js';
 import programacionRoutes from './routes/programacionAnual.routes.js';
 import programacionWordRoutes from './routes/programacionWord.routes.js';
 import unidadWordRoutes from './routes/unidadWord.routes.js';
@@ -18,7 +35,10 @@ import evidenciasRoutes from './routes/evidencias.routes.js';
 import remoteAccessRoutes from './routes/remoteAccess.routes.js';
 import remoteCameraRoutes, { remoteCameraPublicRoutes } from './routes/remoteCamera.routes.js';
 import { initializeRemoteAccess, shutdownRemoteAccess } from './remote-access/remoteAccessService.js';
+import { reconcileEvidenceState, shutdownEvidenceReconciliation } from './evidenceReconciliationService.js';
 import { createSessionResourceVariants, ensureSessionResourceVariantLinks } from './sessionResourceStorage.js';
+import { decryptStudentPassword } from './studentPasswordVault.js';
+import { decodePlanningUnit, prepareLessonPlanningSave, reconcileUnitPlanningForLesson, syncSavedLessonsFromUnit } from './unitSessionPlanningSync.js';
 import {
   getEvidenceStorageContext,
   evidenceRelativePathFromRow,
@@ -29,7 +49,7 @@ import {
   copyEvidenceToMirrorSafely,
 } from './evidenceStorage.js';
 import { checkPurchaseStatus, getAuthProviderInfo, getPurchaseConfig, loginUser, submitPurchase } from './auth.js';
-import { applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, ensureMirrorResourceAvailable, getDriveMirrorEvidenceStorage, getLocalSyncStatus, getResourceDeliveryStatus, getSyncStatus, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, pullCloudArtifact, pullFromCloud, pushToCloud, requestContinuousMirrorSync, resolveCloudConflict, saveFrontendStateSnapshot, startContinuousMirrorSync, updateSyncConfig } from './sync.js';
+import { listResourceConflicts, getResourceConflictSnapshot, resolveResourceConflict, bootstrapPortableState, applyCloudArtifact, clearCloudVersionHistory, discardPendingLocalBackup, ensureMirrorResourceAvailable, getDriveMirrorEvidenceStorage, getInternetConnectivity, getLocalSyncStatus, getResourceDeliveryStatus, getSyncStatus, isContinuousMirrorSyncBusy, markPendingLocalBackup, mergeAttendanceFromCloudArtifact, mergeStudentsFromCloudArtifact, openGoogleDriveDesktop, pullCloudArtifact, pullFromCloud, pushToCloud, requestContinuousMirrorSync, resolveCloudConflict, saveFrontendStateSnapshot, startContinuousMirrorSync, updateSyncConfig } from './sync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,6 +62,59 @@ let studentHttpServer = null;
 let evidenceReconciliationTimer = null;
 let stopContinuousSync = null;
 let serverShutdownPromise = null;
+let accessExtensionService = null;
+let studentAgentService = null;
+let studentAgentPruneTimer = null;
+let studentDiscovery = null;
+let evidenceRecoveryCache = null;
+let evidenceRecoveryCacheAt = 0;
+let evidenceRecoveryStatusWorker = null;
+const EVIDENCE_RECOVERY_CACHE_MS = 60_000;
+const studentAvatarThumbnailCache = new Map();
+const STUDENT_AVATAR_CACHE_LIMIT = 128;
+
+let sessionIndexCache = null;
+let sessionIndexCacheSignature = '';
+const getSessionIndexSignature = () => {
+  const state = db.prepare(`
+    SELECT COUNT(*) AS total, COALESCE(MAX(updated_at), '') AS latest, COALESCE(SUM(id), 0) AS id_sum
+    FROM sesiones
+  `).get();
+  return `${Number(state?.total || 0)}|${String(state?.latest || '')}|${Number(state?.id_sum || 0)}`;
+};
+const buildSessionIndex = () => {
+  const signature = getSessionIndexSignature();
+  if (sessionIndexCache && sessionIndexCacheSignature === signature) return sessionIndexCache;
+  const rows = db.prepare(`
+    SELECT id_sesion, year, area_id, grade, section, unit_number, session_number, session_data, updated_at
+    FROM sesiones
+    ORDER BY updated_at DESC
+  `).all();
+  const dataMap = {};
+  rows.forEach((row) => {
+    let parsed = {};
+    try { parsed = JSON.parse(row.session_data || '{}'); } catch {}
+    dataMap[row.id_sesion] = {
+      id: row.id_sesion,
+      year: row.year,
+      areaId: row.area_id,
+      grade: row.grade,
+      section: row.section,
+      unitNumber: row.unit_number,
+      sessionNumber: row.session_number,
+      title: parsed?.title || 'Sin Titulo',
+      date: parsed?.date || '',
+      updatedAt: row.updated_at || '',
+    };
+  });
+  sessionIndexCache = dataMap;
+  sessionIndexCacheSignature = signature;
+  return sessionIndexCache;
+};
+const invalidateSessionIndex = () => {
+  sessionIndexCache = null;
+  sessionIndexCacheSignature = '';
+};
 
 const GENERAL_DATA_COLUMN_DEFINITIONS = {
   b1_start: 'TEXT',
@@ -362,22 +435,45 @@ const buildRemoteCameraHtml = (sessionId) => `<!DOCTYPE html>
 </body>
 </html>`;
 
+const runEvidenceReconciliationInBackground = () => {
+  // Ambos procesos recorren la carpeta espejo. En unidades virtuales (por
+  // ejemplo Google Drive) ejecutarlos a la vez puede agotar temporalmente los
+  // recursos del proveedor y provocar una terminacion nativa en Windows.
+  if (isContinuousMirrorSyncBusy()) return;
+  void reconcileEvidenceState()
+    .then((result) => {
+      if (!result?.enabled) return;
+      const { exported, imported, updated, pendingFiles } = result;
+      console.log(`[evidencias] Indice portatil listo: ${exported} fichas publicadas, ${imported} recuperadas, ${updated} actualizadas, ${pendingFiles} esperando archivo.`);
+    })
+    .catch((error) => console.error(`[evidencias] No se pudo reconciliar el indice portatil: ${error.message}`));
+};
+
+const startDeferredMaintenance = () => {
+  void initializeRemoteAccess().catch((error) => {
+    console.error(`[acceso-remoto] No se pudo completar la limpieza inicial: ${error.message}`);
+  });
+  // Esta reparacion es de mantenimiento, no parte del arranque critico. Dar tiempo
+  // al frontend y a la primera sincronizacion evita competir por SQLite al abrir.
+  setTimeout(runEvidenceReconciliationInBackground, 45_000).unref?.();
+  evidenceReconciliationTimer = setInterval(runEvidenceReconciliationInBackground, 10 * 60_000);
+  evidenceReconciliationTimer.unref?.();
+  // Deja que la interfaz termine de abrir antes del primer análisis del espejo.
+  stopContinuousSync = startContinuousMirrorSync({ initialDelayMs: 5_000 });
+};
+
 async function startServer() {
-  await initializeRemoteAccess();
   const app = express();
   const PORT = Number(process.env.ARMI_BACKEND_PORT || 3000);
   const STUDENT_PORTAL_PORT = Number(process.env.ARMI_STUDENT_PORTAL_PORT || (PORT + 1));
+  try { accessExtensionService = createAccessExtensionService({ db, runtimeFolder: syncRuntimeRoot }); }
+  catch (error) { console.error(`[extension] No se pudo abrir el registro local; los datos se conservaron: ${error.message}`); }
 
-  const initialEvidenceReconciliation = reconcilePortableEvidenceIndex();
-  if (initialEvidenceReconciliation?.enabled) {
-    const { exported, imported, updated, pendingFiles } = initialEvidenceReconciliation;
-    console.log(`[evidencias] Indice portatil listo: ${exported} fichas publicadas, ${imported} recuperadas, ${updated} actualizadas, ${pendingFiles} esperando archivo.`);
-  }
-  // Las altas y cambios escriben su ficha portátil inmediatamente. Este barrido
-  // es solo una red de seguridad y no necesita recorrer Drive cada 15 segundos.
-  evidenceReconciliationTimer = setInterval(reconcilePortableEvidenceIndex, 60_000);
-  evidenceReconciliationTimer.unref?.();
-  stopContinuousSync = startContinuousMirrorSync();
+try { studentAgentService = createStudentAgentService({db, runtimeFolder:syncRuntimeRoot});
+  if(process.env.ARMI_STUDENT_DISCOVERY!=='0')studentDiscovery=startStudentDiscovery({identity:studentAgentService.identity,studentPort:STUDENT_PORTAL_PORT});
+  studentAgentPruneTimer=setInterval(()=>{try{studentAgentService?.prune();}catch(error){console.error('[agent] No se pudieron retirar archivos temporales:',error.message);}},3600000);
+  studentAgentPruneTimer.unref();
+} catch(error) { console.error('[agent] No se pudo abrir el registro local:',error.message); }
 
 // Inicialización de tabla de plantillas si no existe
 db.prepare(`
@@ -468,7 +564,9 @@ app.use((req, res, next) => {
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
+  // The evidence editor is embedded by the student portal on this same origin.
+  // Keep all other gateway pages protected against framing.
+  res.setHeader('X-Frame-Options', req.path === '/estudiante-assets/evidence-workspace.html' ? 'SAMEORIGIN' : 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   res.setHeader('X-ARMI-Portal', 'student-only');
@@ -480,7 +578,10 @@ app.use((req, res, next) => {
     || pathname.startsWith('/estudiante-assets/')
     || pathname.startsWith('/estudiante-iconos/')
     || pathname.startsWith('/api/student-portal/')
-    || (isRead && pathname.startsWith('/api/evaluacion/evidencias/') && pathname.endsWith('/file'))
+    || pathname.startsWith('/api/access-extension/')
+    || pathname.startsWith('/api/student-agent/')
+    || (isRead && ['/agents/ARMI-Estudiante-Setup.exe', '/agents/ARMI-Estudiante-Setup.sha256', '/agents/LEEME.html', '/extensions/ARMI-Estudiantes.zip'].includes(pathname))
+    || (isRead && /^\/api\/evaluacion\/evidencias\/\d+\/(?:file|preview|thumbnail)$/.test(pathname))
     || (isRead && pathname === '/api/health');
 
   if (allowed) return next();
@@ -492,16 +593,27 @@ app.use(cors((req, callback) => {
   callback(null, isStudentGatewayRequest(req) ? { origin: false } : { origin: '*' });
 }));
 app.use(bodyParser.json({ limit: '100mb' }));
+app.use('/api',createDataEpochFence(db));
 app.use(['/api/student-portal', '/estudiante'], (_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   next();
 });
+// Los adjuntos del chat son locales y privados. Solo se sirven mediante las
+// rutas autenticadas del chat, nunca desde la carpeta publica de uploads.
+app.use('/uploads/student-chat-local', (_req, res) => res.status(404).json({ success: false, message: 'Archivo no disponible en esta ruta.' }));
+app.use('/uploads/user-assets/forum', (_req, res) => res.status(404).json({ success: false, message: 'Los archivos del foro requieren autenticación.' }));
+
 app.use('/uploads', async (req, res, next) => {
   if (!['GET', 'HEAD'].includes(req.method)) return next();
   try {
-    const requestedPath = `uploads/${decodeURIComponent(req.path).replace(/^\/+/, '')}`;
+    const decodedPath = decodeURIComponent(req.path).replace(/\\/g, '/');
+    const normalizedPath = path.posix.normalize(`/${decodedPath}`).replace(/^\/+/, '').toLowerCase();
+    if (normalizedPath === 'user-assets/forum' || normalizedPath.startsWith('user-assets/forum/')) {
+      return res.status(404).json({ success: false, message: 'Los archivos del foro requieren autenticación.' });
+    }
+    const requestedPath = `uploads/${decodedPath.replace(/^\/+/, '')}`;
     const result = await ensureMirrorResourceAvailable(requestedPath);
     if (result.success || result.code === 'unknown-resource') return next();
     if (result.code === 'waiting-for-drive-upload') {
@@ -524,11 +636,36 @@ app.use((req, res, next) => {
   const routineRequest = req.method === 'GET'
     || req.path.endsWith('/ping')
     || req.path.endsWith('/frame')
+    || req.path.startsWith('/api/access-extension/')
+    || req.path.startsWith('/api/student-agent/')
     || req.path === '/api/sync/frontend-state'
     || req.path === '/api/sync/status';
   if (verboseHttp || !routineRequest) {
     console.log(`📩 [${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
   }
+  next();
+});
+
+// Toda escritura curricular solicita una unica pasada incremental diferida.
+// Las solicitudes frecuentes de presencia, chat y fragmentos no despiertan el
+// sincronizador; al completar una evidencia si se programa la copia.
+app.use((req, res, next) => {
+  const method = String(req.method || 'GET').toUpperCase();
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return next();
+  const pathname = String(req.path || '');
+  const routineOnly = pathname.includes('/presence')
+    || pathname.startsWith('/api/access-extension/')
+    || (pathname.startsWith('/api/student-agent/') && pathname !== '/api/student-agent/pair')
+    || pathname.startsWith('/api/admin/access-control/')
+    || pathname.includes('/heartbeat')
+    || pathname.includes('/student-chat/')
+    || pathname.includes('/chat/')
+    || (pathname.includes('/student-portal/uploads/') && !pathname.endsWith('/complete'))
+    || pathname === '/api/sync/frontend-state';
+  if (routineOnly) return next();
+  res.once('finish', () => {
+    if (res.statusCode < 400) requestContinuousMirrorSync({ delayMs: 1_500 });
+  });
   next();
 });
 
@@ -539,8 +676,12 @@ app.use('/api', sesionWordRoutes);
 app.use('/api', studentPortalRoutes);
 app.use('/api', evidenciasRoutes);
 app.use('/api', remoteAccessRoutes);
+app.use('/api/admin/access-control', createAccessControlRouter({ db, teacherPort: PORT, studentPort: STUDENT_PORTAL_PORT, extensionService: accessExtensionService, agentService: studentAgentService }));
+app.use('/api/access-extension', createAccessExtensionRouter(accessExtensionService));
+app.use('/api/student-agent', createStudentAgentRouter(studentAgentService,{studentPort:STUDENT_PORTAL_PORT}));
 app.use('/api', remoteCameraRoutes);
 app.use(remoteCameraPublicRoutes);
+
 
 app.get('/api/auth/provider', (req, res) => {
   try {
@@ -709,6 +850,15 @@ app.post('/api/plantillas-area', (req, res) => {
    SESIONES DE APRENDIZAJE
 ===================================================== */
 
+app.get('/api/sesiones/index', (req, res) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ success: true, data: buildSessionIndex() });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 app.get('/api/sesiones', async (req, res) => {
   const { year, areaId, grade, section, unitNumber, sessionNumber } = req.query;
   try {
@@ -716,16 +866,33 @@ app.get('/api/sesiones', async (req, res) => {
         const id_sesion = `${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`;
         const row = db.prepare('SELECT * FROM sesiones WHERE id_sesion = ?').get(id_sesion);
         if (!row) return res.json({ success: true, data: null });
+        const storedData = JSON.parse(row.session_data || '{}');
+        const currentData = reconcileUnitPlanningForLesson(db, row, storedData);
         const repaired = await ensureSessionResourceVariantLinks({
-          sessionData: JSON.parse(row.session_data || '{}'),
+          sessionData: currentData,
           sessionId: row.id_sesion,
           uploadsRoot: uploadsFolder,
         });
+        // Resource recovery may await disk work. Re-read the lesson and unit so
+        // a concurrent unit save cannot be replaced by this older GET snapshot.
+        const latestRow = db.prepare('SELECT * FROM sesiones WHERE id_sesion=?').get(id_sesion);
+        if (!latestRow) return res.json({ success: true, data: null });
+        const latestData = JSON.parse(latestRow.session_data || '{}');
+        let dataWithResources = latestData;
         if (repaired.changed) {
-          db.prepare('UPDATE sesiones SET session_data = ?, updated_at = CURRENT_TIMESTAMP WHERE id_sesion = ?')
-            .run(JSON.stringify(repaired.sessionData), row.id_sesion);
+          const learningResources = { ...latestData.learningResources };
+          for (const [key, resource] of Object.entries(repaired.sessionData.learningResources || {})) {
+            if (JSON.stringify(latestData.learningResources?.[key]) === JSON.stringify(currentData.learningResources?.[key])) learningResources[key] = resource;
+          }
+          dataWithResources = { ...latestData, learningResources };
         }
-        return res.json({ success: true, data: repaired.sessionData });
+        const resolvedData = reconcileUnitPlanningForLesson(db, latestRow, dataWithResources);
+        if (JSON.stringify(latestData) !== JSON.stringify(resolvedData)) {
+          db.prepare('UPDATE sesiones SET session_data = ?, updated_at = CURRENT_TIMESTAMP WHERE id_sesion = ?')
+            .run(JSON.stringify(resolvedData), row.id_sesion);
+          invalidateSessionIndex();
+        }
+        return res.json({ success: true, data: resolvedData });
     }
     
     // Si no hay filtros específicos, devolver lista para el gestor
@@ -756,10 +923,10 @@ app.post('/api/sesiones', (req, res) => {
   const { year, areaId, grade, section, unitNumber, sessionNumber, date, sessionData } = req.body;
   try {
     const id_sesion = `${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`;
-    const normalizedSessionData = {
+    const normalizedSessionData = prepareLessonPlanningSave(db, { year, areaId, grade, section, unitNumber, sessionNumber }, {
       ...(sessionData || {}),
       date: typeof date === 'string' ? date : (sessionData?.date || '')
-    };
+    });
     const existing = db.prepare('SELECT id FROM sesiones WHERE id_sesion = ? LIMIT 1').get(id_sesion);
 
     if (existing?.id) {
@@ -784,15 +951,53 @@ app.post('/api/sesiones', (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id_sesion, year, areaId, grade, section, unitNumber, sessionNumber, JSON.stringify(normalizedSessionData));
     }
+    invalidateSessionIndex();
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }
 });
 
+// Save the resource link as soon as its file is ready, without replacing other
+// saved lesson fields with an older editor snapshot.
+app.post('/api/sesiones/recurso', (req, res) => {
+  const { year, areaId, grade, section, unitNumber, sessionNumber, key, resource, sessionData } = req.body;
+  if (![year, areaId, grade, section, unitNumber, sessionNumber].every(v => typeof v === 'string' && v.trim()) ||
+      !['instructive', 'annex1', 'annex2'].includes(key) || !resource || typeof resource !== 'object' || Array.isArray(resource)) {
+    return res.status(400).json({ success: false, message: 'Faltan los datos de la sesion o del recurso.' });
+  }
+  try {
+    const id = `${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`;
+    db.transaction(() => {
+      const existing = db.prepare('SELECT id, session_data FROM sesiones WHERE id_sesion = ? LIMIT 1').get(id);
+      const data = existing ? JSON.parse(existing.session_data) : { ...(sessionData || {}) };
+      data.learningResources = { ...data.learningResources, [key]: resource };
+      if (existing) {
+        db.prepare('UPDATE sesiones SET session_data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(JSON.stringify(data), existing.id);
+      } else {
+        db.prepare('INSERT INTO sesiones (id_sesion,year,area_id,grade,section,unit_number,session_number,session_data) VALUES (?,?,?,?,?,?,?,?)')
+          .run(id, year, areaId, grade, section, unitNumber, sessionNumber, JSON.stringify(data));
+      }
+    })();
+    invalidateSessionIndex();
+    requestContinuousMirrorSync({ delayMs: 500 });
+    res.json({ success: true });
+  } catch (error) { res.status(500).json({ success: false, message: error.message }); }
+});
+
+app.post('/api/sesiones/actividad-html', (req, res) => {
+  try {
+    const data = importSessionActivity(db, req.body);
+    invalidateSessionIndex();
+    requestContinuousMirrorSync({ delayMs: 500 });
+    res.json({ success: true, data });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
+});
+
 app.delete('/api/sesiones/:id', (req, res) => {
     try {
         db.prepare('DELETE FROM sesiones WHERE id_sesion = ?').run(req.params.id);
+        invalidateSessionIndex();
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -809,7 +1014,7 @@ app.get('/api/unidades-didacticas', (req, res) => {
     if (!year && !areaId && !grade && !section && !unitNumber) {
       const rows = db.prepare(`
         SELECT
-          u.*,
+          u.id_unidad, u.year, u.area_id, u.grade, u.section, u.unit_number, u.title,
           COALESCE(
             pa.area_curricular,
             a.area,
@@ -817,7 +1022,7 @@ app.get('/api/unidades-didacticas', (req, res) => {
           ) AS area_name
         FROM unidades_didacticas u
         LEFT JOIN programacion_anual pa
-          ON pa.area_id = u.area_id
+          ON pa.id_programa = u.year || '-' || u.area_id || '-' || u.grade || '-' || u.section
           AND pa.grade = u.grade
           AND pa.section = u.section
         LEFT JOIN db_areas a
@@ -871,6 +1076,9 @@ app.post('/api/unidades-didacticas', (req, res) => {
   const d = req.body;
   try {
     const id_unidad = `${d.year}-${d.areaId}-${d.grade}-${d.section}-U${d.unitNumber}`;
+    const previousUnit = decodePlanningUnit(db.prepare('SELECT * FROM unidades_didacticas WHERE id_unidad=?').get(id_unidad));
+    let updatedLessons = 0;
+    db.transaction(() => {
 
     db.prepare(`
       INSERT INTO unidades_didacticas (
@@ -910,8 +1118,11 @@ app.post('/api/unidades-didacticas', (req, res) => {
       JSON.stringify(d.bibliografia || {}),
       d.evaluacion || ''
     );
-
-    res.json({ success: true });
+    updatedLessons = syncSavedLessonsFromUnit(db, { ...d, id_unidad }, previousUnit);
+    })();
+    if (updatedLessons) invalidateSessionIndex();
+    requestContinuousMirrorSync({ delayMs: 500 });
+    res.json({ success: true, data: { updatedLessons } });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }
@@ -1189,49 +1400,40 @@ const ensureEvidenceMirrorRoot = (context = getEvidenceStorageContext()) => {
   }
 };
 
-const getEvidenceRecoveryStatus = () => {
-  const context = getEvidenceStorageContext();
-  const rows = db.prepare('SELECT * FROM evaluacion_evidencias ORDER BY id').all();
-  let sharedFiles = 0;
-  let recoverableHere = 0;
-  let missingFiles = 0;
-  let sharedBytes = 0;
-  let recoverableBytes = 0;
-  const missingItems = [];
-  rows.forEach((row) => {
-    const relative = evidenceRelativePathFromRow(row);
-    const canonical = context.automaticMirror
-      ? resolveEvidenceCandidate(context.effectivePath, relative)
-      : '';
-    if (evidenceFileMatchesRecord(row, canonical)) {
-      sharedFiles += 1;
-      sharedBytes += Number(row.file_size || fs.statSync(canonical).size || 0);
-      return;
-    }
-    const resolved = resolveEvidenceFilePathDetailed(row);
-    if (context.automaticMirror && resolved.path && resolved.source !== 'drive-mirror') {
-      recoverableHere += 1;
-      recoverableBytes += Number(row.file_size || fs.statSync(resolved.path).size || 0);
-      return;
-    }
-    missingFiles += 1;
-    if (missingItems.length < 30) {
-      missingItems.push({ id: row.id, fileName: row.file_name || '', studentId: row.student_id || '', relativePath: relative });
-    }
-  });
-  return {
-    automaticMirror: context.automaticMirror,
-    effectivePath: context.effectivePath,
-    legacyConfiguredPath: context.legacyConfiguredPath,
-    totalRecords: rows.length,
-    sharedFiles,
-    sharedBytes,
-    recoverableHere,
-    recoverableBytes,
-    missingFiles,
-    missingItems,
-  };
+const refreshEvidenceRecoveryStatusInBackground = () => {
+  if (evidenceRecoveryStatusWorker) return;
+  if (evidenceRecoveryCache && Date.now() - evidenceRecoveryCacheAt < EVIDENCE_RECOVERY_CACHE_MS) return;
+
+  try {
+    const worker = new Worker(new URL('./workers/evidenceRecoveryStatus.worker.js', import.meta.url));
+    evidenceRecoveryStatusWorker = worker;
+    worker.once('message', (message) => {
+      if (message?.success && message.data) {
+        evidenceRecoveryCache = message.data;
+        evidenceRecoveryCacheAt = Date.now();
+      } else if (message?.error) {
+        console.warn(`[evidencias] No se pudo actualizar el estado de recuperacion en segundo plano: ${message.error}`);
+      }
+    });
+    worker.once('error', (error) => {
+      console.warn(`[evidencias] Fallo el calculo de recuperacion en segundo plano: ${error.message}`);
+    });
+    worker.once('exit', () => {
+      if (evidenceRecoveryStatusWorker === worker) evidenceRecoveryStatusWorker = null;
+    });
+  } catch (error) {
+    console.warn(`[evidencias] No se pudo iniciar el calculo de recuperacion: ${error.message}`);
+  }
 };
+
+const getEvidenceRecoveryStatus = () => calculateEvidenceRecoveryStatus({
+  rows: db.prepare('SELECT * FROM evaluacion_evidencias ORDER BY id').all(),
+  context: getEvidenceStorageContext(),
+  relativePath: evidenceRelativePathFromRow,
+  matches: evidenceFileMatchesRecord,
+  resolveCandidate: resolveEvidenceCandidate,
+  resolveFile: resolveEvidenceFilePathDetailed,
+});
 
 const getEvidenceRecoveryStatusSafely = () => {
   try {
@@ -1267,9 +1469,10 @@ app.get('/api/evidence-storage/config', (req, res) => {
         automaticMirror: context.automaticMirror,
         exists: fs.existsSync(context.effectivePath),
         portalUrls: getStudentPortalUrls(),
-        recovery: getEvidenceRecoveryStatusSafely(),
+        recovery: evidenceRecoveryCache,
       }
     });
+    setImmediate(refreshEvidenceRecoveryStatusInBackground);
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -1309,6 +1512,18 @@ app.post('/api/evidence-storage/config', (req, res) => {
   }
 });
 
+const folderEvidenceRecovery = createEvidenceFolderRecovery({db,getContext:getEvidenceStorageContext,relativePath:evidenceRelativePathFromRow,matches:evidenceFileMatchesRecord,copy:copyEvidenceToMirrorSafely});
+app.post('/api/evidence-storage/analyze-folder', requireLocalTeacherRequest, (req,res) => {
+  try { res.json({success:true,data:folderEvidenceRecovery.analyze(String(req.body.folder || '').trim())}); }
+  catch(error) { res.status(400).json({success:false,message:error.message}); }
+});
+app.post('/api/evidence-storage/recover-folder', requireLocalTeacherRequest, (req,res) => {
+  try {
+    const result = folderEvidenceRecovery.recover(req.body.token);
+    evidenceRecoveryCache = getEvidenceRecoveryStatusSafely();
+    res.json({success:true,message:`Se copiaron ${result.files} archivos y se enlazaron ${result.records} registros. Los originales se conservaron.${result.failures.length ? ' Algunos archivos requieren un nuevo analisis.' : ''}`,data:{...result,recovery:evidenceRecoveryCache}});
+  } catch(error) { res.status(400).json({success:false,message:error.message}); }
+});
 app.post('/api/evidence-storage/recover-to-mirror', requireLocalTeacherRequest, (req, res) => {
   try {
     const context = getEvidenceStorageContext();
@@ -1327,8 +1542,10 @@ app.post('/api/evidence-storage/recover-to-mirror', requireLocalTeacherRequest, 
     let alreadyShared = 0;
     const failures = [];
 
-    rows.forEach((row) => {
-      const relative = evidenceRelativePathFromRow(row);
+    const inventory = buildEvidenceRecoveryInventory({ rows, relativePath: evidenceRelativePathFromRow, deletedKeys: listEvidenceTombstoneKeys(context.effectivePath) });
+    inventory.groups.forEach((group) => {
+      const row = group.rows[0];
+      const relative = group.relativePath;
       if (!relative) {
         failures.push({ id: row.id, fileName: row.file_name || '', reason: 'El registro no contiene una ruta relativa recuperable.' });
         return;
@@ -1341,9 +1558,8 @@ app.post('/api/evidence-storage/recover-to-mirror', requireLocalTeacherRequest, 
         return;
       }
       if (fs.existsSync(destinationPath)) {
-        const expectedSize = Number(row.file_size || 0);
-        if (!expectedSize || Number(fs.statSync(destinationPath).size) === expectedSize) {
-          updatePortableReference.run(relative, Number(fs.statSync(destinationPath).size), row.id);
+        if (group.rows.every(record => evidenceFileMatchesRecord(record, destinationPath))) {
+          db.transaction(() => { for (const record of group.rows) updatePortableReference.run(relative, Number(fs.statSync(destinationPath).size), record.id); })();
           alreadyShared += 1;
           return;
         }
@@ -1352,8 +1568,9 @@ app.post('/api/evidence-storage/recover-to-mirror', requireLocalTeacherRequest, 
         portableRelative = path.join(path.dirname(relative), `${baseName}-recuperado-${row.id}${extension}`);
         destinationPath = path.resolve(context.effectivePath, portableRelative);
       }
-      const source = resolveEvidenceFilePathDetailed(row);
-      if (!source.path || source.source === 'drive-mirror') {
+      const source = group.rows.map(record => resolveEvidenceFilePathDetailed(record, context))
+        .find(candidate => candidate.path && group.rows.every(record => evidenceFileMatchesRecord(record, candidate.path)));
+      if (!source?.path || source.source === 'drive-mirror') {
         failures.push({
           id: row.id,
           fileName: row.file_name || '',
@@ -1364,7 +1581,7 @@ app.post('/api/evidence-storage/recover-to-mirror', requireLocalTeacherRequest, 
       try {
         copyEvidenceToMirrorSafely(source.path, destinationPath);
         const copiedSize = Number(fs.statSync(destinationPath).size);
-        updatePortableReference.run(portableRelative, copiedSize, row.id);
+        db.transaction(() => { for (const record of group.rows) updatePortableReference.run(portableRelative, copiedSize, record.id); })();
         recoveredFiles += 1;
         recoveredBytes += copiedSize;
       } catch (error) {
@@ -1425,9 +1642,22 @@ app.get('/api/evidence-storage/pick-folder', (req, res) => {
 
 
 
+app.get('/api/sync/resource-conflicts', requireLocalTeacherRequest, (_req, res) => {
+  try { res.json({ success: true, data: listResourceConflicts() }); }
+  catch (error) { res.status(500).json({ success: false, message: error.message }); }
+});
+app.get('/api/sync/resource-conflicts/:id/:version', requireLocalTeacherRequest, (req, res) => {
+  try { const item = getResourceConflictSnapshot(req.params.id, req.params.version); res.download(item.file, item.name); }
+  catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+app.post('/api/sync/resource-conflicts/:id/resolve', requireLocalTeacherRequest, async (req, res) => {
+  try { res.json(await resolveResourceConflict(req.params.id, req.body?.version)); }
+  catch (error) { res.status(409).json({ success: false, message: error.message }); }
+});
+
 app.get('/api/sync/status/local', async (req, res) => {
   try {
-    res.json(await getLocalSyncStatus());
+    res.json(await getLocalSyncStatus({ lightweight: req.query.lightweight === '1' }));
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -1507,15 +1737,20 @@ app.post('/api/estudiantes', (req, res) => {
       sexo: s.sexo,
       edad,
     };
+    db.transaction(()=>{
     if (s.id && !String(s.id).startsWith('import') && !String(s.id).startsWith('new-')) {
       const cols = Object.keys(mapped);
       const setClause = cols.map(c => `${c} = ?`).join(', ');
-      db.prepare(`UPDATE db_estudiantes SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...Object.values(mapped), s.id);
+      const result=db.prepare(`UPDATE db_estudiantes SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...Object.values(mapped), s.id);
+      if(!result.changes) throw new Error('El registro cambio en otra vista. Actualiza la lista antes de guardar.');
     } else {
       const cols = Object.keys(mapped).join(', ');
       const placeholders = Object.keys(mapped).map(() => '?').join(', ');
       db.prepare(`INSERT INTO db_estudiantes (${cols}) VALUES (${placeholders})`).run(...Object.values(mapped));
     }
+    const document=String(mapped.dni || '').trim();
+    if(/^\d{8}$/.test(document) && !/^(\d)\1{7}$/.test(document)) db.prepare('DELETE FROM student_deletion_tombstones WHERE dni=?').run(document);
+    })();
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -1528,7 +1763,7 @@ app.post('/api/estudiantes/:id/reset-portal-password', (req, res) => {
     if (!dni) return res.status(400).json({ success: false, message: 'El estudiante necesita un DNI antes de restablecer su clave.' });
     db.prepare(`
       UPDATE db_estudiantes
-      SET password_hash = NULL, password_changed_at = NULL, updated_at = CURRENT_TIMESTAMP
+      SET password_hash = NULL, password_recovery_cipher = NULL, password_changed_at = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(student.id);
     deleteStudentPortalSessions(student.id);
@@ -1575,8 +1810,52 @@ app.post('/api/estudiantes/:id/open-test-portal', (req, res) => {
 });
 
 app.delete('/api/estudiantes/:id', (req, res) => {
-  try { db.prepare('DELETE FROM db_estudiantes WHERE id = ?').run(req.params.id); res.json({ success: true }); } 
+  try {
+    const student = db.prepare('SELECT id, dni, estudiantes FROM db_estudiantes WHERE id = ?').get(req.params.id);
+    if (!student) return res.status(404).json({ success: false, message: 'El estudiante ya no existe.' });
+    const removeStudent = db.transaction(() => {
+      const identity=createSyncReferenceIdentity(db).catalog().students[String(student.id)];
+      if(!identity?.token) throw new Error('No se pudo verificar la identidad del estudiante para eliminarlo.');
+      db.prepare(`
+        INSERT INTO student_deletion_tombstones (student_id, dni, student_name, deleted_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(student_id) DO UPDATE SET
+          dni = excluded.dni,
+          student_name = excluded.student_name,
+          deleted_at = CURRENT_TIMESTAMP
+      `).run(identity.token, String(student.dni || '').trim(), String(student.estudiantes || '').trim());
+      db.prepare('DELETE FROM db_estudiantes WHERE id = ?').run(student.id);
+    });
+    removeStudent();
+    deleteStudentPortalSessions(student.id);
+    res.json({ success: true });
+  }
   catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+app.get('/api/estudiantes/:id/portal-password', (req, res) => {
+  try {
+    const remoteAddress = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+    if (remoteAddress !== '127.0.0.1' && remoteAddress !== '::1') {
+      return res.status(403).json({ success: false, message: 'La clave solo puede consultarse desde la PC del docente.' });
+    }
+    const student = db.prepare('SELECT id, dni, password_hash, password_recovery_cipher FROM db_estudiantes WHERE id = ?').get(req.params.id);
+    if (!student) return res.status(404).json({ success: false, message: 'No se encontró el estudiante.' });
+    if (!String(student.password_hash || '').trim()) {
+      return res.json({ success: true, data: { password: String(student.dni || ''), isInitialPassword: true } });
+    }
+    const password = decryptStudentPassword(student.password_recovery_cipher);
+    if (!password) {
+      return res.status(409).json({
+        success: false,
+        code: 'PASSWORD_NOT_RECOVERABLE',
+        message: 'Esta clave fue creada antes de habilitar su consulta. Restablécela una vez para poder visualizar la nueva clave.',
+      });
+    }
+    return res.json({ success: true, data: { password, isInitialPassword: false } });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
 });
 
 app.get('/api/egresados', (req, res) => {
@@ -1654,6 +1933,45 @@ app.post('/api/estudiantes/egresar', (req, res) => {
     res.json({ success: true, moved: rows.length });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.get('/api/asistencia/rostros/:studentId/avatar', async (req, res) => {
+  try {
+    const studentId = String(req.params.studentId || '').trim();
+    if (!studentId) return res.status(400).end();
+    const face = db.prepare(`
+      SELECT image_data, updated_at
+      FROM asistencia_rostros
+      WHERE student_id = ? AND COALESCE(image_data, '') <> ''
+      ORDER BY CASE WHEN source = 'student_profile_front' THEN 0 ELSE 1 END, updated_at DESC
+      LIMIT 1
+    `).get(studentId);
+    if (!face?.image_data) return res.status(404).end();
+
+    const etag = `"student-avatar-${crypto.createHash('sha1').update(`${studentId}:${face.updated_at || ''}:${crypto.createHash('sha1').update(face.image_data).digest('hex')}`).digest('hex').slice(0, 16)}"`;
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    if (req.headers['if-none-match'] === etag) return res.status(304).end();
+
+    const cacheKey = `${studentId}:${face.updated_at || ''}:${crypto.createHash('sha1').update(face.image_data).digest('hex')}`;
+    let thumbnail = studentAvatarThumbnailCache.get(cacheKey);
+    if (!thumbnail) {
+      const match = String(face.image_data).match(/^data:image\/[a-z0-9.+-]+;base64,(.+)$/i);
+      if (!match) return res.status(404).end();
+      thumbnail = await sharp(Buffer.from(match[1], 'base64'), { animated: false })
+        .rotate()
+        .resize(96, 96, { fit: 'cover', position: 'attention', withoutEnlargement: true })
+        .webp({ quality: 72, effort: 2 })
+        .toBuffer();
+      studentAvatarThumbnailCache.set(cacheKey, thumbnail);
+      if (studentAvatarThumbnailCache.size > STUDENT_AVATAR_CACHE_LIMIT) {
+        studentAvatarThumbnailCache.delete(studentAvatarThumbnailCache.keys().next().value);
+      }
+    }
+    res.type('image/webp').send(thumbnail);
+  } catch {
+    return res.status(404).end();
   }
 });
 
@@ -2059,7 +2377,7 @@ app.get('/api/evaluacion/registros', (req, res) => {
     if (sessionId) { sql += ' AND session_id = ?'; params.push(sessionId); }
     if (unitId) { sql += ' AND unit_id = ?'; params.push(unitId); }
     const rows = db.prepare(sql).all(...params);
-    res.json({ success: true, data: rows });
+    res.json({ success: true, data: teacherGradeRecords(rows) });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
@@ -2080,6 +2398,10 @@ app.post('/api/evaluacion/registros', (req, res) => {
           throw new Error(`La nota vigesimal debe estar entre 0 y 20 (estudiante ${r.student_id}, criterio ${r.criteria_id}).`);
         }
 
+        const integrityIssue = hybridGradeIssue(r, gradingMode);
+        if (integrityIssue) {
+          throw new Error(`${integrityIssue} (estudiante ${r.student_id}, criterio ${r.criteria_id}).`);
+        }
         del.run(r.student_id, r.session_id, r.criteria_id, gradingMode);
         const hasLevel = String(r.level || '').trim().length > 0;
         const hasObservation = String(r.observation || '').trim().length > 0;
@@ -2205,6 +2527,7 @@ app.post('/api/evaluacion/conclusiones', (req, res) => {
   const { records } = req.body || {};
   try {
     const list = Array.isArray(records) ? records : [];
+    if (list.some(item => String(item?.conclusionText || '').trim().length > 250)) return res.status(400).json({ success: false, message: 'Las conclusiones no deben exceder 250 caracteres, incluyendo espacios.' });
     const transaction = db.transaction((items) => {
       const del = db.prepare(`
         DELETE FROM evaluacion_conclusiones
@@ -2287,11 +2610,12 @@ app.post('/api/evaluacion/configuracion', (req, res) => {
 app.get('/api/programacion-anual', (req, res) => {
     try {
         const programs = db.prepare('SELECT * FROM programacion_anual').all();
+        const resources = new Map(db.prepare('SELECT * FROM programacion_recursos').all().map(row => [row.id_programa, row]));
         const dataMap = {};
         for (const p of programs) {
             const didacticUnits = {};
             for (let i = 1; i <= 8; i++) didacticUnits[i - 1] = { title: p[`titulo_u${i}`] || '', situation: p[`st_cont_u${i}`] || '' };
-            const rec = db.prepare('SELECT * FROM programacion_recursos WHERE id_programa = ?').get(p.id_programa) || {};
+            const rec = resources.get(p.id_programa) || {};
             dataMap[p.id_programa] = { 
                 id: p.id_programa, 
                 nroPa: p.nro_pa || '', 
@@ -2340,9 +2664,13 @@ app.get('/api/sync/status', async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   }
 });
+app.get('/api/sync/connectivity', async (req, res) => {
+  try { res.json({ success: true, data: await getInternetConnectivity({ force: req.query.fresh === '1' }) }); }
+  catch (error) { res.status(500).json({ success: false, message: error.message }); }
+});
 app.post('/api/sync/frontend-state', (req, res) => {
   try {
-    const snapshot = saveFrontendStateSnapshot(req.body?.state || {});
+    const snapshot = saveFrontendStateSnapshot(req.body?.state || {}, req.body?.changedKeys || []);
     res.json({ success: true, data: snapshot });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
@@ -2381,6 +2709,27 @@ app.get('/api/sync/pick-folder', (req, res) => {
     if (!selectedPath) return res.json({ success: false, cancelled: true });
     return res.json({ success: true, path: selectedPath });
   });
+});
+const portableBootstrapJobs = createPortableBootstrapJobs(bootstrapPortableState);
+app.get('/api/sync/bootstrap/:id', (req, res) => {
+  const job = portableBootstrapJobs.get(req.params.id);
+  if (!job) return res.status(404).json({ success: false, code: 'BOOTSTRAP_JOB_NOT_FOUND' });
+  res.json({ success: true, data: { job } });
+});
+app.post('/api/sync/bootstrap', async (req, res) => {
+  try {
+    if (req.body?.background === true) {
+      return res.status(202).json({ success: true, data: { job: portableBootstrapJobs.start(req.body?.state || {}, req.body?.requestId) } });
+    }
+    res.json(await bootstrapPortableState(req.body?.state || {}));
+  }
+  catch (error) { res.status(500).json({ success: false, message: error.message }); }
+});
+app.post('/api/sync/drive/open', async (req, res) => {
+  const remote = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (remote !== '127.0.0.1' && remote !== '::1') return res.status(403).json({ success: false, message: 'Abre Drive desde esta PC.' });
+  try { res.json(await openGoogleDriveDesktop()); }
+  catch (error) { res.status(500).json({ success: false, message: error.message }); }
 });
 app.post('/api/sync/push', async (req, res) => {
   try {
@@ -2538,6 +2887,9 @@ app.get('/api/competencias', (req, res) => { const { grado, area } = req.query; 
 app.get('/api/estandares', (req, res) => { const { grado, area } = req.query; try { let rows = db.prepare('SELECT * FROM db_estandares').all(); if (grado) rows = rows.filter(r => superNormalize(r.grado || '').includes(superNormalize(grado))); if (area) rows = rows.filter(r => superNormalize(r.area || '').includes(superNormalize(area)) || superNormalize(r.competencias || '').includes(superNormalize(area))); res.json({ success: true, data: rows }); } catch (e) { res.status(500).json({ success: false }); } });
 app.get('/api/areas', (req, res) => { try { res.json({ success: true, data: db.prepare('SELECT * FROM db_areas').all() }); } catch (e) { res.status(500).json({ success: false }); } });
 
+// Keep removed or unknown API endpoints out of the frontend development proxy.
+app.use('/api', (_req, res) => res.status(404).json({ success: false, message: 'Ruta no disponible.' }));
+
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
   console.error(`Error en ${req.method} ${req.path}:`, error);
@@ -2563,8 +2915,12 @@ if (!isProduction && useEmbeddedVite) {
   app.use(vite.middlewares);
 } else if (isProduction) {
   // Serve static files in production
-  app.use(express.static(path.join(__dirname, '../dist')));
+  app.use('/assets', express.static(path.join(__dirname, '../dist/assets'), { immutable: true, maxAge: '1y', fallthrough: false }));
+  app.use(express.static(path.join(__dirname, '../dist'), {
+    setHeaders: (res, filename) => { if (filename.endsWith('.html')) res.setHeader('Cache-Control', 'no-store'); },
+  }));
   app.use((req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     res.sendFile(path.join(__dirname, '../dist/index.html'));
   });
 }
@@ -2586,6 +2942,7 @@ if (STUDENT_PORTAL_PORT !== PORT) {
     console.error(`No se pudo iniciar el portal estudiantil protegido en el puerto ${STUDENT_PORTAL_PORT}:`, error.message);
   });
 }
+startDeferredMaintenance();
 }
 
 const closeHttpServer = (server) => new Promise((resolve) => {
@@ -2601,17 +2958,37 @@ const closeHttpServer = (server) => new Promise((resolve) => {
 const shutdownServer = async () => {
   if (serverShutdownPromise) return serverShutdownPromise;
   serverShutdownPromise = (async () => {
-    if (evidenceReconciliationTimer) clearInterval(evidenceReconciliationTimer);
-    evidenceReconciliationTimer = null;
-    stopContinuousSync?.();
-    stopContinuousSync = null;
-    await shutdownRemoteAccess();
-    await Promise.all([
+    // Release listening sockets before waiting for filesystem workers. A Drive
+    // operation stuck in the OS must not retain the student and teacher ports.
+    const serversClosed = Promise.all([
       closeHttpServer(studentHttpServer),
       closeHttpServer(primaryHttpServer),
     ]);
     studentHttpServer = null;
     primaryHttpServer = null;
+    clearInterval(studentAgentPruneTimer);
+    studentDiscovery?.close();
+    studentAgentService?.close();
+    studentAgentService = null;
+    accessExtensionService?.close();
+    accessExtensionService = null;
+    if (evidenceReconciliationTimer) clearInterval(evidenceReconciliationTimer);
+    evidenceReconciliationTimer = null;
+    const reconciliationStopped = shutdownEvidenceReconciliation();
+    let recoveryWorkerStopped = Promise.resolve();
+    if (evidenceRecoveryStatusWorker) {
+      const worker = evidenceRecoveryStatusWorker;
+      evidenceRecoveryStatusWorker = null;
+      recoveryWorkerStopped = worker.terminate().catch(() => {});
+    }
+    stopContinuousSync?.();
+    stopContinuousSync = null;
+    await Promise.all([
+      serversClosed,
+      reconciliationStopped,
+      recoveryWorkerStopped,
+      shutdownRemoteAccess(),
+    ]);
   })();
   return serverShutdownPromise;
 };
@@ -2626,4 +3003,3 @@ process.once('SIGINT', handleProcessShutdown);
 startServer();
 
 export { shutdownRemoteAccess, shutdownServer };
-

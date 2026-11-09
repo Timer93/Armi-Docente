@@ -1,4 +1,5 @@
 import type { SessionLearningResource, SessionResourceKey } from '../SessionLearningResources';
+import { buildAnnex2CurricularContract, type SessionResourceCurricularRow } from './sessionResourceCurriculum';
 
 export type SessionResourceAiContext = {
     area: string;
@@ -18,6 +19,7 @@ export type SessionResourceAiContext = {
     criterion: string;
     evidence: string;
     instrument: string;
+    curricularRows?: SessionResourceCurricularRow[];
     learningSequence: {
         priorKnowledge: string;
         cognitiveConflict: string;
@@ -103,7 +105,7 @@ metadata.tools y metadata.deliverable son obligatorios.
                             ? `
 ANEXO 2 · RETO O PRODUCTO DIGITAL:
 Crea un reto auténtico que permita elaborar la evidencia de la sesión.
-Incluye situación, usuario o necesidad, consigna, herramientas, proceso, decisiones, producto entregable, criterios y autoevaluación.
+Incluye situación, consigna, herramientas, producto entregable (esto es lo que debe ocupar mayor espacio), criterio de evaluación de la sesión y autoevaluación.
 metadata.tools y metadata.deliverable son obligatorios.
 `
                             : `
@@ -136,6 +138,7 @@ REGLAS:
 10. No uses Markdown, enlaces inventados, logos ni marcas.
 
 DATOS FIJOS:
+${key === 'annex2' ? buildAnnex2CurricularContract(context) : ''}
 - Sesión: ${context.session}/${context.sessionTotal}
 - Título: ${context.title}
 - Área: ${context.area}

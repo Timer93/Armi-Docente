@@ -1,0 +1,62 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { createRequire } from 'node:module';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { parseHTML } from 'linkedom';
+
+const { window } = parseHTML('<html><body><div id="root"></div></body></html>');
+const storage = new Map();
+window.localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) };
+Object.assign(globalThis, { window, document: window.document, localStorage: window.localStorage, IS_REACT_ACT_ENVIRONMENT: true });
+const key = 'armi_students_list_selection_v1';
+storage.set(key, JSON.stringify({ nivel: 'Primaria', grade: '2do', section: 'B', sexo: 'F', search: 'Example', filter_estado: 'A' }));
+storage.set('armi_assignments', JSON.stringify([{ grade: '1ro', section: 'A' }, { grade: '2do', section: 'B' }]));
+globalThis.__photoCalls = [];
+globalThis.__studentWrites = [];
+const result = await build({ entryPoints: ['components/StudentsView.tsx'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false, plugins: [{ name: 'mock-services', setup(build) {
+  build.onResolve({ filter: /apiService$|studentPhotoViewer$|AttendanceSection$/ }, args => ({ path: args.path, namespace: 'mock' }));
+  build.onLoad({ filter: /.*/, namespace: 'mock' }, args => ({ contents: args.path.endsWith('apiService') ? `
+    export const getDatosGenerales=async()=>({level:'Secundaria'});
+    export const getEstudiantes=async()=>[{id:7,name:'Example Student',grade:'2do',section:'B',estado:'A',sexo:'F'}];
+    export const getEgresados=async()=>[];
+    export const saveEstudiante=(...args)=>globalThis.__studentWrites.push(args);
+    export const updateModuleStatus=()=>{},deleteEstudiante=()=>{},egresarEstudiantes=()=>{},resetStudentPortalPassword=()=>{},getStudentPortalPassword=()=>{},openStudentPortalTestSession=()=>{};
+  ` : args.path.endsWith('studentPhotoViewer') ? 'export const openStudentPhoto=(...args)=>globalThis.__photoCalls.push(args);' : 'export const AttendanceSection=()=>null;' }));
+} }] });
+const compiled = { exports: {} };
+new Function('require', 'module', 'exports', result.outputFiles[0].text)(createRequire(import.meta.url), compiled, compiled.exports);
+let root;
+async function mount() {
+  root = createRoot(document.getElementById('root'));
+  await act(async () => { root.render(React.createElement(compiled.exports.StudentsView, { activeSection: 'lista', onSuccess() {} })); });
+}
+await mount();
+let saved = JSON.parse(storage.get(key));
+assert.equal(saved.nivel, 'Primaria', 'Async defaults must respect restored selection');
+assert.equal(saved.grade, '2do'); assert.equal(saved.section, 'B'); assert.equal(saved.search, 'Example');
+assert.equal(saved.filter_estado, 'A');
+const photo = document.querySelector('img[data-student-photo-id="7"]');
+assert.ok(photo); assert.equal(photo.getAttribute('src'), '/api/student-forum/teacher/profiles/7');
+await act(async () => { photo.parentElement.dispatchEvent(new window.Event('click', { bubbles: true })); });
+assert.deepEqual(globalThis.__photoCalls, [[7, 'Example Student']]);
+await act(async () => { photo.dispatchEvent(new window.Event('error')); });
+assert.equal(photo.style.visibility, 'hidden', 'Missing photo falls back to initial');
+const search = document.querySelector('input[aria-label="Buscar estudiantes"]');
+assert.ok(search);
+assert.equal(search.value, 'Example');
+await act(async () => { search.parentElement.querySelector('button').dispatchEvent(new window.Event('click', { bubbles: true })); });
+assert.equal(JSON.parse(storage.get(key)).search, '');
+await act(async () => { document.querySelector('button[aria-label="Ocultar columna photo"]').dispatchEvent(new window.Event('click', { bubbles: true })); });
+await act(async () => root.unmount());
+await mount();
+assert.equal(JSON.parse(storage.get(key)).grade, '2do');
+assert.equal(document.querySelector('input[aria-label="Buscar estudiantes"]').value, '');
+assert.equal(document.querySelector('img[data-student-photo-id="7"]'), null, 'Hidden photo column persists');
+assert.equal(globalThis.__studentWrites.length, 0, 'Preferences and viewing photos must never edit student records');
+await act(async () => root.unmount());
+storage.set(key, '{broken json');
+await mount();
+assert.equal(JSON.parse(storage.get(key)).grade, '1ro', 'Invalid saved JSON falls back to assignments');
+await act(async () => root.unmount());
+console.log('OK: restored preferences survive async defaults and remount; malformed storage recovers; photo viewer/fallback work; no student writes.');
