@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "armi-web-piloto",
+  "name": "armi-docente-web",
   "account_id": "d925cb94b70eaf89d4ca106b5824d7bc",
   "main": "src/worker.js",
   "compatibility_date": "2026-11-21",
@@ -22,7 +22,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "armi-web-piloto",
+      "database_name": "armi-docente-web",
       "migrations_dir": "migrations"
     }
   ],

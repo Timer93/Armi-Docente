@@ -123,10 +123,10 @@ entre sesiones. Las escrituras no se agrupan ni se reintentan automáticamente.
 
 ## GitHub y actualización automática
 
-Rama del piloto: `web/cloudflare-pilot`. El workflow `ARMI Web checks` instala
+Rama de publicación: `web/cloudflare-pilot`. El workflow `ARMI Web checks` instala
 dependencias y ejecuta pruebas y empaquetado de comprobación, sin desplegar.
 En Cloudflare Builds, el directorio raíz debe ser `web`, el nombre del Worker
-`armi-web-piloto` y la rama de producción la del piloto. Usar `npm test` como
+`armi-docente-web` y la rama de producción `web/cloudflare-pilot`. Usar `npm test` como
 comando de compilación/verificación y `npm run deploy` como comando de despliegue.
 Solo entonces cada push a esa rama podrá disparar una publicación; si las pruebas
 o la compilación fallan, el despliegue no debe continuar. Ajustar los build watch
