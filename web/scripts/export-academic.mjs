@@ -16,7 +16,10 @@ export function portableValue(value, depth = 0) {
     return value.replace(/<img\b[^>]*>/gi, '').replace(/data:(?:image|application|audio|video)\/[^\s"'<>]+/gi, '');
   }
   if (Array.isArray(value)) return value.map(item => portableValue(item, depth + 1));
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !excluded.test(key) && !['__proto__', 'constructor', 'prototype'].includes(key)).map(([key, item]) => [key, portableValue(item, depth + 1)]));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key,item]) => {
+    const rubric = key === 'levelDescriptors' && item && typeof item === 'object' && !Array.isArray(item) && Object.entries(item).every(([level,text]) => ['c','b','a','ad'].includes(level) && typeof text === 'string' && text.length <= 8000);
+    return (!excluded.test(key) || rubric) && !['__proto__', 'constructor', 'prototype'].includes(key);
+  }).map(([key, item]) => [key, portableValue(item, depth + 1)]));
   return value;
 }
 const parsed = (value, fallback) => value ? JSON.parse(value) : fallback;

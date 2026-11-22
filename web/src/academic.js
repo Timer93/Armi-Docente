@@ -1,5 +1,6 @@
 import { AuthError } from './apps-script-auth.js';
 import { editsReady, hasEdits, editAcademic } from './academic-edits.js';
+import { isPlanning } from './edit-fields.js';
 
 export const DATASETS = ['general', 'students', 'annual', 'units', 'sessions', 'frontend'];
 export const FRONTEND_KEYS = ['armi_areas', 'armi_assignments', 'armi_calendar_state', 'armi_holidays_v7', 'armi_schedule_config', 'armi_schedule_entries', 'armi_schedule_color_settings', 'armi_pa_pinned_didactic_units_global', 'armi_pa_pinned_matrix_global'];
@@ -15,7 +16,8 @@ function validateValue(value, depth = 0) {
     if (/data:(?:image|application|audio|video)\//i.test(value) || /(?:[A-Z]:\\|\\\\[^\\]+\\)/.test(value)) fail('La copia incluye archivos incrustados o rutas locales. Exporta nuevamente los datos.');
   } else if (value && typeof value === 'object') {
     for (const [key, child] of Object.entries(value)) {
-      if (privateKey.test(key) || ['__proto__', 'constructor', 'prototype'].includes(key)) fail('La copia incluye campos privados no admitidos.');
+      const rubricDescriptors = key === 'levelDescriptors' && object(child) && Object.entries(child).every(([level,text]) => ['c','b','a','ad'].includes(level) && typeof text === 'string' && text.length <= 8000);
+      if ((privateKey.test(key) && !rubricDescriptors) || ['__proto__', 'constructor', 'prototype'].includes(key)) fail('La copia incluye campos privados no admitidos.');
       validateValue(child, depth + 1);
     }
   }
@@ -40,12 +42,12 @@ export async function academicRoute(request, env, teacher, { readJson, digest, r
   const db = env.DB;
   const teacherId = teacher.id; // Exclusivamente de la sesión comprobada en servidor.
   try {
-    if (url.pathname === '/api/academic/edit' && request.method === 'PUT') return response(await editAcademic(request, db, teacher, { readJson, digest, now }));
+    if (url.pathname === '/api/academic/edit' && request.method === 'PUT') return response(await editAcademic(request, db, teacher, { readJson, digest, now, validateRecord }));
     if (url.pathname === '/api/academic/status' && request.method === 'GET') {
       const current = await head(db, teacherId);
       const counts = current.active_import_id
         ? (await db.prepare('SELECT dataset, COUNT(*) AS count FROM academic_records WHERE teacher_id = ? AND import_id = ? GROUP BY dataset').bind(teacherId, current.active_import_id).all()).results : [];
-      return response({ ready: true, editable: await editsReady(db), hasWebEdits: await hasEdits(db, teacherId), snapshotId: current.active_import_id, revision: current.revision, counts: Object.fromEntries(counts.map(row => [row.dataset, row.count])) });
+      return response({ ready: true, editable: await editsReady(db), planningEditable: await editsReady(db,true), hasWebEdits: await hasEdits(db, teacherId), snapshotId: current.active_import_id, revision: current.revision, counts: Object.fromEntries(counts.map(row => [row.dataset, row.count])) });
     }
     if (url.pathname === '/api/academic/records' && request.method === 'GET') {
       const dataset = url.searchParams.get('dataset');
@@ -56,17 +58,19 @@ export async function academicRoute(request, env, teacher, { readJson, digest, r
       if (requestedSnapshot && requestedSnapshot !== current.active_import_id) fail('La copia activa cambió. Recarga la página.', 409);
       const requestedRevision = url.searchParams.get('revision');
       if (requestedRevision !== null && String(current.revision) !== requestedRevision) fail('Los datos cambiaron durante la lectura. Recarga la página.', 409);
-      if (['general','students'].includes(dataset) && await editsReady(db)) {
-        const rows = (await db.prepare(`SELECT record_id, payload_json, revision FROM (
-          SELECT b.record_id, COALESCE(e.payload_json,b.payload_json) AS payload_json, COALESCE(e.revision,0) AS revision
-          FROM academic_records b LEFT JOIN academic_edits e ON e.teacher_id=b.teacher_id AND e.dataset=b.dataset AND e.record_id=b.record_id
-          WHERE b.teacher_id=? AND b.import_id=? AND b.dataset=? AND b.record_id>? AND COALESCE(e.deleted,0)=0
-          UNION ALL SELECT e.record_id,e.payload_json,e.revision FROM academic_edits e
-          WHERE e.teacher_id=? AND e.dataset=? AND e.record_id>? AND e.deleted=0 AND NOT EXISTS
+      if ((['general','students'].includes(dataset) || isPlanning(dataset)) && await editsReady(db,isPlanning(dataset))) {
+        const table = isPlanning(dataset) ? 'planning_edits' : 'academic_edits';
+        const includeDeleted = isPlanning(dataset) && url.searchParams.get('includeDeleted') === '1' ? 1 : 0;
+        const rows = (await db.prepare(`SELECT record_id, payload_json, revision, deleted FROM (
+          SELECT b.record_id, COALESCE(e.payload_json,b.payload_json) AS payload_json, COALESCE(e.revision,0) AS revision, COALESCE(e.deleted,0) AS deleted
+          FROM academic_records b LEFT JOIN ${table} e ON e.teacher_id=b.teacher_id AND e.dataset=b.dataset AND e.record_id=b.record_id
+          WHERE b.teacher_id=? AND b.import_id=? AND b.dataset=? AND b.record_id>? AND (COALESCE(e.deleted,0)=0 OR ?=1)
+          UNION ALL SELECT e.record_id,e.payload_json,e.revision,e.deleted FROM ${table} e
+          WHERE e.teacher_id=? AND e.dataset=? AND e.record_id>? AND (e.deleted=0 OR ?=1) AND NOT EXISTS
           (SELECT 1 FROM academic_records b WHERE b.teacher_id=e.teacher_id AND b.import_id=? AND b.dataset=e.dataset AND b.record_id=e.record_id)
-          ) ORDER BY record_id LIMIT 11`).bind(teacherId,current.active_import_id,dataset,cursor,teacherId,dataset,cursor,current.active_import_id).all()).results;
+          ) ORDER BY record_id LIMIT 11`).bind(teacherId,current.active_import_id,dataset,cursor,includeDeleted,teacherId,dataset,cursor,includeDeleted,current.active_import_id).all()).results;
         const page = rows.slice(0,10);
-        return response({records:page.map(row => ({id:row.record_id,value:JSON.parse(row.payload_json),revision:row.revision})),nextCursor:rows.length>10?page.at(-1).record_id:null,snapshotId:current.active_import_id,revision:current.revision});
+        return response({records:page.map(row => ({id:row.record_id,value:row.deleted ? {} : JSON.parse(row.payload_json),revision:row.revision,...(includeDeleted ? {deleted:Boolean(row.deleted)} : {})})),nextCursor:rows.length>10?page.at(-1).record_id:null,snapshotId:current.active_import_id,revision:current.revision});
       }
       if (!current.active_import_id) return response({ records: [], nextCursor: null, snapshotId: null, revision: 0 });
       // Diez registros por página limitan la respuesta y evitan barridos globales.

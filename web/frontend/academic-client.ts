@@ -1,13 +1,14 @@
 import DOMPurify from 'dompurify';
 import { createApiClient } from '../public/api-client.js';
 import { getWebIdentity } from './runtime.js';
-import { fieldsFor } from '../src/edit-fields.js';
+import { fieldsFor, isPlanning } from '../src/edit-fields.js';
 
 const client = createApiClient({ onUnauthorized: () => window.location.reload() });
 export const academicApi = (path: string, method = 'GET', body?: unknown) => client.request(path, method, body);
 type Row = { id: string; value: any; revision: number };
 const cache = new Map<string, Promise<Array<Row>>>();
 const loadedRows = new Map<string, Row[]>();
+const deletedRows = new Map<string, Map<string,number>>();
 const snapshots = new Map<string, string | null>();
 const queues = new Map<string, Promise<any>>();
 let activeWrites = 0;
@@ -28,21 +29,26 @@ export function readAcademic(dataset: string) {
   if (cache.has(key)) return cache.get(key)!;
   const pending = (async () => {
     const rows: Row[] = [];
+    const deleted = new Map<string,number>();
     let cursor = '';
     let snapshot = '';
     let revision: number | undefined;
     do {
-      const result = await academicApi('/api/academic/records?' + new URLSearchParams({ dataset, cursor, ...(snapshot ? { snapshot } : {}), ...(revision !== undefined ? { revision: String(revision) } : {}) }));
+      const result = await academicApi('/api/academic/records?' + new URLSearchParams({ dataset, cursor, ...(isPlanning(dataset) ? {includeDeleted:'1'} : {}), ...(snapshot ? { snapshot } : {}), ...(revision !== undefined ? { revision: String(revision) } : {}) }));
       if (getWebIdentity()?.user.id !== identity.user.id) throw new Error('La cuenta cambió. Recarga la página.');
       if (snapshot && result.snapshotId !== snapshot) throw new Error('La copia cambió. Recarga la página.');
       snapshot = result.snapshotId || '';
       revision = result.revision;
       snapshots.set(key, result.snapshotId);
-      rows.push(...result.records.map((row: any) => ({ id: row.id, value: displayValue(row.value), revision: row.revision || 0 })));
-      if (rows.length > 10000) throw new Error('La copia excede el límite de esta vista.');
+      for (const row of result.records) {
+        if (row.deleted) deleted.set(row.id,row.revision);
+        else rows.push({id:row.id,value:displayValue(row.value),revision:row.revision || 0});
+      }
+      if (rows.length + deleted.size > 10000) throw new Error('La copia excede el límite de esta vista.');
       cursor = result.nextCursor || '';
     } while (cursor);
     loadedRows.set(key,rows);
+    deletedRows.set(key,deleted);
     return rows;
   })();
   cache.set(key, pending);
@@ -59,24 +65,30 @@ export function saveAcademic(dataset: string, id: string, value: any, action = '
   const baseline = readAcademic(dataset);
   const changesPromise = baseline.then(rows => {
     const row = rows.find(row => row.id === id);
-    return Object.fromEntries(fieldsFor(dataset).filter(field => value[field] !== undefined && value[field] !== row?.value[field]).map(field => [field,value[field]]));
+    return Object.fromEntries(fieldsFor(dataset,value).filter(field => value[field] !== undefined && JSON.stringify(value[field]) !== JSON.stringify(row?.value[field])).map(field => [field,value[field]]));
   });
   const pending = (queues.get(queueKey) || Promise.resolve()).then(async () => {
     if (writeError) throw writeError;
     if (getWebIdentity()?.user.id !== owner) throw new Error('La cuenta cambió. Recarga la página.');
     const rows = await readAcademic(dataset);
     const row = rows.find(row => row.id === id);
+    const deletedRevision = deletedRows.get(key)?.get(id);
+    const restoring = isPlanning(dataset) && action === 'save' && deletedRevision !== undefined;
+    if (restoring && !window.confirm('Esta planificación fue eliminada. ¿Quieres crearla nuevamente con los datos del formulario?')) throw Object.assign(new Error('Se canceló la creación de la planificación.'),{cancelled:true});
     const changes = action === 'delete' ? {} : await changesPromise;
     if (action === 'save' && row && !Object.keys(changes).length) return row;
     activeWrites++;
     window.dispatchEvent(new CustomEvent('armi-web-save', {detail:{state:'saving'}}));
     try {
-      const saved = await academicApi('/api/academic/edit','PUT',{dataset,id,changes,action,expectedRevision:row?.revision || 0,snapshotId:snapshots.get(key) || null,operationId:crypto.randomUUID()});
+      const saved = await academicApi('/api/academic/edit','PUT',{dataset,id,changes,action:restoring ? 'restore' : action,expectedRevision:row?.revision || deletedRevision || 0,snapshotId:snapshots.get(key) || null,operationId:crypto.randomUUID()});
       // Merge acknowledgements synchronously. Saves of different students may
       // finish together; neither may replace the other's cached result.
       const updated = (loadedRows.get(key) || rows).filter(row => row.id !== id);
       if (!saved.deleted) updated.push({...saved,value:displayValue(saved.value)});
       loadedRows.set(key,updated);
+      const deleted = deletedRows.get(key) || new Map<string,number>();
+      if (saved.deleted) deleted.set(id,saved.revision); else deleted.delete(id);
+      deletedRows.set(key,deleted);
       cache.set(key,Promise.resolve(updated));
       return saved;
     } catch (error) { writeError = error as Error; throw error; }
@@ -87,10 +99,16 @@ export function saveAcademic(dataset: string, id: string, value: any, action = '
   });
   queues.set(queueKey,pending);
   void pending.catch(error => {
+    if (error.cancelled) { if (queues.get(queueKey) === pending) queues.delete(queueKey); return; }
     writeError ||= error;
     window.dispatchEvent(new CustomEvent('armi-web-save',{detail:{state:'error',message:error.message}}));
   });
   // Failed saves stay rejected for this record until reload; stale forms cannot
   // quietly retry over changes in another tab.
   return pending;
+}
+
+export function invalidateAcademic(dataset: string) {
+  const key = `${getWebIdentity()?.user.id}:${dataset}`;
+  cache.delete(key); loadedRows.delete(key); deletedRows.delete(key);
 }

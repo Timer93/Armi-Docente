@@ -3,7 +3,32 @@
 export * from 'armi-desktop-api-original';
 import { INITIAL_GENERAL_DATA, INITIAL_MODULE_STATUS } from '../../constants';
 import { getWebIdentity } from './runtime.js';
-import { readAcademic, saveAcademic } from './academic-client';
+import { readAcademic, saveAcademic, invalidateAcademic } from './academic-client';
+import { planningId } from '../src/edit-fields.js';
+import { mergeUnitSessionPlanning } from '../../backend/shared/unitSessionPlanning.js';
+import { curriculumRows } from './curriculum';
+
+async function planningSave(dataset: string, value: any) {
+  try {
+    const id = planningId(dataset,value);
+    const saved = await saveAcademic(dataset,id,{...value,id});
+    if (dataset === 'units') invalidateAcademic('sessions');
+    return {success:true,data:saved.value};
+  } catch (error) { return {success:false,message:(error as Error).message}; }
+}
+async function planningDelete(dataset: string, id: string) {
+  try { await saveAcademic(dataset,id,{},'delete'); if (dataset === 'units') invalidateAcademic('sessions'); return {success:true}; }
+  catch (error) { return {success:false,message:(error as Error).message}; }
+}
+export const saveProgramacionAnual = (data: any) => planningSave('annual',{...data,year:data.year || String(data.id).slice(0,4)});
+export const saveUnidadDidactica = (data: any) => planningSave('units',data);
+export const saveSesion = (data: any) => planningSave('sessions',{...data.sessionData,year:data.year,areaId:data.areaId,grade:data.grade,section:data.section,unitNumber:data.unitNumber,sessionNumber:data.sessionNumber,date:data.date || data.sessionData?.date || ''});
+export const deleteProgramacionAnual = (id: string) => planningDelete('annual',id);
+export const deleteUnidadDidactica = (id: string) => planningDelete('units',id);
+export const deleteSesion = (id: string) => planningDelete('sessions',id);
+export const getCompetencias = (grade = '', area = '') => curriculumRows('competencias',grade,area);
+export const getEstandares = (grade = '', area = '') => curriculumRows('estandares',grade,area);
+export const getAreas = () => curriculumRows('areas');
 
 export async function saveDatosGenerales(data: any) {
   try { const saved = await saveAcademic('general','general',data); return {success:true,data:saved.value}; }
@@ -20,7 +45,7 @@ export async function deleteEstudiante(id: string | number) {
 }
 // The original screen uses this only as a completion hint after a confirmed
 // student save. Permissions remain exclusively on the server.
-export async function updateModuleStatus(moduleName: string) { return moduleName === 'estudiantes' ? {success:true} : {success:false,message:'Este módulo todavía está en consulta.'}; }
+export async function updateModuleStatus(moduleName: string) { return ['estudiantes','programacion_anual'].includes(moduleName) ? {success:true} : {success:false,message:'Este módulo todavía está en consulta.'}; }
 
 export async function getDatosGenerales() {
   const identity = getWebIdentity();
@@ -41,7 +66,14 @@ export const getAllUnidadesDidacticas = () => academicMap('units').catch(() => (
 export const getAllSesiones = () => academicMap('sessions').catch(() => ({}));
 export const getSessionIndex = getAllSesiones;
 export async function getUnidadDidactica(year: string, areaId: string, grade: string, section: string, unitNumber: string) { return (await getAllUnidadesDidacticas())[`${year}-${areaId}-${grade}-${section}-U${unitNumber}`] || null; }
-export async function getSesion(year: string, areaId: string, grade: string, section: string, unitNumber: string, sessionNumber: string) { return (await getAllSesiones())[`${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`] || null; }
+export async function getSesion(year: string, areaId: string, grade: string, section: string, unitNumber: string, sessionNumber: string) {
+  const saved = (await getAllSesiones())[`${year}-${areaId}-${grade}-${section}-U${unitNumber}-S${sessionNumber}`];
+  if (!saved) return null;
+  const unit = await getUnidadDidactica(year,areaId,grade,section,unitNumber);
+  // Reuse the desktop's pure merge rule. Unit wording is adopted on reopening
+  // a lesson, without rewriting its authored activities or grading records.
+  return unit ? mergeUnitSessionPlanning(saved,unit,sessionNumber) : saved;
+}
 export async function saveCloudFrontendState() { return { success: false, message: 'La sincronización todavía no está habilitada en la web.' }; }
 export async function getDepartamentos() { const data = await getDatosGenerales(); return data.department ? [data.department] : []; }
 export async function getProvincias() { const data = await getDatosGenerales(); return data.province ? [data.province] : []; }

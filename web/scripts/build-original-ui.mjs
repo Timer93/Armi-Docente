@@ -21,6 +21,7 @@ alias.xlsx = webFile('excel-disabled.js');
 const originalSource = {
   name: 'armi-web-runtime-adapters',
   setup(bundler) {
+    bundler.onResolve({ filter: /^armi-web-runtime$/ }, () => ({path:webFile('runtime.js')}));
     bundler.onResolve({ filter: /^armi-desktop-api-original$/ }, () => ({ path: absolute('services/apiService.ts') }));
     bundler.onResolve({ filter: /(?:AuthContext|apiService|observePortableStorage|SyncLifecycleManager|BackgroundSyncIndicator|RemoteAccessIndicator|AppUpdaterOverlay|CloudSyncPanel|GeneralNotesOverlay)(?:\.tsx?)?$/ }, args => {
       const target = path.resolve(args.resolveDir, args.path).replace(/\\/g, '/').replace(/\.tsx?$/, '');
@@ -72,6 +73,48 @@ const originalSource = {
       contents = contents.replaceAll('SQL Sincronizado - Gestión de Datos Estudiantiles','Registro de estudiantes · Web');
       return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) };
     });
+    bundler.onLoad({filter:/[\\/]components[\\/](AnnualProgramView|UnitsView|SessionsView)\.tsx$/}, async args => {
+      let contents = await readFile(args.path,'utf8');
+      const name = path.basename(args.path,'.tsx');
+      const dataset = {AnnualProgramView:'annual',UnitsView:'units',SessionsView:'sessions'}[name];
+      if (name === 'AnnualProgramView') {
+        const marker = /return \(\s*<>\s*\{toast &&/;
+        if (!marker.test(contents)) throw new Error('Review annual planning web editor');
+        contents = contents.replace(marker,`return (<div data-armi-web-editor="${dataset}">{toast &&`);
+        const lastFragment = contents.lastIndexOf('</>');
+        if (lastFragment < 0) throw new Error('Missing annual editor closing fragment');
+        contents = contents.slice(0,lastFragment) + '</div>' + contents.slice(lastFragment+3);
+        contents = contents.replaceAll('Sincronización Año','Guardado web Año');
+      } else {
+        const marker = '<div className="animate-fade-in pb-20 space-y-6 relative">';
+        if (!contents.includes(marker)) throw new Error(`Review ${dataset} planning web editor`);
+        contents = contents.replace(marker,`<div data-armi-web-editor="${dataset}" className="animate-fade-in pb-20 space-y-6 relative">`);
+      }
+      contents = contents.replaceAll('Unidad Sincronizada.','Unidad guardada en la web.');
+      return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
+    bundler.onLoad({filter:/[\\/]sessions-view[\\/]SessionActions\.tsx$/}, async args => {
+      let contents = await readFile(args.path,'utf8');
+      const marker = ".filter(action => action.id !== 'clear' || !!props.onClear)";
+      if (!contents.includes(marker)) throw new Error('Review planning actions for web');
+      contents = "import {getWebIdentity as getArmiWebIdentity} from 'armi-web-runtime';\n" + contents.replace(marker, marker + ".map(action => ({...action,disabled:action.disabled || !getArmiWebIdentity()?.academic?.planningEditable || ['ai','template','settings'].includes(action.id)}))");
+      return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
+    bundler.onLoad({filter:/[\\/]sessions-view[\\/]SessionManager\.tsx$/}, async args => {
+      const contents = (await readFile(args.path,'utf8')).replace(/return createPortal\(\s*<div /,'return createPortal(<div data-armi-web-editor="sessions" ');
+      if (!contents.includes('data-armi-web-editor="sessions"')) throw new Error('Review saved session manager for web');
+      return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
+    bundler.onLoad({filter:/[\\/]sessions-view[\\/]SessionLearningResources\.tsx$/}, async args => {
+      let contents = await readFile(args.path,'utf8');
+      // These resources depend on desktop-generated files and Drive. Keep them
+      // in consultation while enabling the authored lesson text around them.
+      const index = contents.indexOf('    return (');
+      const tail = contents.slice(index).replace(/(return \(\s*<>\s*)<div /,'$1<div data-web-unavailable="" ');
+      contents = contents.slice(0,index)+tail;
+      if (index < 0 || !contents.includes('data-web-unavailable')) throw new Error('Review web learning resources');
+      return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
     bundler.onLoad({ filter: /[\\/]index\.css$/ }, async args => {
       if (path.resolve(args.path) !== absolute('index.css')) return;
       const cssPath = value => value.replace(/\\/g, '/');
@@ -98,5 +141,6 @@ await build({
 });
 await copyFile(path.join(web, 'public/index.html'), path.join(out, 'index.html'));
 await copyFile(path.join(web, 'public/_headers'), path.join(out, '_headers'));
+await copyFile(path.join(web, 'public/curriculum.json'), path.join(out, 'curriculum.json'));
 await copyFile(absolute('src/Logo_bar.ico'), path.join(out, 'favicon.ico'));
 console.log('Built original App.tsx and desktop screens with isolated web adapters. Desktop sources were not modified.');

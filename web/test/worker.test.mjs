@@ -10,6 +10,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0002_responsables.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0003_academic_snapshots.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0004_academic_edits.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0005_planning_edits.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -402,4 +403,56 @@ test('web edits preserve imported payloads and handle repeated acknowledgements 
   f.sqlite.exec('DROP TABLE academic_edits');
   const status=(await(await f.call('/api/academic/status',{cookie:a.cookie})).json()).data;
   assert.equal(status.editable,false);assert.equal((await put(body)).status,503);
+});
+
+test('planning: nested content persists per account; canonical identity, stale saves and secret/file rejection', async t => {
+  const f=fixture(t);const a=await f.login();const b=await f.login('docenteB');
+  const metadata={year:'2026',areaId:'ept',grade:'1ro',section:'A y B'};
+  const write=(dataset,id,changes,extra={},cookie=a.cookie)=>f.call('/api/academic/edit',{method:'PUT',cookie,body:{dataset,id,changes,action:'save',expectedRevision:0,snapshotId:null,operationId:crypto.randomUUID(),...extra}});
+  for (const [dataset,id,content] of [
+    ['annual','2026-ept-1ro-A y B',{matrixChecks:{comp:{u1:true}},didacticUnits:{0:{title:'Unidad nueva'}},resourceFields:{medios:'Texto'}}],
+    ['units','2026-ept-1ro-A y B-U1',{unitNumber:'1',title:'Mi unidad',criterios:{C1:['Criterio']},sesiones:[{id:1,title:'Sesión vinculada'}]}],
+    ['sessions','2026-ept-1ro-A y B-U1-S1',{unitNumber:'1',sessionNumber:'1',title:'Mi sesión',secuencia:{inicio:{saberes:'<p>Texto</p>'}},assessmentModel:{criterios:[{text:'Criterio',levelDescriptors:{c:'Inicial',b:'Proceso',a:'Logrado',ad:'Destacado'}}]}}],
+  ]) {
+    const result=await write(dataset,id,{...metadata,...content});assert.equal(result.status,200,await result.clone().text());
+    const records=(await(await f.call('/api/academic/records?dataset='+dataset,{cookie:a.cookie})).json()).data.records;
+    assert.equal(records.length,1);assert.equal(records[0].value.id,id);assert.equal(records[0].revision,1);
+    assert.deepEqual((await(await f.call('/api/academic/records?dataset='+dataset,{cookie:b.cookie})).json()).data.records,[]);
+    assert.equal((await write(dataset,id,{title:'Otra pestaña'})).status,409);
+    const changed=await write(dataset,id,{title:'Actualizado'},{expectedRevision:1});assert.equal(changed.status,200);
+    const saved=(await changed.json()).data.value;assert.equal(saved.areaId,'ept');
+    for (const key of Object.keys(content).filter(key=>key!=='title')) assert.deepEqual(saved[key],content[key]);
+    assert.equal((await write(dataset,id,{areaId:'other'},{expectedRevision:2})).status,400);
+    assert.equal((await write(dataset,id,{nested:{api_key:'secret'}},{expectedRevision:2})).status,400);
+    assert.equal((await write(dataset,id,{nested:{faceDescriptor:[1,2,3]}},{expectedRevision:2})).status,400);
+    assert.equal((await write(dataset,id,{nested:{levelDescriptors:{faceDescriptor:'private'}}},{expectedRevision:2})).status,400);
+    assert.equal((await write(dataset,id,{photo:'data:image/png;base64,secret'},{expectedRevision:2})).status,400);
+    assert.equal((await write(dataset,id,{text:'x'.repeat(256_001)},{expectedRevision:2})).status,400);
+  }
+  assert.equal((await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{}})).status,409);
+});
+
+test('planning deletion is persistent; only an explicit restore with the tombstone revision can recreate it', async t => {
+  const f=fixture(t);const a=await f.login();const id='2026-ept-1ro-A-U1';
+  const write=(action,revision,changes={})=>f.call('/api/academic/edit',{method:'PUT',cookie:a.cookie,body:{dataset:'units',id,changes,action,expectedRevision:revision,snapshotId:null,operationId:crypto.randomUUID()}});
+  assert.equal((await write('save',0,{year:'2026',areaId:'ept',grade:'1ro',section:'A',unitNumber:'1',title:'Original'})).status,200);
+  assert.equal((await write('delete',1)).status,200);
+  assert.equal((await write('save',1,{title:'Stale tab'})).status,409);
+  assert.equal((await write('save',2,{title:'Implicit restore'})).status,409);
+  const read=async suffix=>(await(await f.call('/api/academic/records?dataset=units'+suffix,{cookie:a.cookie})).json()).data.records;
+  assert.deepEqual(await read(''),[]);
+  assert.deepEqual(await read('&includeDeleted=1'),[{id,value:{},revision:2,deleted:true}]);
+  assert.equal((await write('restore',2,{title:'Recreada'})).status,200);
+  assert.equal((await read(''))[0].value.title,'Recreada');
+  assert.equal((await read(''))[0].revision,3);
+});
+
+test('missing planning migration preserves old module editing and planning consultation', async t => {
+  const f=fixture(t);const a=await f.login();
+  f.sqlite.exec('DROP TABLE planning_edits');
+  const status=(await(await f.call('/api/academic/status',{cookie:a.cookie})).json()).data;
+  assert.equal(status.editable,true);assert.equal(status.planningEditable,false);
+  assert.equal((await f.call('/api/academic/records?dataset=annual',{cookie:a.cookie})).status,200);
+  const rejected=await f.call('/api/academic/edit',{method:'PUT',cookie:a.cookie,body:{dataset:'annual'}});
+  assert.equal(rejected.status,503);assert.match((await rejected.json()).message,/0005_planning_edits/);
 });

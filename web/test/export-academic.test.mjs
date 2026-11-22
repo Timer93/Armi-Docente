@@ -26,6 +26,10 @@ test('desktop export selects academic records without writing the source or copy
 });
 
 test('portable export removes embedded assets and private nested fields while preserving planning text', () => {
+  const rubric = portableValue({assessment:{levelDescriptors:{c:'Inicial',b:'Proceso',a:'Logrado',ad:'Destacado'}},faceDescriptor:[1,2,3],invalid:{levelDescriptors:{token:'private'}}});
+  assert.equal(rubric.assessment.levelDescriptors.ad,'Destacado');
+  assert.equal(rubric.faceDescriptor,undefined);
+  assert.equal(rubric.invalid.levelDescriptors,undefined);
   const clean = portableValue({ learning: '<p>Texto</p><img src="data:image/png;base64,private">', source: 'C:\\Users\\docente\\private', config: { apiKey: 'private', accessToken: 'private', name: 'Visible' }, nested: '{"password":"private","text":"Texto"}' });
   assert.equal(clean.learning, '<p>Texto</p>'); assert.equal(clean.source, '');
   assert.deepEqual(clean.config, { name: 'Visible' }); assert.deepEqual(clean.nested, { text: 'Texto' });

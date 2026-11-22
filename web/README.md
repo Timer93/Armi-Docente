@@ -10,11 +10,14 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
 - Acceso real con Google Sheets / Apps Script y sesión HttpOnly del Worker.
 - Copias académicas por docente: datos generales, estudiantes, programaciones,
   unidades, sesiones y configuración de áreas/horarios. Importación explícita y
-  consulta y guardado web de Datos generales y registro de Estudiantes. La
+  consulta y guardado web de Datos generales, registro de Estudiantes,
+  Programación Anual, Unidades y Sesiones. La
   sincronización bidireccional sigue pendiente.
 - Menús y pantallas originales para revisar su compatibilidad en el navegador.
 - Crear, editar y eliminar estudiantes; editar Datos generales. Protección contra
   sobrescrituras desde pestañas desactualizadas y avisos de guardado/error.
+- Guardado y eliminación de planificaciones anuales, unidades y sesiones, con
+  matrices y contenido estructurado. Se reutilizan las pantallas originales.
 - Los otros módulos siguen en consulta. Drive, IA, importación de Excel, fotos,
   operaciones masivas y portal de estudiantes web pendientes.
 - No modifica ni sincroniza la base local. Una cuenta sin copia activa muestra
@@ -63,6 +66,39 @@ No hay todavía sincronización con el escritorio ni fusión automática. Ante u
 error de guardado o conflicto, los siguientes guardados requieren recargar para
 evitar sobrescribir registros con un formulario desactualizado. Conservar el
 texto pendiente antes de recargar si se necesita recuperarlo.
+
+### Activar el guardado de planificación
+
+Ejecutar `migrations/0005_planning_edits.sql` en la consola de D1 de
+**armi-docente-web** y recargar la aplicación. Solo añade `planning_edits`;
+conserva las tablas existentes y las copias importadas. No requiere repetir la
+importación. Mientras falte la tabla, estos módulos continúan en consulta; el
+servidor rechaza sus escrituras y los módulos previamente habilitados siguen
+funcionando. La tabla 0004 sigue siendo necesaria para Datos generales y alumnos.
+
+- Cada registro conserva cuenta, dataset, identidad compuesta y revisión.
+  Cambiar el año/área/grado/sección dentro de un identificador diferente se rechaza.
+- La eliminación deja una marca. Una pestaña antigua no puede revivirla con un
+  guardado atrasado. Para reutilizar el mismo número, se requiere la revisión de
+  esa marca y una confirmación explícita de recreación.
+- Se conservan los campos anidados, matrices y los descriptores textuales
+  C/B/A/AD de las rúbricas. Los descriptores biométricos continúan excluidos.
+- Las unidades se reflejan al reabrir una sesión mediante la función pura
+  original `mergeUnitSessionPlanning`; no hay actualización en vivo de pestañas
+  abiertas, ni una reescritura masiva de sesiones, ni sincronización con PC.
+- IA, calificación, plantillas Word, archivos, recursos visuales y Drive siguen
+  pendientes. Sus controles se bloquean en la compilación web y el transporte
+  rechaza los servicios no migrados. Los catálogos de áreas/grados, calendarios
+  y horarios propios siguen llegando de la copia importada; su edición web aún
+  está pendiente, por lo que una cuenta nueva necesita configurar esas piezas
+  antes de elaborar planificación completa.
+
+`public/curriculum.json` contiene únicamente columnas explícitas del catálogo
+curricular compartido de ARMI: áreas, competencias y estándares. No contiene
+cuentas, datos de docentes, alumnos ni desempeños personalizados. Se carga como
+archivo estático una vez por página; no consulta D1 para cada selección de área.
+`scripts/export-public-curriculum.mjs --database <ruta>` permite actualizarlo desde
+una base de catálogo revisada, en modo de solo lectura; no se ejecuta en despliegue.
 
 ## Desarrollo y comprobación
 
