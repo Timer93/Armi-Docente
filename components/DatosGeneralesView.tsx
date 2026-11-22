@@ -14,7 +14,6 @@ import {
 import { Input } from './Input';
 import { Select } from './Select';
 import { TextArea } from './TextArea';
-import { ResponsablesSection } from './shared/ResponsablesSection';
 import { readImageFileAsDataUrl } from '../utils/imageStorage';
 import { broadcastGeneralImagesUpdate } from '../utils/generalImageHelpers';
 import { optimizeImageDataUrl, type OptimizableImageKind } from '../utils/imageOptimization';
@@ -480,7 +479,18 @@ export const DatosGeneralesView: React.FC<Props> = ({ onSuccess, activeSection }
             );
         case 'responsables':
             return (
-                <ResponsablesSection value={formData} onChange={handleChange} />
+                <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200 animate-fade-in">
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-8 border-b pb-2">👥 Equipo Responsable</h3>
+                    <div className="space-y-6 max-w-5xl mx-auto">
+                        <div className="mb-8"><CardSection label="Docente de Área (Usuario)" icon="👨‍🏫" color="bg-blue-100 text-blue-600" highlight={true}><input type="text" name="teacher" value={formData.teacher} onChange={handleChange} placeholder="Ingrese nombres y apellidos" className="w-full bg-transparent border-b border-blue-200 outline-none text-sm font-bold py-2 focus:border-blue-500 transition-colors text-slate-800" /></CardSection></div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <CardSection label="Director(a) de la I.E." icon="👨‍💼" color="bg-slate-100 text-slate-600"><input type="text" name="director" value={formData.director} onChange={handleChange} placeholder="Nombre del Director" className="w-full bg-transparent border-b border-slate-200 outline-none text-sm font-medium py-2 focus:border-slate-500 transition-colors" /></CardSection>
+                            <CardSection label="Subdirector(a)" icon="📋" color="bg-slate-100 text-slate-600"><input type="text" name="subdirector" value={formData.subdirector} onChange={handleChange} placeholder="Nombre del Subdirector" className="w-full bg-transparent border-b border-slate-200 outline-none text-sm font-medium py-2 focus:border-slate-500 transition-colors" /></CardSection>
+                            <CardSection label="Coord. Pedagógico" icon="📚" color="bg-orange-100 text-orange-600"><input type="text" name="pedagogical_coordinator" value={formData.pedagogical_coordinator} onChange={handleChange} placeholder="Nombre del Coordinador" className="w-full bg-transparent border-b border-orange-200 outline-none text-sm font-medium py-2 focus:border-orange-500 transition-colors" /></CardSection>
+                            <CardSection label="Coord. de Tutoría (TOE)" icon="🤝" color="bg-emerald-100 text-emerald-600"><input type="text" name="toe_coordinator" value={formData.toe_coordinator} onChange={handleChange} placeholder="Nombre del Coordinador TOE" className="w-full bg-transparent border-b border-emerald-200 outline-none text-sm font-medium py-2 focus:border-emerald-500 transition-colors" /></CardSection>
+                        </div>
+                    </div>
+                </div>
             );
         case 'contexto':
             return (

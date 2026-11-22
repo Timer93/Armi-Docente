@@ -1,84 +1,15 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#171238">
-  <title>ARMI Web · Acceso docente</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css">
-  <script src="/app.js" type="module"></script>
+  <meta name="theme-color" content="#eaebef">
+  <title>ARMI Docente</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/assets/web.css">
+  <script type="module" src="/assets/web.js"></script>
 </head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="/" aria-label="ARMI Web, inicio"><img src="/favicon.svg" width="40" height="40" alt=""><span>ARMI<span class="brand-detail">DOCENTE · WEB</span></span></a>
-    <span class="edition">Versión web</span>
-  </header>
-  <main>
-    <div id="loading" class="loading" role="status">Preparando tu espacio…</div>
-    <section id="login-view" class="login-layout" hidden>
-      <div class="intro">
-        <p class="eyebrow">TU TRABAJO DOCENTE, CONTIGO</p>
-        <h1>Un espacio<br>para enseñar.</h1>
-        <p class="intro-text">Accede con tu cuenta de ARMI y comienza a preparar tu espacio en la web.</p>
-        <div class="intro-note"><span class="note-mark" aria-hidden="true">✓</span><p>Usa tu usuario y contraseña habituales.<br>Tu acceso conserva la membresía de ARMI.</p></div>
-      </div>
-      <div class="card login-card">
-        <p class="eyebrow card-eyebrow">BIENVENIDO A ARMI</p>
-        <h2>Inicia sesión</h2>
-        <p class="muted">Ingresa a tu espacio docente.</p>
-        <form id="login-form">
-          <label for="username">Usuario</label>
-          <input id="username" name="username" autocomplete="username" maxlength="160" required placeholder="Tu usuario de ARMI">
-          <label for="password">Contraseña</label>
-          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="512" required placeholder="Tu contraseña">
-          <button id="login-button" class="primary" type="submit">Ingresar</button>
-          <p id="login-message" class="message" aria-live="polite"></p>
-        </form>
-        <p class="footnote">Esta versión incluye acceso, perfil docente y responsables. Los módulos de clases y evaluación continúan en la aplicación de escritorio.</p>
-      </div>
-    </section>
-    <section id="workspace-view" class="workspace" hidden>
-      <aside class="desktop-sidebar" aria-label="Menú de ARMI Docente">
-        <a class="sidebar-brand" href="/" aria-label="ARMI Docente, inicio"><img src="/favicon.svg" width="36" height="36" alt=""><span>ARMI <small>DOCENTE</small></span></a>
-        <div class="sidebar-profile"><span id="sidebar-avatar" class="profile-avatar" aria-hidden="true"></span><div><strong id="sidebar-name"></strong><span class="role-label">DOCENTE</span></div><span class="profile-dot" aria-hidden="true"></span></div>
-        <nav aria-label="Mi cuenta"><p class="sidebar-label">MI ESPACIO</p><a class="sidebar-link selected" href="#profile-card" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg>Mi perfil<span class="active-dot" aria-hidden="true"></span></a><button id="usage-toggle" class="sidebar-link" type="button" aria-expanded="false" aria-controls="usage-panel" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 20V12h4v8m2 0V8h4v12m2 0V4h4v16"/></svg>Monitoreo de consumo</button></nav>
-        <nav aria-label="Datos generales"><p class="sidebar-label">DATOS GENERALES</p><button id="responsables-toggle" class="sidebar-link" type="button" aria-controls="responsables-panel" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 21v-2a6 6 0 0 1 12 0v2m0-16a3 3 0 0 1 0 6m3 4a6 6 0 0 1 3 4v2"/></svg>Responsables</button></nav>
-        <div class="desktop-modules"><p class="sidebar-label">EN TU APLICACIÓN DE ESCRITORIO</p><ul><li><span aria-hidden="true">01</span>Programación Anual</li><li><span aria-hidden="true">02</span>Unidades Didácticas</li><li><span aria-hidden="true">03</span>Sesiones</li><li><span aria-hidden="true">04</span>Evaluación</li><li><span aria-hidden="true">05</span>Estudiantes</li></ul><p class="sidebar-note">Estos módulos aún no están disponibles en la web.</p></div>
-        <div class="sidebar-bottom"><button id="logout-button" class="sidebar-logout" type="button">Cerrar sesión <span aria-hidden="true">↗</span></button><p>ARMI Docente <span>Versión web</span></p></div>
-      </aside>
-      <div class="workspace-content">
-      <div class="workspace-toolbar"><div><span class="breadcrumb">MI ESPACIO DOCENTE</span><span class="breadcrumb-divider" aria-hidden="true">/</span><strong id="current-view-label">Mi perfil</strong></div><span class="web-indicator"><span aria-hidden="true"></span>ARMI Web</span></div>
-      <div id="workspace-welcome" class="workspace-heading"><div><p class="eyebrow">BIENVENIDO A TU ESPACIO</p><h1 id="greeting">Bienvenido</h1><p class="hero-description">Tu cuenta, tu perfil y tu información docente, en un solo lugar.</p><p id="hero-institution" class="hero-institution" hidden></p></div><div class="hero-mark" aria-hidden="true"><svg viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 32c12-6 22-5 30 0 8-5 18-6 30 0v39c-12-6-22-5-30 0-8-5-18-6-30 0zM50 32v39M29 42l13 1m-13 8 13 1m16-9 13-1m-13 10 13-1"/></svg></div></div>
-      <section id="responsables-panel" class="shared-module" aria-label="Datos generales, responsables" hidden><div id="responsables-root"></div></section>
-      <div id="profile-grid" class="workspace-grid">
-        <div id="profile-card" class="card profile-card">
-          <div class="card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="4"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/></svg></span><div><h2>Información personal</h2><p class="muted">Así apareces en tu espacio web.</p></div></div>
-          <form id="profile-form">
-            <label for="display-name">Nombre para mostrar</label>
-            <input id="display-name" name="displayName" maxlength="120" autocomplete="name" required>
-            <label for="institution-name">Institución educativa</label>
-            <input id="institution-name" name="institutionName" maxlength="200" autocomplete="organization">
-            <button id="profile-button" class="primary" type="submit">Guardar cambios</button>
-            <p id="profile-message" class="message" aria-live="polite"></p>
-          </form>
-        </div>
-        <aside class="card account-card"><p class="eyebrow card-eyebrow">MI MEMBRESÍA</p><h2 id="account-user"></h2><span class="membership-badge"><span aria-hidden="true"></span>Acceso habilitado</span><dl><dt>Plan actual</dt><dd id="account-plan"></dd><dt>Sesión actual hasta</dt><dd id="account-expiry"></dd></dl><p class="footnote">Al vencer la sesión, vuelve a ingresar para comprobar tu acceso actualizado.</p></aside>
-      </div>
-      <section id="usage-panel" class="card usage-panel" hidden>
-        <p class="eyebrow card-eyebrow">ADMINISTRACIÓN</p><h2>Consumo de ARMI Web</h2>
-        <p class="muted">Mediciones por cuenta. Actualización manual, sin consultas automáticas periódicas.</p>
-        <div class="usage-controls"><div><label for="usage-day">Día de consumo (UTC)</label><input id="usage-day" type="date"></div><button id="usage-refresh" class="secondary" type="button">Consultar</button></div>
-        <p class="footnote">El día UTC cambia a las 7:00 p. m. de Colombia y Perú. Las referencias de cuota son compartidas por la cuenta de Cloudflare.</p>
-        <div id="usage-summary" class="usage-summary"></div>
-        <div class="usage-table"><table><thead><tr><th scope="col">Cuenta</th><th scope="col">Solicitudes</th><th scope="col">Filas leídas</th><th scope="col">Filas escritas</th><th scope="col">Validaciones Google</th><th scope="col">Errores</th></tr></thead><tbody id="usage-accounts"></tbody></table></div>
-        <p id="usage-message" class="message" aria-live="polite"></p>
-      </section>
-      <div class="availability-note"><span class="availability-icon" aria-hidden="true">i</span><p><strong>Tu espacio web sigue creciendo.</strong> Puedes gestionar tu perfil y los responsables. La planificación, las sesiones y la evaluación continúan disponibles en ARMI de escritorio.</p></div>
-      <footer class="workspace-footer"><span>ARMI DOCENTE</span><span>Tu práctica educativa, conectada.</span></footer>
-      </div>
-    </section>
-  </main>
-  <footer>ARMI Docente <span>Una herramienta para tu práctica educativa.</span></footer>
+<body class="bg-[#eaebef] text-slate-800 antialiased">
+  <div id="root"><p>Cargando ARMI Docente…</p></div>
 </body>
 </html>

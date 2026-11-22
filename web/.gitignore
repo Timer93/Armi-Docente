@@ -1,5 +1,7 @@
 node_modules/
 public/generated/
+dist/
+.web-build-inputs.json
 .wrangler/
 .deploy-check/
 .dev.vars

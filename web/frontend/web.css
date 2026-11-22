@@ -1,0 +1,6 @@
+.web-adaptation-notice { position: fixed; inset: 0 0 auto; z-index: 1000; min-height: 44px; padding: 9px 22px; display: flex; align-items: center; justify-content: center; gap: 18px; background: #fff8df; border-bottom: 1px solid #ebd99a; color: #6a5115; font: 11px/1.5 "Segoe UI", sans-serif; }
+.web-adaptation-notice strong { white-space: nowrap; }
+body.armi-web-session #root { padding-top: 44px; }
+body.armi-web-session [data-armi-web-sidebar] { top: 44px; height: calc(100vh - 44px); }
+body.armi-web-session #root main :disabled { cursor: not-allowed; }
+@media (max-width: 760px) { .web-adaptation-notice { min-height: 64px; gap: 8px; padding: 8px 12px; font-size: 10px; }.armi-web-session #root { padding-top: 64px !important; }body.armi-web-session [data-armi-web-sidebar] { top: 64px; height: calc(100vh - 64px); } }

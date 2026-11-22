@@ -8,7 +8,7 @@ const securityHeaders = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
   'x-frame-options': 'DENY',
-  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   'permissions-policy': 'camera=(), microphone=(), geolocation=()',
 };
 const json = (data, status = 200, headers = {}) => Response.json(data, { status, headers });
@@ -134,7 +134,7 @@ async function route(request, env, requester, now, measurement, readUsage) {
     return json({ success: true, service: 'armi-web', configured });
   }
   if (!path.startsWith('/api/')) {
-    if (!['/', '/app.js', '/api-client.js', '/styles.css', '/favicon.svg'].includes(path) || !['GET', 'HEAD'].includes(request.method)) {
+    if (!['/', '/favicon.ico'].includes(path) || !['GET', 'HEAD'].includes(request.method)) {
       return json({ success: false, message: 'Página no disponible.' }, 404);
     }
     return env.ASSETS.fetch(request);

@@ -4,14 +4,14 @@
   "account_id": "d925cb94b70eaf89d4ca106b5824d7bc",
   "main": "src/worker.js",
   "compatibility_date": "2026-11-21",
-  "workers_dev": true,
+  "workers_dev": false,
   "preview_urls": false,
   "build": { "command": "npm run build" },
   "routes": [
     { "pattern": "web.armiapp.com", "custom_domain": true }
   ],
   "assets": {
-    "directory": "./public",
+    "directory": "./dist",
     "binding": "ASSETS",
     "run_worker_first": ["/api/*"]
   },
