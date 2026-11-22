@@ -3,9 +3,9 @@ name: ARMI Web checks
 on:
   push:
     branches: ["main", "web/cloudflare-pilot"]
-    paths: ["web/**", ".github/workflows/armi-web-checks.yml"]
+    paths: ["web/**", "components/shared/**", ".github/workflows/armi-web-checks.yml"]
   pull_request:
-    paths: ["web/**", ".github/workflows/armi-web-checks.yml"]
+    paths: ["web/**", "components/shared/**", ".github/workflows/armi-web-checks.yml"]
   workflow_dispatch:
 
 permissions:

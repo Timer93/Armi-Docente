@@ -5,6 +5,17 @@ Apps Script como proveedor de cuentas y membresías. Incluye inicio/cierre de
 sesión, edición del perfil propio y monitoreo de consumo para administrador.
 No conecta ni modifica la base del escritorio.
 
+Datos generales → Responsables reutiliza `components/shared/ResponsablesSection.tsx`,
+el mismo componente que importa `components/DatosGeneralesView.tsx` en escritorio.
+La web guarda sus cinco campos por docente con sesión HttpOnly y control de
+revisión para evitar sobreescribir una edición concurrente. El guardado es
+explícito, sin consultas periódicas ni escrituras por cada tecla.
+
+Antes de usarlo en una base ya creada, ejecutar una sola vez
+`migrations/0002_responsables.sql` en la consola de D1, o aplicar las migraciones
+con Wrangler. Esta migración es aditiva: no importa datos del escritorio.
+No existe sincronización automática entre ambos entornos todavía.
+
 Esta entrega no incluye todavía cursos, notas, estudiantes, Drive, pagos ni
 activación automática de pruebas de 30 días. Tampoco demuestra capacidad para
 3.000 usuarios concurrentes. El siguiente módulo requiere autorización de cada

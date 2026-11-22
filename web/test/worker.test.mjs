@@ -7,6 +7,7 @@ import { createWorker } from '../src/worker.js';
 function fixture(t) {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(fs.readFileSync(new URL('../migrations/0001_identity.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0002_responsables.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -79,6 +80,48 @@ test('real SQLite schema: two teachers retain independent profiles; identity is 
   assert.equal(f.calls.length, 2, 'Session and profile operations do not query Apps Script');
   const again = await f.login();
   assert.equal(again.data.user.displayName, 'Nombre A', 'Login preserves profile edits');
+});
+
+test('shared Responsables module: tenant isolation, bounded fields and concurrent edit protection', async t => {
+  const f = fixture(t);
+  const endpoint = '/api/datos-generales/responsables';
+  assert.equal((await f.call(endpoint)).status, 401);
+  const a = await f.login();
+  const b = await f.login('docenteB');
+  const read = async cookie => (await (await f.call(endpoint, { cookie })).json()).data;
+  const empty = await read(a.cookie);
+  assert.equal(empty.revision, 0);
+  const values = { ...empty.values, teacher: ' Docente A ', director: 'Directora A' };
+  const write = (cookie, body) => f.call(endpoint, { method: 'PUT', cookie, body });
+  assert.equal((await write(a.cookie, { values, revision: 0 })).status, 200);
+  assert.equal((await read(a.cookie)).values.teacher, 'Docente A');
+  assert.equal((await read(b.cookie)).values.director, '');
+  assert.equal((await write(a.cookie, { values, revision: 0 })).status, 409, 'A second first-save cannot overwrite the first');
+  assert.equal((await write(a.cookie, { values, revision: 1 })).status, 200);
+  assert.equal((await write(a.cookie, { values: { ...values, director: 'Edición vieja' }, revision: 1 })).status, 409);
+  assert.equal((await read(a.cookie)).values.director, 'Directora A');
+  for (const body of [
+    { values, revision: 2, teacherId: b.data.user.id },
+    { values: { ...values, teacherId: b.data.user.id }, revision: 2 },
+    { values: { ...values, director: 'a'.repeat(201) }, revision: 2 },
+    { values: {}, revision: 2 },
+    { values, revision: -1 },
+  ]) assert.equal((await write(a.cookie, body)).status, 400);
+  assert.equal((await write(b.cookie, { values: { ...empty.values, director: 'Director B' }, revision: 0 })).status, 200);
+  assert.equal((await read(a.cookie)).values.director, 'Directora A');
+  assert.equal(f.calls.length, 2, 'Module operations do not query Google');
+  await f.call('/api/auth/logout', { method: 'POST', cookie: a.cookie, body: {} });
+  assert.equal((await f.call(endpoint, { cookie: a.cookie })).status, 401);
+  assert.equal((await read(b.cookie)).values.director, 'Director B');
+});
+
+test('Responsables reports a missing migration without exposing database errors', async t => {
+  const f = fixture(t);
+  const a = await f.login();
+  f.sqlite.exec('DROP TABLE teacher_responsables');
+  const response = await f.call('/api/datos-generales/responsables', { cookie: a.cookie });
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).message, /migración 0002/);
 });
 
 test('credentials and tokens: HttpOnly cookie, only hashed session stored, no upstream password leakage', async t => {

@@ -3,6 +3,9 @@ import { createApiClient } from './api-client.js';
 const byId = id => document.getElementById(id);
 let session = null;
 let expiryTimer;
+let unmountResponsables = null;
+let loadingResponsables = false;
+let viewGeneration = 0;
 const client = createApiClient({ onUnauthorized: () => { if (session) showLogin('Tu sesión venció. Ingresa nuevamente para continuar.'); } });
 const api = (path, method = 'GET', body) => client.request(path, method, body);
 const message = (id, text, success = false) => {
@@ -10,6 +13,12 @@ const message = (id, text, success = false) => {
   byId(id).classList.toggle('success', success);
 };
 function showLogin(note = '') {
+  viewGeneration++;
+  loadingResponsables = false;
+  unmountResponsables?.();
+  unmountResponsables = null;
+  byId('responsables-root').replaceChildren();
+  showProfile();
   document.body.classList.remove('signed-in');
   client.reset();
   clearTimeout(expiryTimer);
@@ -47,6 +56,43 @@ function showWorkspace(data) {
   byId('usage-toggle').hidden = !data.admin?.canViewUsage;
   expiryTimer = setTimeout(() => showLogin('Tu sesión venció. Ingresa nuevamente para continuar.'), Math.max(0, Date.parse(data.sessionExpiresAt) - Date.now()));
 }
+function showProfile() {
+  byId('current-view-label').textContent = 'Mi perfil';
+  byId('workspace-welcome').hidden = false;
+  byId('responsables-panel').hidden = true;
+  byId('responsables-toggle').setAttribute('aria-expanded', 'false');
+  byId('responsables-toggle').classList.remove('selected');
+  const profileLink = document.querySelector('.sidebar-link[href="#profile-card"]');
+  profileLink.classList.add('selected');
+  profileLink.setAttribute('aria-current', 'page');
+  byId('profile-grid').hidden = false;
+}
+document.querySelector('.sidebar-link[href="#profile-card"]').addEventListener('click', showProfile);
+byId('responsables-toggle').addEventListener('click', async () => {
+  if (!session) return;
+  byId('current-view-label').textContent = 'Responsables';
+  byId('workspace-welcome').hidden = true;
+  byId('profile-grid').hidden = true;
+  byId('responsables-panel').hidden = false;
+  byId('responsables-toggle').setAttribute('aria-expanded', 'true');
+  byId('responsables-toggle').classList.add('selected');
+  const profileLink = document.querySelector('.sidebar-link[href="#profile-card"]');
+  profileLink.classList.remove('selected'); profileLink.removeAttribute('aria-current');
+  if (unmountResponsables || loadingResponsables) return;
+  loadingResponsables = true;
+  const generation = viewGeneration;
+  byId('responsables-root').textContent = 'Preparando responsables…';
+  try {
+    if (!byId('shared-responsables-css')) {
+      const css = document.createElement('link'); css.id = 'shared-responsables-css'; css.rel = 'stylesheet'; css.href = '/generated/responsables.css'; document.head.append(css);
+    }
+    const { mountResponsables } = await import('/generated/responsables.js');
+    if (generation !== viewGeneration || !session) return;
+    unmountResponsables = mountResponsables(byId('responsables-root'), api);
+  } catch {
+    if (generation === viewGeneration) byId('responsables-root').textContent = 'No se pudo cargar el formulario. Pulsa Responsables para reintentar.';
+  } finally { if (generation === viewGeneration) loadingResponsables = false; }
+});
 function updateProfileIdentity(user) {
   const name = user.displayName || user.username;
   byId('sidebar-name').textContent = name;

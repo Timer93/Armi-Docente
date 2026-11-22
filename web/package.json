@@ -4,14 +4,25 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "node scripts/build-shared-ui.mjs",
     "dev": "wrangler dev --local --port 8787 --var ARMI_ENV:local",
     "test": "node --test test/*.test.mjs",
     "db:local": "wrangler d1 migrations apply DB --local",
     "check:deploy": "wrangler deploy --dry-run --outdir .deploy-check",
     "deploy": "wrangler deploy"
   },
+  "dependencies": {
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
   "devDependencies": {
+    "@tailwindcss/postcss": "4.2.1",
+    "esbuild": "0.28.2",
+    "postcss": "8.5.33",
+    "tailwindcss": "4.2.1",
     "wrangler": "4.166.0"
   },
-  "engines": { "node": ">=22.13" }
+  "engines": {
+    "node": ">=22.13"
+  }
 }

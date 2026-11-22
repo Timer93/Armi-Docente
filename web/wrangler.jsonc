@@ -6,6 +6,7 @@
   "compatibility_date": "2026-11-21",
   "workers_dev": true,
   "preview_urls": false,
+  "build": { "command": "npm run build" },
   "routes": [
     { "pattern": "web.armiapp.com", "custom_domain": true }
   ],

@@ -202,6 +202,39 @@ async function route(request, env, requester, now, measurement, readUsage) {
       .bind(body.displayName.trim(), body.institutionName.trim(), now, session.id).run();
     return json({ success: true });
   }
+  if (path === '/api/datos-generales/responsables' && ['GET', 'PUT'].includes(request.method)) {
+    const session = await currentSession(request, env, now, measurement);
+    const fields = ['teacher', 'director', 'subdirector', 'pedagogical_coordinator', 'toe_coordinator'];
+    const empty = Object.fromEntries(fields.map(key => [key, '']));
+    try {
+      if (request.method === 'GET') {
+        const row = await env.DB.prepare('SELECT data_json, revision FROM teacher_responsables WHERE teacher_id = ?').bind(session.id).first();
+        return json({ success: true, data: { values: row ? JSON.parse(row.data_json) : empty, revision: row?.revision || 0 } });
+      }
+      const body = await readJson(request);
+      if (Object.keys(body).some(key => !['values', 'revision'].includes(key))
+        || !Number.isSafeInteger(body.revision) || body.revision < 0 || body.revision >= Number.MAX_SAFE_INTEGER
+        || !body.values || typeof body.values !== 'object' || Array.isArray(body.values)
+        || Object.keys(body.values).length !== fields.length
+        || Object.keys(body.values).some(key => !fields.includes(key))
+        || fields.some(key => typeof body.values[key] !== 'string' || body.values[key].length > 200)) {
+        fail('Revisa los responsables: cada nombre admite hasta 200 caracteres.');
+      }
+      const values = Object.fromEntries(fields.map(key => [key, body.values[key].trim()]));
+      const data = JSON.stringify(values);
+      const row = body.revision === 0
+        ? await env.DB.prepare(`INSERT INTO teacher_responsables(teacher_id, data_json, revision, updated_at)
+            VALUES (?, ?, 1, ?) ON CONFLICT(teacher_id) DO NOTHING RETURNING revision`).bind(session.id, data, now).first()
+        : await env.DB.prepare(`UPDATE teacher_responsables SET data_json = ?, revision = revision + 1, updated_at = ?
+            WHERE teacher_id = ? AND revision = ? RETURNING revision`).bind(data, now, session.id, body.revision).first();
+      if (!row) fail('Los datos cambiaron en otra pestaña. Recarga los responsables antes de guardar.', 409);
+      return json({ success: true, data: { values, revision: row.revision } });
+    } catch (error) {
+      if (error instanceof AuthError) throw error;
+      if (String(error?.message).includes('no such table')) fail('Falta preparar las tablas de Responsables. El administrador debe aplicar la migración 0002.', 503);
+      throw error;
+    }
+  }
   return json({ success: false, message: 'Operación no disponible.' }, 404);
 }
 
