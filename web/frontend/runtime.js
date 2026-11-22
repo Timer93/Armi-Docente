@@ -22,13 +22,16 @@ export function installWebRuntime(win) {
   Object.defineProperty(win, 'localStorage', { configurable: true, get: () => local });
   Object.defineProperty(win, 'sessionStorage', { configurable: true, get: () => temporary });
   const allowed = new Set(['GET /api/auth/session', 'POST /api/auth/login', 'POST /api/auth/logout', 'GET /api/health', 'GET /api/admin/usage']);
+  allowed.add('GET /api/academic/status');
+  allowed.add('GET /api/academic/records');
+  allowed.add('POST /api/academic/imports');
   const blocked = () => Response.json({ success: false, message: 'Esta función todavía no está habilitada en la web.' }, { status: 404 });
   win.fetch = (input, options = {}) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, win.location.href);
     const method = String(options.method || input?.method || 'GET').toUpperCase();
     if (url.origin !== win.location.origin) return Promise.resolve(blocked());
     if (url.pathname.startsWith('/api/')) {
-      if (!allowed.has(`${method} ${url.pathname}`)) return Promise.resolve(blocked());
+      if (!allowed.has(`${method} ${url.pathname}`) && !(method === 'POST' && /^\/api\/academic\/imports\/[a-f0-9]{64}\/(chunks|commit)$/.test(url.pathname))) return Promise.resolve(blocked());
     } else if (method !== 'GET' && method !== 'HEAD') return Promise.resolve(blocked());
     return nativeFetch(input, options);
   };

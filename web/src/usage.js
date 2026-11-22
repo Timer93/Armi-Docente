@@ -52,8 +52,8 @@ export function measureDatabase(db, measurement) {
 export function recordUsage(env, request, response, measurement, elapsedMs) {
   const path = new URL(request.url).pathname;
   if (!path.startsWith('/api/')) return;
-  const route = ['/api/auth/login', '/api/auth/session', '/api/auth/logout', '/api/profile', '/api/datos-generales/responsables', '/api/admin/usage', '/api/health'].includes(path)
-    ? path : '/api/other';
+  const route = ['/api/auth/login', '/api/auth/session', '/api/auth/logout', '/api/profile', '/api/datos-generales/responsables', '/api/admin/usage', '/api/health', '/api/academic/status', '/api/academic/records', '/api/academic/imports'].includes(path)
+    ? path : path.startsWith('/api/academic/imports/') ? '/api/academic/import-batch' : '/api/other';
   try {
     env.USAGE_ANALYTICS?.writeDataPoint({
       indexes: [measurement.teacherId || 'anonymous'],

@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AuthProvider, useAuth } from './auth';
 import { installWebRuntime } from './runtime.js';
+import { ImportSnapshot } from './ImportSnapshot';
 import './web.css';
 import '../../index.css';
 
@@ -24,7 +25,7 @@ function WebHost({ App }: { App: React.ComponentType }) {
     observer.observe(document.getElementById('root')!, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'contenteditable'] });
     return () => observer.disconnect();
   }, [session]);
-  return <>{session && <div className="web-adaptation-notice" role="status"><strong>ARMI Docente · Web</strong><span>Interfaz original en adaptación. El guardado, Drive y las funciones de Windows todavía no están habilitados aquí.</span></div>}<App /></>;
+  return <>{session && <div className="web-adaptation-notice"><strong>ARMI Docente · Web</strong><span>Consulta de copias por cuenta. El guardado académico, Drive y la sincronización todavía están pendientes.</span><ImportSnapshot /></div>}<App /></>;
 }
 
 async function start() {

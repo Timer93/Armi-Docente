@@ -8,6 +8,7 @@ function fixture(t) {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(fs.readFileSync(new URL('../migrations/0001_identity.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0002_responsables.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0003_academic_snapshots.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -289,4 +290,69 @@ test('telemetry is tenant-attributed, avoids a D1 counter write per read, and ne
   assert.equal(points.length, count, 'Static pages do not emit API usage points');
   f.env.USAGE_ANALYTICS = { writeDataPoint() { throw new Error('analytics unavailable'); } };
   assert.equal((await f.call('/api/profile', { method: 'PUT', cookie: a.cookie, body: { displayName: 'Guardado', institutionName: '' } })).status, 200);
+});
+
+test('academic copies isolate identical desktop IDs, hide incomplete imports and resume batches safely', async t => {
+  const f = fixture(t); const a = await f.login(); const b = await f.login('docenteB');
+  const records = name => [{ dataset: 'general', id: 'general', value: { teacher: name } }, { dataset: 'students', id: '1', value: { id: 1, name } }];
+  const start = async (cookie, username, fingerprint) => {
+    const result = await f.call('/api/academic/imports', { method:'POST', cookie, body: { ownerUsername:username, fingerprint:fingerprint.repeat(64), counts:{general:1,students:1,annual:0,units:0,sessions:0,frontend:0} } });
+    assert.equal(result.status,200,await result.clone().text());return (await result.json()).data.importId;
+  };
+  const chunk = (cookie,id,sequence,data) => f.call(`/api/academic/imports/${id}/chunks`,{method:'POST',cookie,body:{sequence,records:data}});
+  const commit = (cookie,id) => f.call(`/api/academic/imports/${id}/commit`,{method:'POST',cookie,body:{}});
+  const read = async cookie => (await (await f.call('/api/academic/records?dataset=students',{cookie})).json()).data;
+  assert.equal((await f.call('/api/academic/status')).status,401);
+  const idA=await start(a.cookie,'docenteA','a');
+  assert.equal((await chunk(a.cookie,idA,0,records('Alumno A').slice(0,1))).status,200);
+  assert.equal((await commit(a.cookie,idA)).status,409);
+  assert.deepEqual((await read(a.cookie)).records,[]);
+  assert.equal((await chunk(a.cookie,idA,1,records('Alumno A').slice(1))).status,200);
+  assert.equal((await chunk(a.cookie,idA,1,records('Alumno A').slice(1))).status,200);
+  assert.equal((await chunk(a.cookie,idA,1,records('Cambió').slice(1))).status,409);
+  assert.equal((await commit(a.cookie,idA)).status,200);
+  assert.equal((await commit(a.cookie,idA)).status,200);
+  assert.equal((await read(a.cookie)).revision,1);
+  assert.equal((await read(a.cookie)).records[0].value.name,'Alumno A');
+  assert.deepEqual((await read(b.cookie)).records,[]);
+  assert.equal((await chunk(b.cookie,idA,2,records('Ataque'))).status,404);
+  assert.equal((await chunk(a.cookie,idA,2,records('Tardío'))).status,409);
+  const idB=await start(b.cookie,'docenteB','a');
+  assert.equal((await chunk(b.cookie,idB,0,records('Alumno B'))).status,200);
+  assert.equal((await commit(b.cookie,idB)).status,200);
+  assert.equal((await read(b.cookie)).records[0].value.name,'Alumno B');
+  assert.equal((await read(a.cookie)).records[0].value.name,'Alumno A');
+  assert.equal((await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{ownerUsername:'docenteB'}})).status,403);
+});
+
+test('academic activation protects the current copy from competing replacements; private fields are refused', async t => {
+  const f=fixture(t); const a=await f.login();
+  const counts={general:1,students:0,annual:0,units:0,sessions:0,frontend:0};
+  const start=async fingerprint=>{const r=await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{ownerUsername:'docenteA',fingerprint:fingerprint.repeat(64),counts}});assert.equal(r.status,200);return(await r.json()).data.importId;};
+  const first=await start('b'); const second=await start('c');
+  const upload=(id,value,extra={})=>f.call(`/api/academic/imports/${id}/chunks`,{method:'POST',cookie:a.cookie,body:{sequence:0,records:[{dataset:'general',id:'general',value}],...extra}});
+  assert.equal((await upload(first,{api_key:'private'})).status,400);
+  assert.equal((await upload(first,{accessToken:'private'})).status,400);
+  assert.equal((await upload(first,{teacher:'A'}, {teacherId:'other'})).status,400);
+  assert.equal((await upload(first,{teacher:'A'})).status,200);
+  assert.equal((await upload(second,{teacher:'B'})).status,200);
+  const commit=id=>f.call(`/api/academic/imports/${id}/commit`,{method:'POST',cookie:a.cookie,body:{}});
+  assert.equal((await commit(first)).status,200);
+  assert.equal((await commit(second)).status,409);
+  const current=await f.call('/api/academic/records?dataset=general',{cookie:a.cookie});
+  assert.equal((await current.json()).data.records[0].value.teacher,'A');
+  assert.equal((await f.call('/api/academic/records?dataset=general&snapshot='+second,{cookie:a.cookie})).status,409);
+  assert.equal((await f.call('/api/academic/records?dataset=unknown',{cookie:a.cookie})).status,400);
+});
+
+test('academic record pagination stays scoped to the active account and snapshot', async t => {
+  const f=fixture(t);const a=await f.login();
+  const values=[{dataset:'general',id:'general',value:{teacher:'A'}},...Array.from({length:25},(_,index)=>({dataset:'students',id:String(index+1),value:{id:index+1,name:'Alumno'}}))];
+  const result=await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{ownerUsername:'docenteA',fingerprint:'d'.repeat(64),counts:{general:1,students:25,annual:0,units:0,sessions:0,frontend:0}}});
+  const id=(await result.json()).data.importId;
+  for(let offset=0;offset<values.length;offset+=20) assert.equal((await f.call(`/api/academic/imports/${id}/chunks`,{method:'POST',cookie:a.cookie,body:{sequence:offset/20,records:values.slice(offset,offset+20)}})).status,200);
+  assert.equal((await f.call(`/api/academic/imports/${id}/commit`,{method:'POST',cookie:a.cookie,body:{}})).status,200);
+  let cursor='';const ids=[];
+  do {const page=await(await f.call('/api/academic/records?'+new URLSearchParams({dataset:'students',cursor,snapshot:id}),{cookie:a.cookie})).json();assert.equal(page.success,true);assert(page.data.records.length<=10);ids.push(...page.data.records.map(row=>row.id));cursor=page.data.nextCursor||'';}while(cursor);
+  assert.equal(ids.length,25);assert.equal(new Set(ids).size,25);
 });

@@ -1,5 +1,6 @@
 import { AuthError, authenticateWithAppsScript, configuredAuthUrl } from './apps-script-auth.js';
 import { canViewUsage, createMeasurement, createUsageReader, measureDatabase, recordUsage } from './usage.js';
+import { academicRoute } from './academic.js';
 
 const SESSION_MS = 30 * 60_000;
 const MAX_BODY_BYTES = 4096;
@@ -32,9 +33,9 @@ function sessionToken(request, env) {
   return (request.headers.get('cookie') || '').split(';').map(part => part.trim())
     .find(part => part.startsWith(`${name}=`))?.slice(name.length + 1) || '';
 }
-async function readJson(request) {
+async function readJson(request, maxBytes = MAX_BODY_BYTES) {
   if (!/^application\/json(?:;|$)/i.test(request.headers.get('content-type') || '')) fail('Envía una solicitud JSON.', 415);
-  if (Number(request.headers.get('content-length') || 0) > MAX_BODY_BYTES) fail('Solicitud demasiado grande.', 413);
+  if (Number(request.headers.get('content-length') || 0) > maxBytes) fail('Solicitud demasiado grande.', 413);
   const reader = request.body?.getReader();
   if (!reader) fail('Faltan los datos de la solicitud.');
   const chunks = [];
@@ -44,7 +45,7 @@ async function readJson(request) {
       const { done, value } = await reader.read();
       if (done) break;
       length += value.byteLength;
-      if (length > MAX_BODY_BYTES) { await reader.cancel(); fail('Solicitud demasiado grande.', 413); }
+      if (length > maxBytes) { await reader.cancel(); fail('Solicitud demasiado grande.', 413); }
       chunks.push(value);
     }
   } finally { reader.releaseLock(); }
@@ -140,6 +141,10 @@ async function route(request, env, requester, now, measurement, readUsage) {
     return env.ASSETS.fetch(request);
   }
   if (!env.DB) fail('La base web todavía no está configurada.', 503);
+  if (path.startsWith('/api/academic/')) {
+    const teacher = await currentSession(request, env, now, measurement);
+    return academicRoute(request, env, teacher, { readJson, digest, randomToken, now });
+  }
   if (path === '/api/auth/login' && request.method === 'POST') {
     if (!configuredAuthUrl(env)) fail('El acceso web todavía no está configurado.', 503);
     const credentials = await readJson(request);
