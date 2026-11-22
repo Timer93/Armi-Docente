@@ -16,8 +16,8 @@ export function ImportSnapshot() {
     setOpen(true); setMessage('Comprobando tu cuenta…');
     try {
       const status = await academicApi('/api/academic/status');
-      setReady(status.ready);
-      setMessage(status.ready ? (status.snapshotId ? 'Ya tienes una copia activa. La importación completa la reemplazará; los cambios del escritorio no se sincronizan automáticamente.' : 'Selecciona la copia exportada del escritorio para esta cuenta.') : status.message);
+      setReady(status.ready && !status.hasWebEdits);
+      setMessage(status.hasWebEdits ? 'Ya tienes cambios guardados en la web. La importación está bloqueada para conservarlos. La sincronización con el escritorio sigue pendiente.' : status.ready ? (status.snapshotId ? 'Ya tienes una copia activa. La importación completa la reemplazará; los cambios del escritorio no se sincronizan automáticamente.' : 'Selecciona la copia exportada del escritorio para esta cuenta.') : status.message);
     } catch (error) { setMessage((error as Error).message); }
   };
   const selectFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -61,7 +61,7 @@ export function ImportSnapshot() {
   return <><button type="button" className="web-import-toggle" onClick={() => void show()}>Importar copia</button>{open && <section className="web-import-dialog" role="dialog" aria-modal="false" aria-labelledby="web-import-title">
     <div className="web-import-heading"><h2 id="web-import-title">Datos de mi escritorio</h2><button type="button" disabled={busy} aria-label="Cerrar importación" onClick={() => setOpen(false)}>×</button></div>
     <p>Cuenta: <strong>{getWebIdentity()?.user.username}</strong></p>
-    <p>Esta es una copia para consultar en la web. El guardado académico y la sincronización en ambos sentidos todavía están pendientes.</p>
+    <p>Transfiere tus datos del escritorio a esta cuenta. Solo Datos generales y el registro de estudiantes permiten guardar cambios web; esos cambios todavía no se sincronizan con el escritorio.</p>
     <label htmlFor="academic-copy-file">Archivo de copia de ARMI (.json)</label><input id="academic-copy-file" type="file" accept=".json,application/json" disabled={!ready || busy} onChange={event => void selectFile(event)} />
     {copy && <dl>{datasets.map(dataset => <div key={dataset}><dt>{labels[dataset]}</dt><dd>{copy.counts[dataset]}</dd></div>)}</dl>}
     <p role="status">{message}</p>

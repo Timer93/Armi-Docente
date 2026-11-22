@@ -49,11 +49,27 @@ const originalSource = {
       return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) };
     });
     bundler.onLoad({ filter: /[\\/]components[\\/]DatosGeneralesView\.tsx$/ }, async args => {
-      // Esta compilación sigue siendo de consulta. No anunciar un guardado
-      // automático que todavía no está conectado a D1. El original no cambia.
+      // Marcas exclusivas de la compilación web; el archivo de escritorio no cambia.
       const contents = (await readFile(args.path, 'utf8'))
-        .replaceAll('Guardado automatico', 'Copia de consulta')
-        .replaceAll('Guardado automático', 'Copia de consulta');
+        .replace('<div className="animate-fade-in pb-10">', '<div data-armi-web-editor="general" className="animate-fade-in pb-10">')
+        .replace('<div className="flex flex-col items-center gap-3">','<div data-web-unavailable="" className="flex flex-col items-center gap-3">')
+        .replaceAll('Guardado automatico', 'Sin cambios pendientes')
+        .replaceAll('Guardado automático', 'Sin cambios pendientes')
+        .replaceAll('SQL Server Activo','Datos en la web');
+      if (!contents.includes('data-armi-web-editor="general"')) throw new Error('Review general editor marker');
+      return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) };
+    });
+    bundler.onLoad({ filter: /[\\/]components[\\/]StudentsView\.tsx$/ }, async args => {
+      let contents = (await readFile(args.path, 'utf8')).replace('<div className="animate-fade-in pb-12">','<div data-armi-web-editor="students" className="animate-fade-in pb-12">');
+      if (!contents.includes('data-armi-web-editor="students"')) throw new Error('Review student editor marker');
+      for (const title of ['Importar Excel','Egresar Promoción Anterior','Migración Masiva']) contents = contents.replace(`title="${title}"`,`data-web-unavailable="" title="${title}"`);
+      for (const handler of ['handleRevealPortalPassword(student)','handleOpenStudentPortalTest(student)','handleResetPortalPassword(student)']) contents = contents.replace(`onClick={() => { void ${handler}; }}`,`data-web-unavailable="" onClick={() => { void ${handler}; }}`);
+      contents = contents.replace('title={`Ver foto de ${student.name}`}','data-web-unavailable="" title={`Ver foto de ${student.name}`}');
+      const clearButton = '<button onClick={handleClearForm}';
+      if (!contents.includes(clearButton)) throw new Error('Review web student delete action');
+      contents = contents.replace(clearButton, '<button type="button" title="Eliminar estudiante seleccionado" disabled={!selectedStudentId || savingStudentIds.includes(selectedStudentId)} onClick={() => handleDeleteRequest(selectedStudentId)} className="rounded-xl border border-rose-200 px-3 py-2 text-xs font-bold text-rose-700 disabled:opacity-40">Eliminar seleccionado</button>' + clearButton);
+      contents = contents.replaceAll('eliminado permanentemente','eliminado de la web');
+      contents = contents.replaceAll('SQL Sincronizado - Gestión de Datos Estudiantiles','Registro de estudiantes · Web');
       return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) };
     });
     bundler.onLoad({ filter: /[\\/]index\.css$/ }, async args => {

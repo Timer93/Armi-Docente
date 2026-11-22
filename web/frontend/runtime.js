@@ -24,6 +24,7 @@ export function installWebRuntime(win) {
   const allowed = new Set(['GET /api/auth/session', 'POST /api/auth/login', 'POST /api/auth/logout', 'GET /api/health', 'GET /api/admin/usage']);
   allowed.add('GET /api/academic/status');
   allowed.add('GET /api/academic/records');
+  allowed.add('PUT /api/academic/edit');
   allowed.add('POST /api/academic/imports');
   const blocked = () => Response.json({ success: false, message: 'Esta función todavía no está habilitada en la web.' }, { status: 404 });
   win.fetch = (input, options = {}) => {

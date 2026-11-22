@@ -10,10 +10,13 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
 - Acceso real con Google Sheets / Apps Script y sesión HttpOnly del Worker.
 - Copias académicas por docente: datos generales, estudiantes, programaciones,
   unidades, sesiones y configuración de áreas/horarios. Importación explícita y
-  consulta; el guardado académico y la sincronización bidireccional siguen pendientes.
+  consulta y guardado web de Datos generales y registro de Estudiantes. La
+  sincronización bidireccional sigue pendiente.
 - Menús y pantallas originales para revisar su compatibilidad en el navegador.
-- Controles de edición del contenido deshabilitados mientras se adapta el servidor.
-- Guardado académico, Drive, IA, importación de Excel y control de Windows pendientes.
+- Crear, editar y eliminar estudiantes; editar Datos generales. Protección contra
+  sobrescrituras desde pestañas desactualizadas y avisos de guardado/error.
+- Los otros módulos siguen en consulta. Drive, IA, importación de Excel, fotos,
+  operaciones masivas y portal de estudiantes web pendientes.
 - No modifica ni sincroniza la base local. Una cuenta sin copia activa muestra
   campos vacíos; eso no elimina los registros del escritorio.
 
@@ -38,7 +41,28 @@ máximo a los 30 minutos o al vencimiento de la membresía, si es anterior.
 `frontend/runtime.js` mantiene los borradores solo en memoria de esa página y
 rechaza las operaciones todavía no migradas antes de enviarlas a Cloudflare o
 localhost. Inicio y cierre de sesión recargan el contexto, para no reutilizar
-caches entre docentes. No se ofrece persistencia académica en este modo.
+caches entre docentes. Solo los campos de los módulos adaptados persisten en D1.
+
+### Activar el guardado de Datos generales y Estudiantes
+
+Después del despliegue, ejecutar `migrations/0004_academic_edits.sql` en la consola
+de D1 de **armi-docente-web**, y recargar la página web. Es una tabla adicional:
+no borra ni modifica las copias importadas, las cuentas ni el escritorio. Si la
+tabla falta, se conserva el modo de consulta y el servidor rechaza escrituras.
+
+Las modificaciones web se guardan en `academic_edits`, separadas por docente,
+dataset e identificador, con revisión por registro y eliminaciones lógicas.
+El cliente envía únicamente los campos modificados y serializa las operaciones
+del mismo registro; el servidor rechaza revisiones y copias desactualizadas.
+No se transmiten claves de IA, contraseñas estudiantiles, imágenes ni rutas de PC.
+Una cuenta nueva puede crear datos sin importar un archivo de escritorio.
+Los catálogos geográficos todavía solo ofrecen los valores de la copia importada.
+
+Después de guardar cambios web, no se permite otra importación que los reemplace.
+No hay todavía sincronización con el escritorio ni fusión automática. Ante un
+error de guardado o conflicto, los siguientes guardados requieren recargar para
+evitar sobrescribir registros con un formulario desactualizado. Conservar el
+texto pendiente antes de recargar si se necesita recuperarlo.
 
 ## Desarrollo y comprobación
 

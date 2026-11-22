@@ -3,7 +3,24 @@
 export * from 'armi-desktop-api-original';
 import { INITIAL_GENERAL_DATA, INITIAL_MODULE_STATUS } from '../../constants';
 import { getWebIdentity } from './runtime.js';
-import { readAcademic } from './academic-client';
+import { readAcademic, saveAcademic } from './academic-client';
+
+export async function saveDatosGenerales(data: any) {
+  try { const saved = await saveAcademic('general','general',data); return {success:true,data:saved.value}; }
+  catch (error) { return {success:false,message:(error as Error).message}; }
+}
+export async function saveEstudiante(data: any) {
+  const id = String(data.id).startsWith('new-') ? `web-${crypto.randomUUID()}` : String(data.id);
+  try { const saved = await saveAcademic('students',id,data); return {success:true,data:saved.value}; }
+  catch (error) { return {success:false,message:(error as Error).message}; }
+}
+export async function deleteEstudiante(id: string | number) {
+  try { await saveAcademic('students',String(id),{},'delete'); return {success:true}; }
+  catch (error) { return {success:false,message:(error as Error).message}; }
+}
+// The original screen uses this only as a completion hint after a confirmed
+// student save. Permissions remain exclusively on the server.
+export async function updateModuleStatus(moduleName: string) { return moduleName === 'estudiantes' ? {success:true} : {success:false,message:'Este módulo todavía está en consulta.'}; }
 
 export async function getDatosGenerales() {
   const identity = getWebIdentity();

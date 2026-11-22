@@ -1,4 +1,5 @@
 import { AuthError } from './apps-script-auth.js';
+import { editsReady, hasEdits, editAcademic } from './academic-edits.js';
 
 export const DATASETS = ['general', 'students', 'annual', 'units', 'sessions', 'frontend'];
 export const FRONTEND_KEYS = ['armi_areas', 'armi_assignments', 'armi_calendar_state', 'armi_holidays_v7', 'armi_schedule_config', 'armi_schedule_entries', 'armi_schedule_color_settings', 'armi_pa_pinned_didactic_units_global', 'armi_pa_pinned_matrix_global'];
@@ -39,11 +40,12 @@ export async function academicRoute(request, env, teacher, { readJson, digest, r
   const db = env.DB;
   const teacherId = teacher.id; // Exclusivamente de la sesión comprobada en servidor.
   try {
+    if (url.pathname === '/api/academic/edit' && request.method === 'PUT') return response(await editAcademic(request, db, teacher, { readJson, digest, now }));
     if (url.pathname === '/api/academic/status' && request.method === 'GET') {
       const current = await head(db, teacherId);
       const counts = current.active_import_id
         ? (await db.prepare('SELECT dataset, COUNT(*) AS count FROM academic_records WHERE teacher_id = ? AND import_id = ? GROUP BY dataset').bind(teacherId, current.active_import_id).all()).results : [];
-      return response({ ready: true, snapshotId: current.active_import_id, revision: current.revision, counts: Object.fromEntries(counts.map(row => [row.dataset, row.count])) });
+      return response({ ready: true, editable: await editsReady(db), hasWebEdits: await hasEdits(db, teacherId), snapshotId: current.active_import_id, revision: current.revision, counts: Object.fromEntries(counts.map(row => [row.dataset, row.count])) });
     }
     if (url.pathname === '/api/academic/records' && request.method === 'GET') {
       const dataset = url.searchParams.get('dataset');
@@ -52,6 +54,20 @@ export async function academicRoute(request, env, teacher, { readJson, digest, r
       const current = await head(db, teacherId);
       const requestedSnapshot = url.searchParams.get('snapshot');
       if (requestedSnapshot && requestedSnapshot !== current.active_import_id) fail('La copia activa cambió. Recarga la página.', 409);
+      const requestedRevision = url.searchParams.get('revision');
+      if (requestedRevision !== null && String(current.revision) !== requestedRevision) fail('Los datos cambiaron durante la lectura. Recarga la página.', 409);
+      if (['general','students'].includes(dataset) && await editsReady(db)) {
+        const rows = (await db.prepare(`SELECT record_id, payload_json, revision FROM (
+          SELECT b.record_id, COALESCE(e.payload_json,b.payload_json) AS payload_json, COALESCE(e.revision,0) AS revision
+          FROM academic_records b LEFT JOIN academic_edits e ON e.teacher_id=b.teacher_id AND e.dataset=b.dataset AND e.record_id=b.record_id
+          WHERE b.teacher_id=? AND b.import_id=? AND b.dataset=? AND b.record_id>? AND COALESCE(e.deleted,0)=0
+          UNION ALL SELECT e.record_id,e.payload_json,e.revision FROM academic_edits e
+          WHERE e.teacher_id=? AND e.dataset=? AND e.record_id>? AND e.deleted=0 AND NOT EXISTS
+          (SELECT 1 FROM academic_records b WHERE b.teacher_id=e.teacher_id AND b.import_id=? AND b.dataset=e.dataset AND b.record_id=e.record_id)
+          ) ORDER BY record_id LIMIT 11`).bind(teacherId,current.active_import_id,dataset,cursor,teacherId,dataset,cursor,current.active_import_id).all()).results;
+        const page = rows.slice(0,10);
+        return response({records:page.map(row => ({id:row.record_id,value:JSON.parse(row.payload_json),revision:row.revision})),nextCursor:rows.length>10?page.at(-1).record_id:null,snapshotId:current.active_import_id,revision:current.revision});
+      }
       if (!current.active_import_id) return response({ records: [], nextCursor: null, snapshotId: null, revision: 0 });
       // Diez registros por página limitan la respuesta y evitan barridos globales.
       const rows = (await db.prepare(`SELECT record_id, payload_json FROM academic_records
@@ -61,6 +77,7 @@ export async function academicRoute(request, env, teacher, { readJson, digest, r
       return response({ records: page.map(row => ({ id: row.record_id, value: JSON.parse(row.payload_json) })), nextCursor: rows.length > 10 ? page.at(-1).record_id : null, snapshotId: current.active_import_id, revision: current.revision });
     }
     if (url.pathname === '/api/academic/imports' && request.method === 'POST') {
+      if (await hasEdits(db,teacherId)) fail('Esta cuenta ya tiene cambios guardados en la web. No se permite reemplazarlos con otra copia. La sincronización sigue pendiente.',409);
       const body = await readJson(request);
       if (!keys(body, ['ownerUsername', 'fingerprint', 'counts']) || body.ownerUsername !== teacher.provider_username) fail('La copia corresponde a otra cuenta. Inicia sesión con el usuario indicado en el archivo.', 403);
       if (!/^[a-f0-9]{64}$/.test(body.fingerprint || '') || !keys(body.counts, DATASETS)

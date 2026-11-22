@@ -29,9 +29,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [client] = useState(() => createApiClient({ onUnauthorized: () => { setWebIdentity(null); setSession(null); } }));
   useEffect(() => {
     let active = true;
-    client.request('/api/auth/session').then(data => {
+    client.request('/api/auth/session').then(async data => {
+      const academic = await client.request('/api/academic/status').catch(() => ({ editable: false }));
       if (!active) return;
-      setWebIdentity(data); setSession(desktopSession(data)); setExpiry(Date.parse(data.sessionExpiresAt));
+      setWebIdentity({ ...data, academic }); setSession(desktopSession(data)); setExpiry(Date.parse(data.sessionExpiresAt));
     }).catch(() => { if (active) { setWebIdentity(null); setSession(null); } }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [client]);

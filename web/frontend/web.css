@@ -9,3 +9,5 @@ body.armi-web-session #root { padding-top: 44px; }
 body.armi-web-session [data-armi-web-sidebar] { top: 44px; height: calc(100vh - 44px); }
 body.armi-web-session #root main :disabled { cursor: not-allowed; }
 @media (max-width: 760px) { .web-adaptation-notice { min-height: 64px; gap: 8px; padding: 8px 12px; font-size: 10px; }.armi-web-session #root { padding-top: 64px !important; }body.armi-web-session [data-armi-web-sidebar] { top: 64px; height: calc(100vh - 64px); } }
+
+.web-save-status {position:fixed;bottom:12px;right:20px;z-index:9999;max-width:min(620px,90vw);padding:10px 16px;border:1px solid #cbd5e1;border-radius:12px;background:#fff;color:#334155;box-shadow:0 4px 18px #0002;font-size:14px}.web-save-status.error{border-color:#e11d48;color:#9f1239}.web-save-status button{margin-left:12px;text-decoration:underline;font-weight:700}[data-web-unavailable]{opacity:.5;cursor:not-allowed}

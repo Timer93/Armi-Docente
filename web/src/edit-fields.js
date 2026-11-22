@@ -1,0 +1,5 @@
+// Lista compartida por el adaptador web y el servidor. Nunca incluye secretos,
+// credenciales de estudiantes, imágenes ni rutas del equipo.
+export const GENERAL_FIELDS = ['year','department','region','province','ugel','district','institution','lugar','school_shift','level','motto','year_name','management_weeks_u1','director','subdirector','pedagogical_coordinator','toe_coordinator','teacher','context_description','b1_start','b1_end','b2_start','b2_end','b3_start','b3_end','b4_start','b4_end','vac_start','vac_end','u1_start','u2_start','u3_start','u4_start','u5_start','u6_start','u7_start','u8_start','u_vac_start','u_vac_end','u1_end','u2_end','u3_end','u4_end','u5_end','u6_end','u7_end','u8_end','ie_anniversary_date','achievement_day_1_date','community_anniversary_date','achievement_day_2_date','province_anniversary_date','other_important_date'];
+export const STUDENT_FIELDS = ['nivel','name','grade','section','fechaNacimiento','dni','email','microsoft','group','estado','sexo','edad'];
+export const fieldsFor = dataset => dataset === 'general' ? GENERAL_FIELDS : dataset === 'students' ? STUDENT_FIELDS : [];

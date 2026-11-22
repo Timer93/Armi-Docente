@@ -9,6 +9,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0001_identity.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0002_responsables.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0003_academic_snapshots.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0004_academic_edits.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -355,4 +356,50 @@ test('academic record pagination stays scoped to the active account and snapshot
   let cursor='';const ids=[];
   do {const page=await(await f.call('/api/academic/records?'+new URLSearchParams({dataset:'students',cursor,snapshot:id}),{cookie:a.cookie})).json();assert.equal(page.success,true);assert(page.data.records.length<=10);ids.push(...page.data.records.map(row=>row.id));cursor=page.data.nextCursor||'';}while(cursor);
   assert.equal(ids.length,25);assert.equal(new Set(ids).size,25);
+});
+
+test('web edits: create without import, tenant isolation, stale tab protection, deletion and private field rejection', async t => {
+  const f=fixture(t);const a=await f.login();const b=await f.login('docenteB');
+  const write=(cookie,overrides={})=>f.call('/api/academic/edit',{method:'PUT',cookie,body:{dataset:'students',id:'web-student-1',changes:{name:'Alumno A',grade:'1ro',section:'A'},action:'save',expectedRevision:0,snapshotId:null,operationId:crypto.randomUUID(),...overrides}});
+  const read=async(cookie,dataset='students')=>(await(await f.call('/api/academic/records?dataset='+dataset,{cookie})).json()).data;
+  assert.equal((await write('')).status,401);
+  assert.equal((await write(a.cookie,{changes:{name:'A',password:'hidden'}})).status,400);
+  assert.equal((await write(a.cookie,{teacherId:b.data.user.id})).status,400);
+  const first=await write(a.cookie);assert.equal(first.status,200,await first.clone().text());
+  assert.equal((await read(a.cookie)).records[0].revision,1);
+  assert.deepEqual((await read(b.cookie)).records,[]);
+  assert.equal((await write(b.cookie)).status,200,'Same ID is isolated by account');
+  assert.equal((await write(a.cookie)).status,409,'Stale tab cannot overwrite');
+  assert.equal((await write(a.cookie,{expectedRevision:1,changes:{name:'Nombre actualizado'}})).status,200);
+  assert.equal((await read(a.cookie)).records[0].value.grade,'1ro','Patch preserves other fields');
+  assert.equal((await read(b.cookie)).records[0].value.name,'Alumno A');
+  assert.equal((await write(a.cookie,{expectedRevision:2,changes:{},action:'delete'})).status,200);
+  assert.deepEqual((await read(a.cookie)).records,[]);
+  assert.equal((await write(a.cookie,{expectedRevision:3})).status,409,'Deletion cannot be undone by stale autosave');
+  assert.equal((await write(a.cookie,{dataset:'general',id:'general',changes:{teacher:'Docente editado'}})).status,200);
+  assert.equal((await read(a.cookie,'general')).records[0].value.teacher,'Docente editado');
+  const revision=(await read(a.cookie,'general')).revision;
+  assert.equal((await f.call('/api/academic/records?dataset=students&revision='+(revision-1),{cookie:a.cookie})).status,409);
+  assert.equal((await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{}})).status,409,'Imports cannot replace web edits');
+});
+
+test('web edits preserve imported payloads and handle repeated acknowledgements and old schema safely', async t => {
+  const f=fixture(t);const a=await f.login();
+  const start=await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{ownerUsername:'docenteA',fingerprint:'f'.repeat(64),counts:{general:1,students:1,annual:0,units:0,sessions:0,frontend:0}}});
+  const id=(await start.json()).data.importId;
+  const rows=[{dataset:'general',id:'general',value:{teacher:'Original'}},{dataset:'students',id:'1',value:{id:1,name:'Original',grade:'2do',section:'A',evaluations:{test:{level:'A'}}}}];
+  await f.call(`/api/academic/imports/${id}/chunks`,{method:'POST',cookie:a.cookie,body:{sequence:0,records:rows}});
+  await f.call(`/api/academic/imports/${id}/commit`,{method:'POST',cookie:a.cookie,body:{}});
+  const body={dataset:'students',id:'1',changes:{name:'Editado'},action:'save',expectedRevision:0,snapshotId:id,operationId:crypto.randomUUID()};
+  const put=body=>f.call('/api/academic/edit',{method:'PUT',cookie:a.cookie,body});
+  assert.equal((await put({...body,snapshotId:'e'.repeat(64)})).status,409);
+  assert.equal((await put(body)).status,200);
+  assert.equal((await put(body)).status,200,'Acknowledgement can be fetched again');
+  assert.equal((await put({...body,changes:{name:'Otro'}})).status,409);
+  const read=(await(await f.call('/api/academic/records?dataset=students',{cookie:a.cookie})).json()).data;
+  assert.equal(read.records[0].value.name,'Editado');assert.equal(read.records[0].value.evaluations.test.level,'A');
+  assert.equal(JSON.parse(f.sqlite.prepare("SELECT payload_json FROM academic_records WHERE dataset='students'").get().payload_json).name,'Original');
+  f.sqlite.exec('DROP TABLE academic_edits');
+  const status=(await(await f.call('/api/academic/status',{cookie:a.cookie})).json()).data;
+  assert.equal(status.editable,false);assert.equal((await put(body)).status,503);
 });
