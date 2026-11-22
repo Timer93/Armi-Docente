@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "armi-web-piloto",
+  "account_id": "d925cb94b70eaf89d4ca106b5824d7bc",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-21",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    "ARMI_ENV": "staging",
+    "ARMI_ADMIN_USERNAMES": "Timer",
+    "ARMI_CF_ACCOUNT_ID": "d925cb94b70eaf89d4ca106b5824d7bc"
+  },
+  "analytics_engine_datasets": [
+    { "binding": "USAGE_ANALYTICS", "dataset": "armi_web_usage" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "armi-web-piloto",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": { "crons": ["17 4 * * *"] }
+}

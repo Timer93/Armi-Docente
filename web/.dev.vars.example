@@ -1,0 +1,2 @@
+# Copiar a .dev.vars para desarrollo local. No guardar claves en GitHub.
+ARMI_AUTH_APPS_SCRIPT_URL="https://script.google.com/macros/s/REEMPLAZAR/exec"

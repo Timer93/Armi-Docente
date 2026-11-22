@@ -1,0 +1,17 @@
+{
+  "name": "armi-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local --port 8787 --var ARMI_ENV:local",
+    "test": "node --test test/*.test.mjs",
+    "db:local": "wrangler d1 migrations apply DB --local",
+    "check:deploy": "wrangler deploy --dry-run --outdir .deploy-check",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.166.0"
+  },
+  "engines": { "node": ">=22.13" }
+}
