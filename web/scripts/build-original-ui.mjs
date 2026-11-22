@@ -48,6 +48,14 @@ const originalSource = {
       }
       return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) };
     });
+    bundler.onLoad({ filter: /[\\/]components[\\/]DatosGeneralesView\.tsx$/ }, async args => {
+      // Esta compilación sigue siendo de consulta. No anunciar un guardado
+      // automático que todavía no está conectado a D1. El original no cambia.
+      const contents = (await readFile(args.path, 'utf8'))
+        .replaceAll('Guardado automatico', 'Copia de consulta')
+        .replaceAll('Guardado automático', 'Copia de consulta');
+      return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) };
+    });
     bundler.onLoad({ filter: /[\\/]index\.css$/ }, async args => {
       if (path.resolve(args.path) !== absolute('index.css')) return;
       const cssPath = value => value.replace(/\\/g, '/');

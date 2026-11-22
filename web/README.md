@@ -13,7 +13,7 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   consulta; el guardado académico y la sincronización bidireccional siguen pendientes.
 - Menús y pantallas originales para revisar su compatibilidad en el navegador.
 - Controles de edición del contenido deshabilitados mientras se adapta el servidor.
-- Guardado académico, Drive, IA, importaciones y control de Windows pendientes.
+- Guardado académico, Drive, IA, importación de Excel y control de Windows pendientes.
 - No modifica ni sincroniza la base local. Una cuenta sin copia activa muestra
   campos vacíos; eso no elimina los registros del escritorio.
 
@@ -129,3 +129,72 @@ si está configurado el secreto `ARMI_ANALYTICS_READ_TOKEN` con permiso de lectu
 La pantalla del administrador de escritorio todavía no se conecta a ese informe.
 Las mediciones son estimadas, no una factura ni un límite automático de gasto.
 El panel oficial de Cloudflare sigue siendo la referencia del consumo total.
+
+## Pendientes acordados: transferencia, sincronización y acceso de estudiantes
+
+### Exportación accesible desde el aplicativo
+
+El importador web ya acepta la copia académica y existe el exportador externo
+`scripts/export-academic.mjs`. Todavía no hay un botón dentro del EXE que genere
+este formato. La opción de exportar Excel de Administrador es otra herramienta
+y no genera el archivo que necesita el importador web.
+
+Pendiente para una actualización posterior del escritorio: añadir **Exportar para
+ARMI Web**. Debe tomar la cuenta actual, preparar una copia consistente de lectura,
+excluir credenciales y archivos privados y permitir elegir dónde guardarla. El
+docente no deberá instalar Node ni escribir comandos. Esta integración requiere
+una actualización controlada del escritorio; no se realiza durante los cambios
+actuales, que están restringidos a web.
+
+Los usuarios que empiecen directamente en web no necesitarán importar una base
+local cuando estén habilitados sus módulos de creación y guardado. Para usuarios
+existentes, la primera transferencia pertenece a cada cuenta; la copia que se
+preparó para desarrollo no migra automáticamente a los demás docentes.
+
+### Primera transferencia y sincronización automática
+
+Registrar como trabajo pendiente, no como función disponible:
+
+- Facilitar la primera transferencia mediante la exportación integrada y, más
+  adelante, una opción de conexión directa entre la cuenta del escritorio y web.
+- Sincronizar cambios por usuario y registro, conservando los identificadores y
+  comprobando revisiones. Registrar eliminaciones y detectar conflictos entre
+  ediciones del escritorio y la web antes de reemplazar información.
+- Mantener recuperación y reintentos sin duplicar registros; probar dos equipos
+  de una cuenta, dos docentes distintos, trabajo sin conexión y reconexión.
+- Medir consultas, escrituras y almacenamiento. Evitar reemplazar periódicamente
+  el archivo SQLite completo y consultar el servidor por cada tecla.
+
+La importación actual activa una copia completa. No observa la base local ni
+propaga cambios posteriores en ninguna dirección. Debe seguir indicándose así.
+
+### Interruptor del portal de estudiantes en web
+
+Requisito solicitado: al adaptar el área de compartir acceso del Banco de
+Evidencias, reemplazar los controles de cloudflared del escritorio por un
+interruptor visual de **Acceso de estudiantes**, con estados **Abierto** y
+**Cerrado**. La versión web alojada en Cloudflare no necesita un túnel de la PC.
+El interruptor controla el portal del docente; no apaga la aplicación web ni
+afecta a los demás docentes.
+
+Condiciones para implementarlo:
+
+- Persistir el estado por docente en D1, con valor inicial cerrado. Conservarlo
+  al recargar o cerrar sesión hasta que el docente lo cambie.
+- Solo la sesión autorizada del titular podrá cambiarlo. El servidor debe
+  verificar el estado y los permisos del estudiante en cada operación del portal,
+  incluyendo lecturas, envíos y la confirmación de archivos en curso.
+- Un enlace conocido o una sesión previa del estudiante no deben eludir el cierre.
+  Cerrar el acceso no borra datos, evidencias ni apaga el portal de otra cuenta.
+- Mostrar texto además del color, foco visible y control accesible `role=switch`
+  con `aria-checked`. Durante la petición, desactivar el interruptor; si falla,
+  conservar el último estado confirmado y mostrar el error sin simular éxito.
+- Respetar membresía y permisos sin consultar Apps Script por cada clic. Medir
+  las operaciones del portal y evitar consultas periódicas innecesarias.
+- No presentar el interruptor como operativo hasta conectar y probar el portal
+  estudiantil web y sus comprobaciones en servidor. No reutilizar ni distribuir
+  el token del túnel del escritorio para esta función.
+
+Mientras se usa una copia de consulta, los indicadores de guardado de la
+compilación web deben describir ese estado. La interfaz de escritorio conserva
+sus textos y su funcionamiento actual.
