@@ -10,6 +10,7 @@ const message = (id, text, success = false) => {
   byId(id).classList.toggle('success', success);
 };
 function showLogin(note = '') {
+  document.body.classList.remove('signed-in');
   client.reset();
   clearTimeout(expiryTimer);
   session = null;
@@ -19,13 +20,16 @@ function showLogin(note = '') {
   byId('profile-form').reset();
   byId('usage-panel').hidden = true;
   byId('usage-toggle').hidden = true;
+  byId('usage-toggle').setAttribute('aria-expanded', 'false');
   byId('usage-accounts').replaceChildren();
   byId('usage-summary').replaceChildren();
   byId('greeting').textContent = '';
+  for (const id of ['sidebar-avatar', 'sidebar-name', 'hero-institution']) byId(id).textContent = '';
   for (const id of ['account-user', 'account-plan', 'account-expiry']) byId(id).textContent = '';
   message('login-message', note);
 }
 function showWorkspace(data) {
+  document.body.classList.add('signed-in');
   client.reset();
   session = data;
   clearTimeout(expiryTimer);
@@ -33,6 +37,7 @@ function showWorkspace(data) {
   byId('login-view').hidden = true;
   byId('workspace-view').hidden = false;
   byId('greeting').textContent = `Hola, ${data.user.displayName}`;
+  updateProfileIdentity(data.user);
   byId('display-name').value = data.user.displayName;
   byId('institution-name').value = data.user.institutionName;
   byId('account-user').textContent = data.user.username;
@@ -41,6 +46,13 @@ function showWorkspace(data) {
   message('profile-message', '');
   byId('usage-toggle').hidden = !data.admin?.canViewUsage;
   expiryTimer = setTimeout(() => showLogin('Tu sesión venció. Ingresa nuevamente para continuar.'), Math.max(0, Date.parse(data.sessionExpiresAt) - Date.now()));
+}
+function updateProfileIdentity(user) {
+  const name = user.displayName || user.username;
+  byId('sidebar-name').textContent = name;
+  byId('sidebar-avatar').textContent = name.trim().split(/\s+/).slice(0, 2).map(word => Array.from(word)[0]).join('').toUpperCase();
+  byId('hero-institution').textContent = user.institutionName;
+  byId('hero-institution').hidden = !user.institutionName;
 }
 byId('login-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -68,6 +80,7 @@ byId('profile-form').addEventListener('submit', async event => {
     session.user.displayName = displayName;
     session.user.institutionName = institutionName;
     byId('greeting').textContent = `Hola, ${displayName}`;
+    updateProfileIdentity(session.user);
     message('profile-message', 'Tus cambios se guardaron.', true);
   } catch (error) { message('profile-message', error.message); }
   finally { button.disabled = false; }
@@ -114,12 +127,14 @@ async function refreshUsage() {
 byId('usage-toggle').addEventListener('click', () => {
   const panel = byId('usage-panel');
   panel.hidden = !panel.hidden;
+  byId('usage-toggle').setAttribute('aria-expanded', String(!panel.hidden));
   if (!panel.hidden) {
     const today = new Date().toISOString().slice(0, 10);
     byId('usage-day').value = today;
     byId('usage-day').max = today;
     byId('usage-day').min = new Date(Date.now() - 88 * 86400_000).toISOString().slice(0, 10);
     void refreshUsage();
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 });
 byId('usage-refresh').addEventListener('click', () => { void refreshUsage(); });
