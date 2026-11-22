@@ -5,6 +5,9 @@ export class AuthError extends Error {
   }
 }
 
+// Mantenimiento de la URL /exec: actualizar la implementación existente de Apps
+// Script conserva la URL. Si cambia, actualizar el secreto del Worker, no el JS
+// público. Diagnóstico y pasos: ../docs/autenticacion-apps-script.md.
 export function configuredAuthUrl(env) {
   try {
     const url = new URL(env.ARMI_AUTH_APPS_SCRIPT_URL);

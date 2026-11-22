@@ -34,6 +34,9 @@ npm run check:deploy
 
 ## Contrato de acceso existente
 
+**Si cambia la URL de Apps Script o falla el inicio de sesión**, consultar la
+[guía de mantenimiento y recuperación](docs/autenticacion-apps-script.md).
+
 El Worker envía `action: Login`, usuario y contraseña al Apps Script mediante
 HTTPS. `Placa` se envía vacía: el Login_ existente omite el registro de una nueva
 PC en ese caso. La URL se configura en servidor, nunca en el JavaScript público.
