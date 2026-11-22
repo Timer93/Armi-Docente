@@ -7,6 +7,7 @@ const client = createApiClient({ onUnauthorized: () => window.location.reload() 
 export const academicApi = (path: string, method = 'GET', body?: unknown) => client.request(path, method, body);
 type Row = { id: string; value: any; revision: number };
 const cache = new Map<string, Promise<Array<Row>>>();
+const loadedRows = new Map<string, Row[]>();
 const snapshots = new Map<string, string | null>();
 const queues = new Map<string, Promise<any>>();
 let activeWrites = 0;
@@ -41,6 +42,7 @@ export function readAcademic(dataset: string) {
       if (rows.length > 10000) throw new Error('La copia excede el límite de esta vista.');
       cursor = result.nextCursor || '';
     } while (cursor);
+    loadedRows.set(key,rows);
     return rows;
   })();
   cache.set(key, pending);
@@ -70,8 +72,11 @@ export function saveAcademic(dataset: string, id: string, value: any, action = '
     window.dispatchEvent(new CustomEvent('armi-web-save', {detail:{state:'saving'}}));
     try {
       const saved = await academicApi('/api/academic/edit','PUT',{dataset,id,changes,action,expectedRevision:row?.revision || 0,snapshotId:snapshots.get(key) || null,operationId:crypto.randomUUID()});
-      const updated = (await readAcademic(dataset)).filter(row => row.id !== id);
+      // Merge acknowledgements synchronously. Saves of different students may
+      // finish together; neither may replace the other's cached result.
+      const updated = (loadedRows.get(key) || rows).filter(row => row.id !== id);
       if (!saved.deleted) updated.push({...saved,value:displayValue(saved.value)});
+      loadedRows.set(key,updated);
       cache.set(key,Promise.resolve(updated));
       return saved;
     } catch (error) { writeError = error as Error; throw error; }
