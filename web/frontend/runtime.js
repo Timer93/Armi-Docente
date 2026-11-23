@@ -26,6 +26,7 @@ export function installWebRuntime(win) {
   allowed.add('GET /api/academic/records');
   allowed.add('PUT /api/academic/edit');
   allowed.add('PUT /api/academic/settings');
+  for(const method of ['GET','PUT','DELETE'])allowed.add(method+' /api/instruments');
   for(const route of ['GET /api/ai/profile','GET /api/ai/models','PUT /api/ai/credentials','DELETE /api/ai/credentials','PUT /api/ai/preferences','POST /api/ai/generate'])allowed.add(route);
   for(const route of ['GET /api/portal','PUT /api/portal','POST /api/portal/access','DELETE /api/portal/access','PUT /api/portal/publications','GET /api/portal/inbox'])allowed.add(route);
   allowed.add('POST /api/academic/imports');

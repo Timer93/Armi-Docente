@@ -1,6 +1,7 @@
 // Conserva los clientes existentes. El transporte web rechaza las operaciones
 // que todavía no tienen un servidor compatible, sin enviarlas al localhost.
 export * from 'armi-desktop-api-original';
+export {getInstrumentos,saveInstrumento,deleteInstrumento} from './instruments-client';
 import { INITIAL_GENERAL_DATA, INITIAL_MODULE_STATUS } from '../../constants';
 import { getWebIdentity } from './runtime.js';
 import { readAcademic, saveAcademic, invalidateAcademic } from './academic-client';

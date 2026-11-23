@@ -13,6 +13,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0005_planning_edits.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0006_web_configuration.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0007_ai_student_portal.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0008_web_instruments.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -631,4 +632,57 @@ test('student publication pagination includes fused sections and membership expi
  assert.equal(new Set([...first.lessons,...second.lessons].map(row=>row.id)).size,23);
  f.sqlite.prepare('UPDATE student_portals SET membership_until=? WHERE teacher_id=?').run(Date.parse('2026-11-21T16:59:59Z'),a.data.user.id);
  assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie:student})).status,401);
+});
+
+const sampleInstrument=(type='rubrica')=>({year:'2026',areaId:'8',grade:'1ro',section:'A',type,name:'Mi instrumento',structure:{criteria:[{text:'Comunica su propuesta',levels:{a:'Explica con claridad'}}],layout:{rows:1,cols:1,texts:{'0-0':'Criterio propio'},styles:{'0-0':{bg:'#ffffff',bold:true}},merges:[]}},version:1});
+test('instruments: all four types persist custom layout, scope filters and teacher isolation',async t=>{
+ const f=fixture(t),a=await f.login(),b=await f.login('docenteB');
+ const save=(user,body)=>f.call('/api/instruments',{method:'PUT',cookie:user.cookie,body});
+ const ids=[];
+ for(const type of ['rubrica','lista_cotejo','escala_valoracion','guia_observacion']) {
+  const body={id:'web-'+crypto.randomUUID(),value:sampleInstrument(type),expectedRevision:0,operationId:crypto.randomUUID()};ids.push(body.id);
+  const response=await save(a,body);assert.equal(response.status,200,await response.clone().text());
+  assert.deepEqual((await response.json()).data.record.structure,body.value.structure);
+  assert.equal((await save(a,body)).status,200,'Duplicate acknowledgement does not create another instrument');
+ }
+ const list=async(user,query='')=>(await(await f.call('/api/instruments'+query,{cookie:user.cookie})).json()).data;
+ assert.equal((await list(a)).records.length,4);assert.equal((await list(b)).records.length,0);
+ assert.equal((await list(a,'?year=2026&areaId=8&grade=1ro&section=A&type=lista_cotejo')).records.length,1);
+ assert.equal((await list(a,'?grade=2do')).records.length,0);
+ assert.equal((await save(b,{id:ids[0],value:sampleInstrument(),expectedRevision:1,operationId:crypto.randomUUID()})).status,409);
+ assert.equal((await save(a,{id:'web-'+crypto.randomUUID(),value:sampleInstrument(),expectedRevision:0,operationId:crypto.randomUUID(),teacherId:b.data.user.id})).status,400);
+ assert.equal((await f.call('/api/instruments',{cookie:a.cookie,origin:'https://foreign.test',method:'PUT',body:{}})).status,403);
+});
+
+test('instrument revision prevents stale overwrites and deletion resurrection; rejected data never saves',async t=>{
+ const f=fixture(t),a=await f.login(),id='web-'+crypto.randomUUID(),value=sampleInstrument();
+ const put=(revision,patch={})=>f.call('/api/instruments',{method:'PUT',cookie:a.cookie,body:{id,value:{...value,...patch},expectedRevision:revision,operationId:crypto.randomUUID()}});
+ assert.equal((await put(0)).status,200);
+ assert.equal((await put(1,{name:'Editado'})).status,200);
+ assert.equal((await put(1,{name:'Viejo'})).status,409);
+ const del=revision=>f.call('/api/instruments',{method:'DELETE',cookie:a.cookie,body:{id,expectedRevision:revision,operationId:crypto.randomUUID()}});
+ assert.equal((await del(1)).status,409);assert.equal((await del(2)).status,200);
+ assert.equal((await put(3)).status,409);
+ assert.equal((await(await f.call('/api/instruments',{cookie:a.cookie})).json()).data.records.length,0);
+ assert.equal(f.sqlite.prepare('SELECT deleted,revision FROM web_instruments WHERE teacher_id=? AND id=?').get(a.data.user.id,id).revision,3);
+ for(const patch of [{type:'unknown'},{name:''},{year:'2026-invalid'},{structure:{api_key:'private'}},{structure:{image:'data:image/png;base64,bad'}},{structure:{path:'C:\\Private\\file'}}]) {
+  const response=await f.call('/api/instruments',{method:'PUT',cookie:a.cookie,body:{id:'web-'+crypto.randomUUID(),value:{...value,...patch},expectedRevision:0,operationId:crypto.randomUUID()}});
+  assert.equal(response.status,400,await response.clone().text());
+ }
+ assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM web_instruments').get().n,1);
+});
+
+test('instrument lists page at 50 and missing migration keeps academic modules readable',async t=>{
+ const f=fixture(t),a=await f.login(),value=sampleInstrument();
+ const insert=f.sqlite.prepare('INSERT INTO web_instruments(teacher_id,id,year,area_id,grade,section,payload_json,revision,operation_id,operation_hash,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?,0)');
+ const ids=Array.from({length:53},()=> 'web-'+crypto.randomUUID()).sort();
+ for(const id of ids)insert.run(a.data.user.id,id,value.year,value.areaId,value.grade,value.section,JSON.stringify(value),crypto.randomUUID(),'fixture');
+ const first=(await(await f.call('/api/instruments?year=2026',{cookie:a.cookie})).json()).data;
+ assert.equal(first.records.length,50);assert.equal(first.nextCursor,ids[49]);
+ const last=(await(await f.call('/api/instruments?cursor='+first.nextCursor,{cookie:a.cookie})).json()).data;
+ assert.deepEqual(last.records.map(row=>row.id),ids.slice(50));assert.equal(last.nextCursor,null);
+ f.sqlite.exec('DROP TABLE web_instruments');
+ assert.equal((await f.call('/api/instruments',{cookie:a.cookie})).status,503);
+ const status=(await(await f.call('/api/academic/status',{cookie:a.cookie})).json()).data;
+ assert.equal(status.instrumentsEditable,false);assert.equal(status.editable,true);assert.equal(status.planningEditable,true);
 });

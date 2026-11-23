@@ -1,6 +1,7 @@
 import { AuthError, authenticateWithAppsScript, configuredAuthUrl } from './apps-script-auth.js';
 import { canViewUsage, createMeasurement, createUsageReader, measureDatabase, recordUsage } from './usage.js';
-import { academicRoute } from './academic.js';
+import { academicRoute,validateRecord } from './academic.js';
+import {instrumentsRoute} from './instruments.js';
 import {aiRoute} from './ai.js';
 import {portalReady,teacherPortal,studentPortal} from './portal.js';
 import {servicesReady} from './ai.js';
@@ -150,6 +151,10 @@ async function route(request, env, requester, now, measurement, readUsage) {
     return env.ASSETS.fetch(request);
   }
   if (!env.DB) fail('La base web todavía no está configurada.', 503);
+  if(path==='/api/instruments') {
+    const teacher=await currentSession(request,env,now,measurement);
+    return json({success:true,data:await instrumentsRoute(request,env,teacher,{readJson,digest,now,validateRecord})});
+  }
   if(path.startsWith('/api/student/'))return studentPortal(request,env,{readJson,digest,randomToken,now,measurement});
   if(path==='/api/portal'||path.startsWith('/api/portal/')) {
     const teacher=await currentSession(request,env,now,measurement);

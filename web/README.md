@@ -24,6 +24,9 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   docente y almacenamiento cifrado. Requiere activar 0007 y el secreto de cifrado.
 - Portal independiente de estudiantes, con interruptor por docente, códigos
   personales, sesiones publicadas por grupo y entregas de texto.
+- Biblioteca de Instrumentos de evaluación: crear, editar, duplicar, previsualizar
+  y eliminar rúbricas, listas de cotejo, escalas y guías en sus pantallas originales.
+  Requiere activar 0008. Las notas y registros de evaluación siguen pendientes.
 - Los otros módulos siguen en consulta. Drive, importación de Excel, fotos,
   operaciones masivas y entregas de archivos pendientes.
 - No modifica ni sincroniza la base local. Una cuenta sin copia activa muestra
@@ -339,3 +342,32 @@ Las pruebas utilizan SQLite y proveedores simulados, sin consumir claves ni
 saldo reales. Verificar con una cuenta propia después de activar el servicio.
 Referencias: [Gemini](https://ai.google.dev/api/generate-content) y
 [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create).
+
+### Activar Instrumentos de evaluación: migración 0008
+
+En **D1 → armi-docente-web → Consola**, ejecutar el contenido completo de
+`migrations/0008_web_instruments.sql` y recargar la web con Ctrl+F5. Solo crea
+`web_instruments` y su índice; no modifica las tablas existentes, los datos
+importados, los secretos ni el escritorio. Se puede ejecutar nuevamente sin
+borrar datos. No requiere otra importación.
+
+En **Evaluación → Instrumentos** se reutilizan los cuatro editores originales.
+Se conserva su estructura, criterios, niveles, colores, bordes y diseño. Cada
+docente tiene su biblioteca, filtrada por año, área, grado, sección y tipo. Las
+lecturas se paginan, se agrupan solicitudes coincidentes y no hay sondeo. El
+límite inicial propio de esta implementación es 500 instrumentos activos por
+docente, con un máximo de 256 KB por registro; no es una promesa de capacidad
+masiva ni un límite comercial de membresía.
+
+Cada edición y eliminación lleva la revisión del instrumento abierto. El
+servidor rechaza formularios antiguos y registros eliminados. La eliminación
+deja una marca y no se permite restaurarla mediante un guardado atrasado.
+Duplicar crea un identificador nuevo, conservando el original. La interfaz
+bloquea el guardado doble y solo muestra éxito después de la confirmación del
+servidor; no reintenta escrituras automáticamente.
+
+Esta biblioteca contiene los instrumentos creados en web. La copia académica
+actual no incluye la biblioteca independiente de instrumentos del escritorio;
+su transferencia sigue pendiente. Los instrumentos integrados en las sesiones
+importadas se conservan dentro de esas sesiones. No se habilitan todavía las
+calificaciones, los registros por unidad/bimestre ni la sincronización con PC.

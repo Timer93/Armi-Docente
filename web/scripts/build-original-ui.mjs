@@ -76,6 +76,27 @@ const originalSource = {
       contents = contents.replaceAll('SQL Sincronizado - Gestión de Datos Estudiantiles','Registro de estudiantes · Web');
       return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) };
     });
+    bundler.onLoad({filter:/[\\/]instruments[\\/]EvaluationInstrumentsView\.tsx$/},async args=>{
+      let contents="import {getWebIdentity as getArmiInstrumentIdentity} from 'armi-web-runtime';\n"+await readFile(args.path,'utf8');
+      const marker='<div className="space-y-6">';
+      const mapping='id: r.id,';
+      const payload='id: editor.id,';
+      for(const text of [marker,mapping,payload,'const saveEditor = async () => {','<button onClick={saveEditor}'])if(!contents.includes(text))throw new Error('Review instruments web adapter: '+text);
+      contents=contents.replace(marker,'<div data-armi-web-editor="instruments" className="space-y-6">');
+      contents=contents.replace(mapping,mapping+'\n          webRevision: r.webRevision,');
+      contents=contents.replace(payload,payload+'\n      webRevision: (editor as any).webRevision,');
+      contents=contents.replace('const currentYear =',"const [savingWeb,setSavingWeb]=useState(false);const savingWebRef=React.useRef(false);\n  const currentYear =");
+      contents=contents.replace('const saveEditor = async () => {','const saveEditor = async () => {\n    if(savingWebRef.current)return;');
+      contents=contents.replace('const res = await saveInstrumento(payload);','savingWebRef.current=true;setSavingWeb(true);\n      const res = await saveInstrumento(payload);');
+      const ending="showToast('Error de conexión al guardar');";
+      if(!contents.includes(ending))throw new Error('Review instrument save acknowledgement');
+      const location=contents.indexOf(ending),end=contents.indexOf('    }',location);
+      contents=contents.slice(0,end)+contents.slice(end).replace('    }','    } finally {savingWebRef.current=false;setSavingWeb(false);}');
+      contents=contents.replace('<button onClick={saveEditor}','<button disabled={savingWeb} aria-busy={savingWeb} onClick={saveEditor}');
+      contents=contents.replace('await deleteInstrumento(id)','await deleteInstrumento(id,(instruments.find(row=>row.id===id) as any)?.webRevision)');
+      contents=contents.replace('{toast && (','<p className="rounded-xl border border-slate-200 p-3 text-sm">{getArmiInstrumentIdentity()?.academic?.instrumentsEditable ? "Esta biblioteca contiene los instrumentos creados en la web. Las calificaciones y los registros de evaluación todavía están pendientes." : "El administrador debe activar el guardado de Instrumentos en la base de datos web."}</p>{toast && (');
+      return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
     bundler.onLoad({filter:/[\\/]components[\\/](AnnualProgramView|UnitsView|SessionsView)\.tsx$/}, async args => {
       let contents = await readFile(args.path,'utf8');
       const name = path.basename(args.path,'.tsx');
