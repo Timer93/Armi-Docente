@@ -26,6 +26,10 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   DNI, sesiones publicadas por grupo y entregas de texto. Los enlaces legibles
   `d45-profe-arnold` usan el registro de Sheets y requieren activar 0010 y el
   complemento de Apps Script: [instrucciones](docs/enlaces-docentes-dni.md).
+  La pantalla de acceso reutiliza el HTML y los estilos de
+  `backend/public/student-portal.html` durante la compilación. El adaptador web
+  conserva el ingreso por DNI sin contraseña ni servicios locales de Windows;
+  no carga los scripts de archivos, temporizadores o sincronización del escritorio.
 - Biblioteca de Instrumentos de evaluación: crear, editar, duplicar, previsualizar
   y eliminar rúbricas, listas de cotejo, escalas y guías en sus pantallas originales.
   Requiere activar 0008.

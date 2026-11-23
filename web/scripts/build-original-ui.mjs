@@ -5,6 +5,7 @@ import { mkdir, writeFile, readFile, rm, copyFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import pkg from '../package.json' with { type: 'json' };
+import {desktopStudentLogin} from './student-login-template.mjs';
 
 const web = fileURLToPath(new URL('../', import.meta.url));
 const repo = path.resolve(web, '..');
@@ -14,6 +15,7 @@ await rm(out, { recursive: true, force: true });
 await mkdir(path.join(out, 'assets'), { recursive: true });
 const absolute = file => path.join(repo, file);
 const webFile = file => path.join(web, 'frontend', file);
+const studentLogin=desktopStudentLogin(await readFile(absolute('backend/public/student-portal.html'),'utf8'));
 const isolated = new Set(['SyncLifecycleManager', 'BackgroundSyncIndicator', 'RemoteAccessIndicator', 'AppUpdaterOverlay', 'CloudSyncPanel', 'GeneralNotesOverlay']);
 const desktopPkg = JSON.parse(await readFile(absolute('package.json'), 'utf8'));
 const alias = Object.fromEntries(Object.keys(pkg.dependencies).map(name => [name, path.join(web, 'node_modules', name)]));
@@ -21,6 +23,10 @@ alias.xlsx = webFile('excel-disabled.js');
 const originalSource = {
   name: 'armi-web-runtime-adapters',
   setup(bundler) {
+    bundler.onResolve({filter:/^armi-web-student-login$/},()=>({path:'student-login',namespace:'armi-student-login'}));
+    bundler.onLoad({filter:/.*/,namespace:'armi-student-login'},()=>({contents:`export const desktopLoginHtml=${JSON.stringify(studentLogin.html)};`,loader:'js'}));
+    bundler.onResolve({filter:/^armi-web-student-desktop\.css$/},()=>({path:'desktop-login.css',namespace:'armi-student-css'}));
+    bundler.onLoad({filter:/.*/,namespace:'armi-student-css'},()=>({contents:studentLogin.css,loader:'css'}));
     bundler.onResolve({ filter: /^armi-web-runtime$/ }, () => ({path:webFile('runtime.js')}));
     bundler.onResolve({filter:/^armi-web-ai$/},()=>({path:webFile('ai-client.ts')}));
     bundler.onResolve({filter:/^armi-web-ai-settings$/},()=>({path:webFile('AISettings.tsx')}));
