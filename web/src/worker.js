@@ -8,6 +8,7 @@ import {portalReady,teacherPortal,studentPortal} from './portal.js';
 import {servicesReady} from './ai.js';
 import {validPortal,legacyPortal,registryReady,registerTeacherPortal} from './portal-registry.js';
 import {driveRoute,driveReady} from './drive.js';
+import {driveCallbackPage} from './drive-callback-page.js';
 
 const SESSION_MS = 30 * 60_000;
 const MAX_BODY_BYTES = 4096;
@@ -112,6 +113,7 @@ export function createWorker({ requester = fetch, clock = Date.now } = {}) {
       } catch (error) {
         response = json({ success: false, message: error instanceof AuthError ? error.message : 'No se pudo completar la operación. Intenta nuevamente.' },
           error instanceof AuthError ? error.status : 503, error?.status === 429 ? { 'retry-after': '60' } : {});
+        if(request.method==='GET'&&new URL(request.url).pathname==='/api/drive/oauth/callback')response=driveCallbackPage(response.status);
       }
       recordUsage(env, request, response, measurement, performance.now() - startedAt);
       const headers = new Headers(response.headers);
@@ -142,6 +144,7 @@ export function createWorker({ requester = fetch, clock = Date.now } = {}) {
 async function route(request, env, requester, now, measurement, readUsage) {
   const url = new URL(request.url);
   const path = url.pathname;
+  if(path==='/api/drive/oauth/callback'&&request.method==='GET'&&!url.search)return driveCallbackPage();
   if (!['GET', 'HEAD'].includes(request.method)) {
     if (request.headers.get('origin') !== url.origin || request.headers.get('sec-fetch-site') === 'cross-site') {
       fail('La solicitud debe realizarse desde ARMI Web.', 403);

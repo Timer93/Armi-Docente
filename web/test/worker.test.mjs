@@ -76,6 +76,27 @@ function fixture(t) {
   return { sqlite, env, worker, call, login, calls, users, requester, analyticsQueries, analyticsResponse, ai, advance: ms => { now += ms; } };
 }
 
+test('Drive callback displays safe recovery pages without bypassing authentication', async t => {
+  const f=fixture(t);
+  const direct=await f.call('/api/drive/oauth/callback');
+  assert.equal(direct.status,200);
+  assert.match(direct.headers.get('content-type'),/text\/html/);
+  assert.match(await direct.text(),/Conecta tu Google Drive/);
+  const expired=await f.call('/api/drive/oauth/callback?code=private-code&state=private-state&error_description=%3Cscript%3E');
+  assert.equal(expired.status,401);
+  const html=await expired.text();
+  assert.match(html,/Vuelve a iniciar sesión/);
+  assert.ok(!html.includes('private-code')&&!html.includes('private-state')&&!html.includes('<script>'));
+  assert.equal(expired.headers.get('referrer-policy'),'no-referrer');
+  assert.equal(expired.headers.get('cache-control'),'no-store');
+  const {cookie}=await f.login();
+  const unconfigured=await f.call('/api/drive/oauth/callback?code=secret',{cookie});
+  assert.equal(unconfigured.status,503);
+  assert.match(await unconfigured.text(),/No se completó la conexión/);
+  assert.equal((await f.call('/api/drive/profile')).status,401);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM drive_connections').get().n,0);
+});
+
 test('real SQLite schema: two teachers retain independent profiles; identity is derived from the session', async t => {
   const f = fixture(t);
   const a = await f.login();
