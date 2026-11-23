@@ -25,7 +25,7 @@ function WebHost({ App }: { App: React.ComponentType }) {
     const disableEditing = () => {
       const permits = (element: Element) => {
         const editor = element.closest('[data-armi-web-editor]')?.getAttribute('data-armi-web-editor');
-        return Boolean(editor && (editor==='evaluation'?getWebIdentity()?.academic?.evaluationEditable:editor==='instruments'?getWebIdentity()?.academic?.instrumentsEditable:editor==='settings'?getWebIdentity()?.academic?.settingsEditable:['annual','units','sessions'].includes(editor) ? getWebIdentity()?.academic?.planningEditable : getWebIdentity()?.academic?.editable));
+        return Boolean(editor && (editor==='portal'?getWebIdentity():editor==='evaluation'?getWebIdentity()?.academic?.evaluationEditable:editor==='instruments'?getWebIdentity()?.academic?.instrumentsEditable:editor==='settings'?getWebIdentity()?.academic?.settingsEditable:['annual','units','sessions'].includes(editor) ? getWebIdentity()?.academic?.planningEditable : getWebIdentity()?.academic?.editable));
       };
       document.querySelector('#root aside')?.setAttribute('data-armi-web-sidebar', '');
       document.querySelectorAll<HTMLInputElement | HTMLButtonElement>('#root main input, #root main select, #root main textarea, #root main button, [data-armi-web-editor] input, [data-armi-web-editor] select, [data-armi-web-editor] textarea, [data-armi-web-editor] button, #root [data-armi-web-sidebar] input[type="file"], #root [data-armi-web-sidebar] button[title="Cambiar foto"]').forEach(control => {

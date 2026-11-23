@@ -25,6 +25,7 @@ const originalSource = {
     bundler.onResolve({filter:/^armi-web-ai$/},()=>({path:webFile('ai-client.ts')}));
     bundler.onResolve({filter:/^armi-web-ai-settings$/},()=>({path:webFile('AISettings.tsx')}));
     bundler.onResolve({filter:/^armi-web-evaluation$/},()=>({path:webFile('evaluation-client.tsx')}));
+    bundler.onResolve({filter:/^armi-web-portal$/},()=>({path:webFile('PortalPanel.tsx')}));
     bundler.onResolve({filter:/[\\/]utils[\\/](gemini|aiModels)(?:\.ts)?$/},args=>({path:webFile(args.path.includes('aiModels')?'ai-models.ts':'ai-client.ts')}));
     bundler.onResolve({ filter: /^armi-desktop-api-original$/ }, () => ({ path: absolute('services/apiService.ts') }));
     bundler.onResolve({ filter: /(?:AuthContext|apiService|observePortableStorage|SyncLifecycleManager|BackgroundSyncIndicator|RemoteAccessIndicator|AppUpdaterOverlay|CloudSyncPanel|GeneralNotesOverlay)(?:\.tsx?)?$/ }, args => {
@@ -76,6 +77,24 @@ const originalSource = {
       contents = contents.replaceAll('eliminado permanentemente','eliminado de la web');
       contents = contents.replaceAll('SQL Sincronizado - Gestión de Datos Estudiantiles','Registro de estudiantes · Web');
       return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) };
+    });
+    bundler.onLoad({filter:/[\\/]evaluation[\\/]EvidenceBank\.tsx$/},async args=>{
+      let contents=(await readFile(args.path,'utf8')).replace(/\r\n/g,'\n');
+      const start=contents.indexOf('      <TeacherMessages />');
+      const bank='<div className="rounded-[2rem] border border-slate-100 bg-white p-8 shadow-lg">';
+      const end=contents.indexOf(bank,start);
+      if(start<0||end<start)throw new Error('Review web evidence access section');
+      contents=contents.slice(0,start)+'      <PortalPanel inline />\n      '+contents.slice(end);
+      contents=contents.replace(bank,bank.replace('<div ','<div data-web-unavailable="" '));
+      const remoteStart=contents.indexOf('  useEffect(() => {\n    let active = true;\n    let refreshing = false;');
+      const remoteEnd='  }, [remoteAccess.enabledByTeacher, remoteOperation]);';
+      const remoteStop=contents.indexOf(remoteEnd,remoteStart);
+      if(remoteStart<0||remoteStop<0)throw new Error('Review desktop tunnel polling isolation');
+      contents=contents.slice(0,remoteStart)+contents.slice(remoteStop+remoteEnd.length);
+      const poll=/  useEffect\(\(\) => \{\n    let reading = false;[\s\S]*?\n  \}, \[\]\);/;
+      if(!poll.test(contents)||!contents.includes('    void loadSecondaryData();'))throw new Error('Review unmigrated file service isolation');
+      contents=contents.replace(poll,'').replace('    void loadSecondaryData();','');
+      return {contents:"import {PortalPanel} from 'armi-web-portal';\n"+contents,loader:'tsx',resolveDir:path.dirname(args.path)};
     });
     bundler.onLoad({filter:/[\\/]instruments[\\/]EvaluationInstrumentsView\.tsx$/},async args=>{
       let contents="import {getWebIdentity as getArmiInstrumentIdentity} from 'armi-web-runtime';\n"+await readFile(args.path,'utf8');

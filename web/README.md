@@ -271,10 +271,18 @@ propaga cambios posteriores en ninguna dirección. Debe seguir indicándose así
 
 ### Portal de estudiantes en web
 
-El botón **Acceso de estudiantes** del encabezado abre un panel con interruptor
-**Abierto / Cerrado**. Es independiente del Banco de Evidencias del escritorio;
-no usa cloudflared ni requiere que la PC permanezca encendida. El enlace fijo
-pertenece a un docente. El estado inicial es cerrado.
+En **Evaluación → Banco de Evidencias**, el interruptor **Acceso de estudiantes**
+aparece directamente en la pantalla, con estados **Abierto / Cerrado**. El botón
+del encabezado conserva un acceso al mismo panel de gestión. Ambos reflejan el
+estado confirmado por servidor, sin sondeo periódico. En la compilación web se
+sustituyen los controles de carpetas locales y cloudflared; el escritorio conserva
+su pantalla y funcionamiento. El enlace fijo pertenece a un docente y el estado
+inicial es cerrado. La web no requiere que su PC permanezca encendida.
+
+El interruptor habilita el portal existente de sesiones y entregas de texto. No
+habilita subidas de archivos ni sincronización con Drive: la pantalla lo indica
+expresamente y mantiene los controles de archivos sin migrar deshabilitados.
+Esta ubicación reutiliza el servidor de 0007 y no requiere otra migración SQL.
 
 Funcionamiento implementado:
 
