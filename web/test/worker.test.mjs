@@ -17,6 +17,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0009_web_evaluation.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0010_teacher_portal_registry.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0011_student_passwords.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0012_drive_connection.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -856,4 +857,18 @@ test('password changes recheck the portal gate at final save; missing schema dis
  f.env.DB.prepare=prepare;f.sqlite.exec('DROP TABLE student_password_sessions');
  assert.equal((await dniLogin(f,portal.slug,'00123456')).status,503);
  assert.equal((await (await f.call('/api/portal',{cookie:a.cookie})).json()).data.passwordReady,false);
+});
+
+
+test('Drive routes require the teacher session and same-origin writes; Google remains the source of login and mirror identity',async t=>{
+ const f=fixture(t);assert.equal((await f.call('/api/drive/profile')).status,401);
+ f.users.docenteA.syncUserKey='original-mirror-identity';f.users.docenteA.driveFolderUrl='https://drive.google.com/drive/folders/fixtureFolder12345';
+ const a=await f.login();assert.equal(a.data.membership.syncUserKey,'original-mirror-identity');
+ const profile=await f.call('/api/drive/profile',{cookie:a.cookie});assert.equal(profile.status,200);const data=(await profile.json()).data;
+ assert.equal(data.suggestedFolder,'https://drive.google.com/drive/folders/fixtureFolder12345');assert.equal(data.configured,false);assert.equal(data.connected,false);
+ assert.equal((await f.call('/api/drive/connect',{method:'POST',cookie:a.cookie,origin:'https://other.test',body:{}})).status,403);
+ assert.equal(f.calls.length,1,'Opening the Drive panel does not query Apps Script again');
+ const normal=await f.call('/');assert.ok(!normal.headers.get('content-security-policy').includes('apis.google.com'));
+ const picker=await f.call('/api/drive/picker');assert.equal(picker.status,401);
+ assert.ok(picker.headers.get('content-security-policy').includes('https://docs.google.com'));
 });

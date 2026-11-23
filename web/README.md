@@ -22,6 +22,10 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   incluyendo colores del horario y las matrices/unidades fijadas de planificación.
 - IA de texto para Programación, Unidades y Sesiones, con clave propia por
   docente y almacenamiento cifrado. Requiere activar 0007 y el secreto de cifrado.
+- Conexión limitada a Google Drive por docente, con selector de Google, consulta,
+  descarga y vista previa de archivos autorizados. Requiere 0012 y configurar el
+  cliente OAuth/Picker sin facturación: [activación y prueba del espejo](docs/google-drive-limitado.md).
+  No activa todavía subidas de evidencias ni sincronización académica automática.
 - Portal independiente de estudiantes, con interruptor por docente, ingreso por
   DNI, sesiones publicadas por grupo y entregas de texto. Los enlaces legibles
   `d45-profe-arnold` usan el registro de Sheets y requieren activar 0010 y el
@@ -37,7 +41,7 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
 - Calificación literal de sesiones y observaciones; consolidación por unidad y
   bimestre con los cálculos originales, y conclusiones descriptivas por ámbito.
   Requiere activar 0009. Las notas no se publican al portal de estudiantes.
-- Los otros módulos siguen en consulta. Drive, importación de Excel, fotos,
+- Los otros módulos siguen en consulta. Sincronización de Drive, importación de Excel, fotos,
   operaciones masivas y entregas de archivos pendientes.
 - No modifica ni sincroniza la base local. Una cuenta sin copia activa muestra
   campos vacíos; eso no elimina los registros del escritorio.

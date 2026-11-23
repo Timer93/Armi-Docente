@@ -7,6 +7,7 @@ import {aiRoute} from './ai.js';
 import {portalReady,teacherPortal,studentPortal} from './portal.js';
 import {servicesReady} from './ai.js';
 import {validPortal,legacyPortal,registryReady,registerTeacherPortal} from './portal-registry.js';
+import {driveRoute,driveReady} from './drive.js';
 
 const SESSION_MS = 30 * 60_000;
 const MAX_BODY_BYTES = 4096;
@@ -115,6 +116,10 @@ export function createWorker({ requester = fetch, clock = Date.now } = {}) {
       recordUsage(env, request, response, measurement, performance.now() - startedAt);
       const headers = new Headers(response.headers);
       for (const [key, value] of Object.entries(securityHeaders)) headers.set(key, value);
+      if(new URL(request.url).pathname==='/api/drive/picker'){
+        headers.set('content-security-policy',"default-src 'self'; script-src 'self' https://apis.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://www.googleapis.com https://apis.google.com; frame-src https://docs.google.com https://drive.google.com https://accounts.google.com; img-src 'self' data: https://*.googleusercontent.com https://*.gstatic.com; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+        headers.set('referrer-policy','strict-origin-when-cross-origin');
+      }
       return new Response(response.body, { status: response.status, headers });
     },
     async scheduled(_event, env) {
@@ -129,6 +134,7 @@ export function createWorker({ requester = fetch, clock = Date.now } = {}) {
         env.DB.prepare('DELETE FROM ai_leases WHERE expires_at<=?').bind(now),
         env.DB.prepare('DELETE FROM student_web_sessions WHERE expires_at<=?').bind(now),
       ]);
+      if(await driveReady(env.DB))await env.DB.prepare('DELETE FROM drive_oauth_states WHERE expires_at<=?').bind(now).run();
     },
   };
 }
@@ -169,6 +175,21 @@ async function route(request, env, requester, now, measurement, readUsage) {
     return json({success:true,data:await instrumentsRoute(request,env,teacher,{readJson,digest,now,validateRecord})});
   }
   if(path.startsWith('/api/student/'))return studentPortal(request,env,{readJson,digest,randomToken,now,measurement});
+  if(path.startsWith('/api/drive/')){
+    const teacher=await currentSession(request,env,now,measurement);
+    let driveCallsInRequest=0;
+    const driveRequester=(target,options)=>{
+      const address=new URL(target);
+      if(address.origin==='https://www.googleapis.com'&&address.pathname.startsWith('/drive/v3/')){
+        if(driveCallsInRequest>=40)fail('Esta operación necesita revisar demasiadas carpetas. Selecciona menos archivos o una carpeta más cercana a los archivos.',400);
+        driveCallsInRequest++;
+        measurement.driveCalls++;
+        measurement.driveUnitsEstimated+=address.searchParams.get('alt')==='media'?200:address.pathname==='/drive/v3/files'?100:5;
+      }
+      return requester(target,options);
+    };
+    return driveRoute(request,env,teacher,{readJson,digest,randomToken,now,requester:driveRequester});
+  }
   if(path==='/api/portal'||path.startsWith('/api/portal/')) {
     const teacher=await currentSession(request,env,now,measurement);
     return json({success:true,data:await teacherPortal(request,env,teacher,{readJson,digest,randomToken,now})});

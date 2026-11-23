@@ -6,7 +6,7 @@ export const canViewUsage = (username, env) => String(env.ARMI_ADMIN_USERNAMES |
   .split(',').map(value => value.trim()).filter(Boolean).includes(username);
 
 export function createMeasurement() {
-  return { teacherId: '', rowsRead: 0, rowsWritten: 0, statements: 0, authCalls: 0, incompleteMetadata: false };
+  return { teacherId: '', rowsRead: 0, rowsWritten: 0, statements: 0, authCalls: 0, driveCalls:0, driveUnitsEstimated:0, incompleteMetadata: false };
 }
 
 export function measureDatabase(db, measurement) {
@@ -59,19 +59,20 @@ export function recordUsage(env, request, response, measurement, elapsedMs) {
       indexes: [measurement.teacherId || 'anonymous'],
       blobs: [measurement.teacherId, route, request.method],
       doubles: [1, measurement.rowsRead, measurement.rowsWritten, measurement.statements,
-        measurement.authCalls, response.status >= 400 ? 1 : 0, Math.max(0, elapsedMs), measurement.incompleteMetadata ? 1 : 0],
+        measurement.authCalls, response.status >= 400 ? 1 : 0, Math.max(0, elapsedMs), measurement.incompleteMetadata ? 1 : 0,measurement.driveCalls||0,measurement.driveUnitsEstimated||0],
     });
   } catch { /* Telemetry availability must not break a saved profile or login. */ }
 }
 
 function normalizeTotals(row = {}) {
-  return Object.fromEntries(['requests', 'rowsRead', 'rowsWritten', 'statements', 'authCalls', 'errors', 'incompleteMetadata']
+  return Object.fromEntries(['requests', 'rowsRead', 'rowsWritten', 'statements', 'authCalls', 'driveCalls','driveUnitsEstimated','errors', 'incompleteMetadata']
     .map(key => [key, Math.max(0, Number(row[key]) || 0)]));
 }
 const metricsSql = `SUM(_sample_interval * double1) AS requests,
   SUM(_sample_interval * double2) AS rowsRead, SUM(_sample_interval * double3) AS rowsWritten,
   SUM(_sample_interval * double4) AS statements, SUM(_sample_interval * double5) AS authCalls,
-  SUM(_sample_interval * double6) AS errors, SUM(_sample_interval * double8) AS incompleteMetadata`;
+  SUM(_sample_interval * double6) AS errors, SUM(_sample_interval * double8) AS incompleteMetadata,
+  SUM(_sample_interval * double9) AS driveCalls, SUM(_sample_interval * double10) AS driveUnitsEstimated`;
 
 export function createUsageReader({ requester = fetch } = {}) {
   // A short best-effort cache is local to each isolate; there is no polling timer.

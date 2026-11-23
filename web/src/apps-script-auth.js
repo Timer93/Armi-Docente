@@ -21,6 +21,7 @@ export function configuredAuthUrl(env) {
 
 const text = (value, max = 200) => typeof value === 'string' ? value.trim().slice(0, max) : '';
 const isFalse = value => value === false || value === 0 || ['false', '0', 'no'].includes(String(value).toLowerCase());
+const driveFolder=value=>{try{const url=new URL(value);const id=url.pathname.match(/\/folders\/([a-zA-Z0-9_-]{10,200})\/?$/)?.[1];return url.protocol==='https:'&&url.hostname==='drive.google.com'&&!url.username&&!url.password&&id?'https://drive.google.com/drive/folders/'+id:'';}catch{return '';}};
 
 export async function authenticateWithAppsScript(env, credentials, requester = fetch, now = Date.now()) {
   const endpoint = configuredAuthUrl(env);
@@ -70,6 +71,8 @@ export async function authenticateWithAppsScript(env, credentials, requester = f
     institutionName: text(data.institutionName || data.institucion),
     membership: {
       status,
+      syncUserKey:text(data.syncUserKey,160)||canonicalUsername,
+      driveFolderUrl:driveFolder(data.driveFolderUrl||data.syncFolderInfo?.folderUrl),
       plan: text(data.subscriptionPlan || data.subscription_plan || data.plan, 80),
       expiresAt,
     },

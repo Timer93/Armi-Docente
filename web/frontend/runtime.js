@@ -30,6 +30,7 @@ export function installWebRuntime(win) {
   for(const path of ['/api/evaluation/grades','/api/evaluation/conclusions'])for(const method of ['GET','PUT'])allowed.add(method+' '+path);
   for(const route of ['GET /api/ai/profile','GET /api/ai/models','PUT /api/ai/credentials','DELETE /api/ai/credentials','PUT /api/ai/preferences','POST /api/ai/generate'])allowed.add(route);
   for(const route of ['GET /api/portal','PUT /api/portal','POST /api/portal/access','DELETE /api/portal/access','PUT /api/portal/publications','GET /api/portal/inbox'])allowed.add(route);
+  for(const route of ['GET /api/drive/profile','POST /api/drive/connect','PUT /api/drive/folder','POST /api/drive/selection','DELETE /api/drive/connection','GET /api/drive/files','GET /api/drive/content'])allowed.add(route);
   allowed.add('POST /api/academic/imports');
   const blocked = () => Response.json({ success: false, message: 'Esta función todavía no está habilitada en la web.' }, { status: 404 });
   win.fetch = (input, options = {}) => {

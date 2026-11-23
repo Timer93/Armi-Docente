@@ -261,7 +261,7 @@ const originalSource = {
   },
 };
 await build({
-  absWorkingDir: web, entryPoints: [{ in: 'frontend/entry.tsx', out: 'web' },{in:'frontend/student-entry.tsx',out:'student'}],
+  absWorkingDir: web, entryPoints: [{ in: 'frontend/entry.tsx', out: 'web' },{in:'frontend/student-entry.tsx',out:'student'},{in:'frontend/drive-picker.ts',out:'drive-picker'}],
   outdir: path.join(out, 'assets'), assetNames: '[name]-[hash]', chunkNames: 'chunks/[name]-[hash]',
   publicPath: '/assets',
   bundle: true, splitting: true, format: 'esm', platform: 'browser', target: 'es2022',
@@ -275,6 +275,7 @@ await build({
 });
 await copyFile(path.join(web, 'public/index.html'), path.join(out, 'index.html'));
 await copyFile(path.join(web, 'public/student.html'), path.join(out, 'student.html'));
+await copyFile(path.join(web, 'public/drive-picker.html'), path.join(out, 'drive-picker.html'));
 await copyFile(path.join(web, 'public/_headers'), path.join(out, '_headers'));
 await copyFile(path.join(web, 'public/curriculum.json'), path.join(out, 'curriculum.json'));
 await copyFile(absolute('src/Logo_bar.ico'), path.join(out, 'favicon.ico'));
