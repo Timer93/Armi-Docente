@@ -25,16 +25,18 @@ function WebHost({ App }: { App: React.ComponentType }) {
     const disableEditing = () => {
       const permits = (element: Element) => {
         const editor = element.closest('[data-armi-web-editor]')?.getAttribute('data-armi-web-editor');
-        return Boolean(editor && (editor==='instruments'?getWebIdentity()?.academic?.instrumentsEditable:editor==='settings'?getWebIdentity()?.academic?.settingsEditable:['annual','units','sessions'].includes(editor) ? getWebIdentity()?.academic?.planningEditable : getWebIdentity()?.academic?.editable));
+        return Boolean(editor && (editor==='evaluation'?getWebIdentity()?.academic?.evaluationEditable:editor==='instruments'?getWebIdentity()?.academic?.instrumentsEditable:editor==='settings'?getWebIdentity()?.academic?.settingsEditable:['annual','units','sessions'].includes(editor) ? getWebIdentity()?.academic?.planningEditable : getWebIdentity()?.academic?.editable));
       };
       document.querySelector('#root aside')?.setAttribute('data-armi-web-sidebar', '');
       document.querySelectorAll<HTMLInputElement | HTMLButtonElement>('#root main input, #root main select, #root main textarea, #root main button, [data-armi-web-editor] input, [data-armi-web-editor] select, [data-armi-web-editor] textarea, [data-armi-web-editor] button, #root [data-armi-web-sidebar] input[type="file"], #root [data-armi-web-sidebar] button[title="Cambiar foto"]').forEach(control => {
         const label = `${control.getAttribute('title') || ''} ${control.getAttribute('aria-label') || ''} ${control.tagName === 'BUTTON' ? control.textContent : ''}`;
         const aiControl=/\bIA\b/i.test(label)&&!/imagen|visual|audio/i.test(label);
-        const unavailablePlanningAction = ['annual','units','sessions'].includes(control.closest('[data-armi-web-editor]')?.getAttribute('data-armi-web-editor') || '') && !aiControl && /plantilla|correspondencia|\bword\b|excel|\bpdf\b|descargar|subir|adjuntar|importar|generar|calificaci[oó]n/i.test(label);
+        const editor=control.closest('[data-armi-web-editor]')?.getAttribute('data-armi-web-editor')||'';
+        const unavailableEvaluationAction=editor==='evaluation'&&/evidencia|archivo|adjuntar|plazo|subir|descargar|plantilla|foto/i.test(label);
+        const unavailablePlanningAction = ['annual','units','sessions'].includes(editor) && !aiControl && (/plantilla|correspondencia|\bword\b|excel|\bpdf\b|descargar|subir|adjuntar|importar|generar/i.test(label)||(!getWebIdentity()?.academic?.evaluationEditable&&/calificaci[oó]n/i.test(label)));
         const unavailablePin = !getWebIdentity()?.academic?.settingsEditable && /fijar|desfijar/i.test(label);
         const unavailableSettingsExport=control.closest('[data-armi-web-editor]')?.getAttribute('data-armi-web-editor')==='settings' && /\bword\b|excel|descargar|plantilla|\bIA\b/i.test(label);
-        const supported = permits(control) && !control.closest('[data-web-unavailable]') && control.getAttribute('type') !== 'file' && !unavailablePlanningAction && !unavailablePin && !unavailableSettingsExport;
+        const supported = permits(control) && !control.closest('[data-web-unavailable]') && control.getAttribute('type') !== 'file' && !unavailableEvaluationAction && !unavailablePlanningAction && !unavailablePin && !unavailableSettingsExport;
         if (!supported && !control.disabled) control.disabled = true;
       });
       document.querySelectorAll<HTMLElement>('#root main [contenteditable="true"]').forEach(element => { if (!permits(element) || element.closest('[data-web-unavailable]')) element.contentEditable = 'false'; });

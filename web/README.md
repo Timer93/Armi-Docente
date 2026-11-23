@@ -26,7 +26,10 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   personales, sesiones publicadas por grupo y entregas de texto.
 - Biblioteca de Instrumentos de evaluación: crear, editar, duplicar, previsualizar
   y eliminar rúbricas, listas de cotejo, escalas y guías en sus pantallas originales.
-  Requiere activar 0008. Las notas y registros de evaluación siguen pendientes.
+  Requiere activar 0008.
+- Calificación literal de sesiones y observaciones; consolidación por unidad y
+  bimestre con los cálculos originales, y conclusiones descriptivas por ámbito.
+  Requiere activar 0009. Las notas no se publican al portal de estudiantes.
 - Los otros módulos siguen en consulta. Drive, importación de Excel, fotos,
   operaciones masivas y entregas de archivos pendientes.
 - No modifica ni sincroniza la base local. Una cuenta sin copia activa muestra
@@ -95,7 +98,7 @@ funcionando. La tabla 0004 sigue siendo necesaria para Datos generales y alumnos
 - Las unidades se reflejan al reabrir una sesión mediante la función pura
   original `mergeUnitSessionPlanning`; no hay actualización en vivo de pestañas
   abiertas, ni una reescritura masiva de sesiones, ni sincronización con PC.
-- Calificación, plantillas Word, archivos, recursos visuales y Drive siguen
+- Plantillas Word, archivos, recursos visuales y Drive siguen
   pendientes. Sus controles se bloquean en la compilación web y el transporte
   rechaza los servicios no migrados. Los catálogos de áreas/grados, calendarios
   y horarios propios se pueden configurar en web después de aplicar 0006, o
@@ -370,4 +373,47 @@ Esta biblioteca contiene los instrumentos creados en web. La copia académica
 actual no incluye la biblioteca independiente de instrumentos del escritorio;
 su transferencia sigue pendiente. Los instrumentos integrados en las sesiones
 importadas se conservan dentro de esas sesiones. No se habilitan todavía las
-calificaciones, los registros por unidad/bimestre ni la sincronización con PC.
+calificaciones hasta activar también 0009, ni la sincronización con PC.
+
+### Activar calificaciones y registros: migración 0009
+
+Ejecutar `migrations/0009_web_evaluation.sql` en **D1 → armi-docente-web → Consola**
+y recargar ARMI con Ctrl+F5. Solo crea `web_evaluation`; no modifica el escritorio,
+los secretos ni los datos importados. No requiere repetir la importación. Si
+falta la tabla, el guardado de evaluación permanece bloqueado y los módulos
+anteriores siguen funcionando.
+
+- En **Sesiones → Calificación**, registrar niveles C/B/A/AD y observaciones con
+  los controles originales de rúbricas, cotejo, escalas y guías. Se conservan los
+  textos literales que usa el núcleo original. Los modos numéricos avanzados y
+  cambios de modo de calificación todavía no están migrados.
+- En **Evaluación → Registro por Unidad / Bimestre**, consultar las agregaciones
+  originales y editar conclusiones de hasta 250 caracteres por estudiante y
+  competencia. Unidad y bimestre tienen revisiones y almacenamiento separados;
+  borrar el texto guarda explícitamente una conclusión vacía. La IA de
+  conclusiones usa la clave propia configurada, con los límites de 0007.
+- El guardado agrupa cambios (900 ms para notas, 700 ms para conclusiones) y
+  transmite únicamente las celdas modificadas. Al cambiar de pantalla se envían
+  los cambios pendientes antes de leer el nuevo consolidado. No hay consultas
+  periódicas cada cinco segundos ni reintentos automáticos tras un error.
+- El aviso de guardado diferencia cambios pendientes, petición en curso, éxito
+  confirmado y error. Si se intenta cerrar la página con cambios pendientes, el
+  navegador puede solicitar confirmación para evitar perderlos.
+- Las claves de cada registro se derivan de la cuenta autenticada en servidor.
+  Se comprueba la pertenencia del estudiante al grado y sección antes de guardar
+  y en la escritura final. El lote es atómico; un alumno ajeno invalida todo el
+  lote. Las sesiones fusionadas admiten estudiantes de sus distintas secciones.
+- Cada ámbito comprueba revisión y operación. Una pestaña desactualizada no
+  sobrescribe la otra, y cambios de sesión o unidad invalidan la planificación
+  usada para calificar. Las lecturas paginadas de consolidados comprueban revisión
+  para no unir páginas de versiones diferentes. Ante error, conservar el texto
+  pendiente y recargar para continuar; no se sustituyen notas con datos vacíos.
+- Límites propios iniciales: 500 cambios por petición, 5000 celdas y 256 KB por
+  documento de sesión o ámbito. No son una capacidad medida de usuarios masivos.
+  El consumo continúa registrado por cuenta en Analytics Engine.
+
+Las notas y conclusiones guardadas en el escritorio no forman parte de la copia
+académica actual y no se transfieren automáticamente. Esta etapa guarda las
+creadas en web. La sincronización con PC, asistencia, archivos de evidencia y
+Drive continúan pendientes. No se distribuyen credenciales del escritorio ni se
+habilitan operaciones de archivos para permitir el registro de calificaciones.

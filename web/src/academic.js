@@ -3,6 +3,7 @@ import { editsReady, hasEdits, editAcademic } from './academic-edits.js';
 import { isPlanning } from './edit-fields.js';
 import {configurationReady,configurationRecords,saveConfiguration} from './web-configuration.js';
 import {instrumentsReady} from './instruments.js';
+import {evaluationReady} from './evaluation.js';
 
 export const DATASETS = ['general', 'students', 'annual', 'units', 'sessions', 'frontend'];
 import {FRONTEND_KEYS} from './configuration-keys.js';
@@ -51,7 +52,7 @@ export async function academicRoute(request, env, teacher, { readJson, digest, r
       const current = await head(db, teacherId);
       const counts = current.active_import_id
         ? (await db.prepare('SELECT dataset, COUNT(*) AS count FROM academic_records WHERE teacher_id = ? AND import_id = ? GROUP BY dataset').bind(teacherId, current.active_import_id).all()).results : [];
-      return response({ ready: true, editable: await editsReady(db), planningEditable: await editsReady(db,true), settingsEditable: await configurationReady(db), instrumentsEditable:await instrumentsReady(db), hasWebEdits: await hasEdits(db, teacherId), snapshotId: current.active_import_id, revision: current.revision, counts: Object.fromEntries(counts.map(row => [row.dataset, row.count])) });
+      return response({ ready: true, editable: await editsReady(db), planningEditable: await editsReady(db,true), settingsEditable: await configurationReady(db), instrumentsEditable:await instrumentsReady(db), evaluationEditable:await evaluationReady(db), hasWebEdits: await hasEdits(db, teacherId), snapshotId: current.active_import_id, revision: current.revision, counts: Object.fromEntries(counts.map(row => [row.dataset, row.count])) });
     }
     if (url.pathname === '/api/academic/records' && request.method === 'GET') {
       const dataset = url.searchParams.get('dataset');

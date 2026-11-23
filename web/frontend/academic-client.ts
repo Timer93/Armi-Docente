@@ -8,6 +8,10 @@ export const academicApi = (path: string, method = 'GET', body?: unknown) => cli
 type Row = { id: string; value: any; revision: number };
 const cache = new Map<string, Promise<Array<Row>>>();
 const loadedRows = new Map<string, Row[]>();
+export function academicVersion(dataset:string,id:string) {
+  const key=`${getWebIdentity()?.user.id}:${dataset}`;
+  return {loaded:loadedRows.has(key),snapshot:snapshots.get(key)||null,revision:loadedRows.get(key)?.find(row=>row.id===id)?.revision||deletedRows.get(key)?.get(id)||0};
+}
 const deletedRows = new Map<string, Map<string,number>>();
 const snapshots = new Map<string, string | null>();
 const settingsRevisions = new Map<string,number>();

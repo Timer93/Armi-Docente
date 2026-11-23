@@ -14,6 +14,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0006_web_configuration.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0007_ai_student_portal.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0008_web_instruments.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0009_web_evaluation.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -685,4 +686,70 @@ test('instrument lists page at 50 and missing migration keeps academic modules r
  assert.equal((await f.call('/api/instruments',{cookie:a.cookie})).status,503);
  const status=(await(await f.call('/api/academic/status',{cookie:a.cookie})).json()).data;
  assert.equal(status.instrumentsEditable,false);assert.equal(status.editable,true);assert.equal(status.planningEditable,true);
+});
+
+const gradeRow=(student='A',level='Logrado')=>({student_id:student,session_id:'2026-ept-1ro-A-U1-S1',unit_id:'2026-ept-1ro-A-U1',instrument_id:null,criteria_id:'1',level,observation:'Avanza en el criterio'});
+const conclusionContext={year:'2026',areaId:'ept',grade:'1ro',section:'A',scopeType:'unit',scopeValue:'1'};
+const conclusionRow=(student='A',conclusionText='Explica su propuesta con claridad.')=>({studentId:student,competencyKey:'primary::gestiona proyectos',competencyName:'Gestiona proyectos',competencySource:'primary',conclusionText});
+async function gradeRead(f,user,id=gradeRow().session_id) {
+ const response=await f.call('/api/evaluation/grades?sessionId='+encodeURIComponent(id),{cookie:user.cookie});assert.equal(response.status,200,await response.clone().text());return (await response.json()).data;
+}
+test('web grades persist owned student cells, isolate teachers and reject stale batches atomically',async t=>{
+ const f=fixture(t),a=await f.login(),b=await f.login('docenteB');await schoolPortal(f,a);await schoolPortal(f,b,'b');
+ const read=await gradeRead(f,a),body={sessionId:gradeRow().session_id,sourceVersion:read.sourceVersion,expectedRevision:0,operationId:crypto.randomUUID(),changes:[gradeRow()]};
+ const put=(user,payload)=>f.call('/api/evaluation/grades',{cookie:user.cookie,method:'PUT',body:payload});
+ assert.equal((await put(a,body)).status,200);assert.equal((await put(a,body)).status,200);
+ assert.equal((await gradeRead(f,a)).records[0].level,'Logrado');assert.equal((await gradeRead(f,b)).records.length,0);
+ assert.equal((await put(b,{...body,expectedRevision:1})).status,409);
+ assert.equal((await put(a,{...body,expectedRevision:1,operationId:crypto.randomUUID(),changes:[gradeRow('A','Destacado')]})).status,200);
+ assert.equal((await put(a,{...body,operationId:crypto.randomUUID(),changes:[gradeRow('A','Inicio')]})).status,409);
+ const wrongGroup={...body,expectedRevision:2,operationId:crypto.randomUUID(),changes:[gradeRow('A','Inicio'),gradeRow('B','Proceso')]};
+ assert.equal((await put(a,wrongGroup)).status,403);assert.equal((await gradeRead(f,a)).records[0].level,'Destacado');
+ const all=(await(await f.call('/api/evaluation/grades',{cookie:a.cookie})).json()).data;assert.equal(all.records.length,1);
+ assert.equal((await put(a,{...body,teacherId:b.data.user.id})).status,400);
+});
+
+test('grades reject changed planning, invalid levels and students moved during the final write',async t=>{
+ const f=fixture(t),a=await f.login();await schoolPortal(f,a);const read=await gradeRead(f,a);
+ const body={sessionId:gradeRow().session_id,sourceVersion:read.sourceVersion,expectedRevision:0,operationId:crypto.randomUUID(),changes:[gradeRow()]};
+ const put=value=>f.call('/api/evaluation/grades',{cookie:a.cookie,method:'PUT',body:value});
+ for(const changes of [[gradeRow('A','21')],[gradeRow(),gradeRow()],[{...gradeRow(),session_id:'other'}],[{...gradeRow(),unit_id:'other'}],[{...gradeRow(),instrument_id:{secret:'private'}}]])assert.equal((await put({...body,changes})).status,400);
+ f.sqlite.prepare("INSERT INTO planning_edits(teacher_id,dataset,record_id,payload_json,revision,operation_id,operation_hash,updated_at) VALUES(?,'units','2026-ept-1ro-A-U1','{}',1,'fixture','fixture',0)").run(a.data.user.id);
+ assert.equal((await put(body)).status,409,'Unit changes invalidate a grading view loaded with old criteria');
+ const fresh=await gradeRead(f,a);body.sourceVersion=fresh.sourceVersion;
+ const batch=f.env.DB.batch.bind(f.env.DB);
+ f.env.DB.batch=async statements=>{f.sqlite.prepare("UPDATE academic_records SET payload_json=json_set(payload_json,'$.grade','2do') WHERE teacher_id=? AND dataset='students' AND record_id='A'").run(a.data.user.id);return batch(statements);};
+ assert.equal((await put(body)).status,409,'The INSERT checks the roster again after validation');
+ assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM web_evaluation').get().n,0);
+});
+
+test('conclusions keep unit and bimester scopes separate, retain explicit clearing and protect revisions',async t=>{
+ const f=fixture(t),a=await f.login(),b=await f.login('docenteB');await schoolPortal(f,a);await schoolPortal(f,b,'b');
+ const read=async(user,context=conclusionContext)=>(await(await f.call('/api/evaluation/conclusions?'+new URLSearchParams(context),{cookie:user.cookie})).json()).data;
+ const body={context:conclusionContext,expectedRevision:0,operationId:crypto.randomUUID(),changes:[conclusionRow()]};
+ const put=value=>f.call('/api/evaluation/conclusions',{cookie:a.cookie,method:'PUT',body:value});
+ assert.equal((await put(body)).status,200);assert.equal((await read(a)).records[0].conclusionText,conclusionRow().conclusionText);
+ assert.equal((await read(b)).records.length,0);
+ const bimester={...conclusionContext,scopeType:'bimester',scopeValue:'I'};
+ assert.equal((await read(a,bimester)).records.length,0);
+ assert.equal((await put({...body,context:bimester,operationId:crypto.randomUUID()})).status,200);
+ assert.equal((await put({...body,expectedRevision:1,operationId:crypto.randomUUID(),changes:[conclusionRow('A','')]})).status,200);
+ assert.equal((await read(a)).records[0].conclusionText,'');assert.equal((await read(a,bimester)).records[0].conclusionText,conclusionRow().conclusionText);
+ assert.equal((await put({...body,operationId:crypto.randomUUID()})).status,409);
+ assert.equal((await put({...body,expectedRevision:2,operationId:crypto.randomUUID(),changes:[conclusionRow('B')]})).status,403);
+ assert.equal((await put({...body,expectedRevision:2,operationId:crypto.randomUUID(),changes:[conclusionRow('A','x'.repeat(251))]})).status,400);
+});
+
+test('grade lists are paginated and missing evaluation migration does not disable the previous modules',async t=>{
+ const f=fixture(t),a=await f.login();await schoolPortal(f,a);
+ const insert=f.sqlite.prepare("INSERT INTO web_evaluation(teacher_id,kind,scope_id,scope_json,payload_json,revision,operation_id,operation_hash,updated_at) VALUES(?,'grades',?,'{}',?,1,'fixture','fixture',0)");
+ for(let i=0;i<7;i++)insert.run(a.data.user.id,'session-'+i,JSON.stringify([{...gradeRow(),session_id:'session-'+i}]));
+ const first=(await(await f.call('/api/evaluation/grades',{cookie:a.cookie})).json()).data;assert.equal(first.records.length,5);assert.ok(first.nextCursor);
+ const last=(await(await f.call('/api/evaluation/grades?cursor='+first.nextCursor,{cookie:a.cookie})).json()).data;assert.equal(last.records.length,2);assert.equal(last.nextCursor,null);
+ f.sqlite.prepare('UPDATE academic_heads SET revision=revision+1 WHERE teacher_id=?').run(a.data.user.id);
+ assert.equal((await f.call('/api/evaluation/grades?cursor='+first.nextCursor+'&revision='+first.revision,{cookie:a.cookie})).status,409);
+ f.sqlite.exec('DROP TABLE web_evaluation');
+ assert.equal((await f.call('/api/evaluation/grades',{cookie:a.cookie})).status,503);
+ const status=(await(await f.call('/api/academic/status',{cookie:a.cookie})).json()).data;
+ assert.equal(status.evaluationEditable,false);assert.equal(status.editable,true);assert.equal(status.instrumentsEditable,true);
 });

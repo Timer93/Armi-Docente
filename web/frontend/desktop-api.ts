@@ -2,6 +2,7 @@
 // que todavía no tienen un servidor compatible, sin enviarlas al localhost.
 export * from 'armi-desktop-api-original';
 export {getInstrumentos,saveInstrumento,deleteInstrumento} from './instruments-client';
+export {getEvaluacionRegistros,saveEvaluacionRegistros,getEvaluacionConclusiones,saveEvaluacionConclusiones} from './evaluation-client';
 import { INITIAL_GENERAL_DATA, INITIAL_MODULE_STATUS } from '../../constants';
 import { getWebIdentity } from './runtime.js';
 import { readAcademic, saveAcademic, invalidateAcademic } from './academic-client';

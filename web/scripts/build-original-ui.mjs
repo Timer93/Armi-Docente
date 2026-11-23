@@ -24,6 +24,7 @@ const originalSource = {
     bundler.onResolve({ filter: /^armi-web-runtime$/ }, () => ({path:webFile('runtime.js')}));
     bundler.onResolve({filter:/^armi-web-ai$/},()=>({path:webFile('ai-client.ts')}));
     bundler.onResolve({filter:/^armi-web-ai-settings$/},()=>({path:webFile('AISettings.tsx')}));
+    bundler.onResolve({filter:/^armi-web-evaluation$/},()=>({path:webFile('evaluation-client.tsx')}));
     bundler.onResolve({filter:/[\\/]utils[\\/](gemini|aiModels)(?:\.ts)?$/},args=>({path:webFile(args.path.includes('aiModels')?'ai-models.ts':'ai-client.ts')}));
     bundler.onResolve({ filter: /^armi-desktop-api-original$/ }, () => ({ path: absolute('services/apiService.ts') }));
     bundler.onResolve({ filter: /(?:AuthContext|apiService|observePortableStorage|SyncLifecycleManager|BackgroundSyncIndicator|RemoteAccessIndicator|AppUpdaterOverlay|CloudSyncPanel|GeneralNotesOverlay)(?:\.tsx?)?$/ }, args => {
@@ -94,7 +95,7 @@ const originalSource = {
       contents=contents.slice(0,end)+contents.slice(end).replace('    }','    } finally {savingWebRef.current=false;setSavingWeb(false);}');
       contents=contents.replace('<button onClick={saveEditor}','<button disabled={savingWeb} aria-busy={savingWeb} onClick={saveEditor}');
       contents=contents.replace('await deleteInstrumento(id)','await deleteInstrumento(id,(instruments.find(row=>row.id===id) as any)?.webRevision)');
-      contents=contents.replace('{toast && (','<p className="rounded-xl border border-slate-200 p-3 text-sm">{getArmiInstrumentIdentity()?.academic?.instrumentsEditable ? "Esta biblioteca contiene los instrumentos creados en la web. Las calificaciones y los registros de evaluación todavía están pendientes." : "El administrador debe activar el guardado de Instrumentos en la base de datos web."}</p>{toast && (');
+      contents=contents.replace('{toast && (','<p className="rounded-xl border border-slate-200 p-3 text-sm">{getArmiInstrumentIdentity()?.academic?.instrumentsEditable ? "Esta biblioteca contiene los instrumentos creados en la web." : "El administrador debe activar el guardado de Instrumentos en la base de datos web."}</p>{toast && (');
       return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
     });
     bundler.onLoad({filter:/[\\/]components[\\/](AnnualProgramView|UnitsView|SessionsView)\.tsx$/}, async args => {
@@ -102,6 +103,20 @@ const originalSource = {
       const name = path.basename(args.path,'.tsx');
       contents="import {WebAISettings} from 'armi-web-ai-settings';\nimport {webOpenAIResponse} from 'armi-web-ai';\n"+contents.replaceAll('<AuthOverlay','<WebAISettings').replaceAll("fetch('https://api.openai.com/v1/responses',", "webOpenAIResponse('https://api.openai.com/v1/responses',");
       if(name==='SessionsView') {
+        contents="import {EvaluationGate,evaluationBlocked,clearEvaluationPending} from 'armi-web-evaluation';\n"+contents.replace(/\r\n/g,'\n');
+        const pollStart=contents.indexOf('        const refresh = () => { void loadGradingRecords(); };');
+        const pollEnd=contents.indexOf('\n    }, [sessionMode, currentSessionId, serializeGradingRecords]);',pollStart);
+        if(pollStart<0||pollEnd<0)throw new Error('Review grading polling isolation');
+        contents=contents.slice(0,pollStart)+'        return () => { cancelled = true; };'+contents.slice(pollEnd);
+        const autosave="if (sessionMode !== 'calificacion' || !currentSessionId || gradingLoading) return;";
+        if(!contents.includes(autosave))throw new Error('Review grading autosave guard');
+        contents=contents.replace(autosave,"if (evaluationBlocked() || sessionMode !== 'calificacion' || !currentSessionId || gradingLoading) return;");
+        contents=contents.replace('if (snapshot === gradingAutosaveRef.current.lastSaved || gradingAutosaveRef.current.saving) return;','if(gradingAutosaveRef.current.saving)return;if(snapshot===gradingAutosaveRef.current.lastSaved){clearEvaluationPending("grades:"+currentSessionId);return;}');
+        const panelStart=contents.indexOf('            <SessionRegisterPanel'),panelEnd=contents.indexOf('\n            />',panelStart);
+        if(panelStart<0||panelEnd<0)throw new Error('Review grading panel wrapper');
+        contents=contents.slice(0,panelStart)+'            <EvaluationGate required={["grades:"+currentSessionId]}>'+contents.slice(panelStart,panelEnd+15)+'</EvaluationGate>'+contents.slice(panelEnd+15);
+        contents=contents.replace('handleSave={handleSave}','handleSave={sessionMode === "calificacion" ? async()=>{if(!await handleSaveGrading())throw new Error("No se pudo guardar la calificación.");} : handleSave}');
+        contents=contents.replace('} = useSessionGradingPersistence({','} = useSessionGradingPersistence({\n        webSessionMode:sessionMode,');
         contents=contents.replace("const apiKey = (generalData?.gemini_api_key || process.env.API_KEY || '').trim();","const apiKey = (generalData?.ai_provider === 'openai' ? generalData?.openai_api_key || '' : generalData?.gemini_api_key || '').trim();");
         contents=contents.replace("const preferredGeminiModel = String(generalData?.gemini_model || '').trim();","const preferredGeminiModel = String(generalData?.ai_provider === 'openai' ? generalData?.openai_model || '' : generalData?.gemini_model || '').trim();");
         contents=contents.replace('const updated = { ...generalData, gemini_api_key: key, gemini_model: model };',"const updated = {...generalData,...(key.includes('openai') ? {ai_provider:'openai',openai_api_key:key,openai_model:model} : {ai_provider:'gemini',gemini_api_key:key,gemini_model:model})};");
@@ -123,6 +138,42 @@ const originalSource = {
       }
       contents = contents.replaceAll('Unidad Sincronizada.','Unidad guardada en la web.');
       return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
+    bundler.onLoad({filter:/[\\/]registers[\\/]RegisterConsolidationView\.tsx$/},async args=>{
+      let contents="import {EvaluationGate,useWebConclusionAutosave} from 'armi-web-evaluation';\n"+(await readFile(args.path,'utf8')).replace(/\r\n/g,'\n');
+      const marker='    <div className="space-y-6">',start=contents.lastIndexOf(marker),end=contents.lastIndexOf('</div>');
+      if(start<0||end<start)throw new Error('Review consolidated register wrapper');
+      contents=contents.slice(0,end+6)+'</EvaluationGate>'+contents.slice(end+6);
+      contents=contents.slice(0,start)+'    <EvaluationGate required={["all-grades","conclusions:"+conclusionQueryKey]}>'+contents.slice(start);
+      const saveStart=contents.indexOf('  useEffect(() => {\n    if (!conclusionsHydrated || hydratedConclusionsScope !== conclusionQueryKey || !year');
+      const recordsStart=contents.indexOf('      const records = ',saveStart),recordsEnd=contents.indexOf('\n\n      try {',recordsStart);
+      const saveEnd=contents.indexOf('\n  const getAggregatedCompetencyCode',recordsEnd);
+      if(saveStart<0||recordsStart<0||recordsEnd<0||saveEnd<0)throw new Error('Review conclusion autosave isolation');
+      const expression=contents.slice(recordsStart+'      const records = '.length,recordsEnd).trim().replace(/;$/,'');
+      contents=contents.slice(0,saveStart)+`  useWebConclusionAutosave(conclusionQueryKey,${expression},conclusionsHydrated && hydratedConclusionsScope===conclusionQueryKey && Boolean(year && areaId && grade && section && conclusionScopeValue));\n`+contents.slice(saveEnd);
+      contents=contents.replace('if (key && text) acc[key] = text;','if (key) acc[key] = text;');
+      contents=contents.replace("const apiKey = String(generalData?.gemini_api_key || process.env.API_KEY || '').trim();","const apiKey = String(generalData?.ai_provider === 'openai' ? generalData?.openai_api_key || '' : generalData?.gemini_api_key || '').trim();");
+      contents=contents.replace("String(generalData?.gemini_model || '').trim()","String(generalData?.ai_provider === 'openai' ? generalData?.openai_model || '' : generalData?.gemini_model || '').trim()");
+      contents=contents.replaceAll('Modo de prueba','Detalle de sesiones').replaceAll('Tabla de jalado desde sesiones','Notas de las sesiones');
+      return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
+    bundler.onLoad({filter:/[\\/]evaluation[\\/](UnitRegisterView|BimesterRegisterView)\.tsx$/},async args=>{
+      const description=args.path.includes('UnitRegisterView')?'Consulta las notas de las sesiones de esta unidad y redacta conclusiones por competencia.':'Consulta las notas de este bimestre y redacta conclusiones por competencia.';
+      const contents=(await readFile(args.path,'utf8')).replace(/description="[^"]*"/,`description="${description}"`);
+      return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
+    bundler.onLoad({filter:/[\\/]sessions-view[\\/]useSessionGradingPersistence\.ts$/},async args=>{
+      let contents=(await readFile(args.path,'utf8')).replace(/\r\n/g,'\n');
+      contents="import {useEffect,useRef} from 'react';\nimport {evaluationBlocked,evaluationPending,markEvaluationPending} from 'armi-web-evaluation';\n"+contents;
+      contents=contents.replace('    currentSessionId,','    webSessionMode,\n    currentSessionId,');
+      contents=contents.replace('interface UseSessionGradingPersistenceParams {','interface UseSessionGradingPersistenceParams {\n    webSessionMode?:string;');
+      const keyLine='        const key = getGradingKey(studentId, criteriaId);';
+      if(!contents.includes(keyLine))throw new Error('Review grade change marker');
+      contents=contents.replace(keyLine,keyLine+'\n        if((patch.level!==undefined && patch.level!==(gradingRecords[key]?.level||"")) || (patch.observation!==undefined && patch.observation!==(gradingRecords[key]?.observation||"")))markEvaluationPending("grades:"+currentSessionId);');
+      const marker='    return {\n        getGradingKey,';
+      if(!contents.includes(marker))throw new Error('Review grade navigation flush');
+      contents=contents.replace(marker,'    const saves=useRef(new Map());saves.current.set(currentSessionId,handleSaveGrading);\n    useEffect(()=>()=>{if(webSessionMode==="calificacion" && evaluationPending("grades:"+currentSessionId) && !evaluationBlocked())void saves.current.get(currentSessionId)?.({silent:true});},[currentSessionId,webSessionMode]);\n'+marker);
+      return {contents,loader:'ts',resolveDir:path.dirname(args.path)};
     });
     bundler.onLoad({filter:/[\\/]components[\\/](AreasGradosView|CalendarView|ScheduleView)\.tsx$/},async args=>{
       let contents=await readFile(args.path,'utf8');
