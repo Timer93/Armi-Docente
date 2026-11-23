@@ -22,6 +22,9 @@ const originalSource = {
   name: 'armi-web-runtime-adapters',
   setup(bundler) {
     bundler.onResolve({ filter: /^armi-web-runtime$/ }, () => ({path:webFile('runtime.js')}));
+    bundler.onResolve({filter:/^armi-web-ai$/},()=>({path:webFile('ai-client.ts')}));
+    bundler.onResolve({filter:/^armi-web-ai-settings$/},()=>({path:webFile('AISettings.tsx')}));
+    bundler.onResolve({filter:/[\\/]utils[\\/](gemini|aiModels)(?:\.ts)?$/},args=>({path:webFile(args.path.includes('aiModels')?'ai-models.ts':'ai-client.ts')}));
     bundler.onResolve({ filter: /^armi-desktop-api-original$/ }, () => ({ path: absolute('services/apiService.ts') }));
     bundler.onResolve({ filter: /(?:AuthContext|apiService|observePortableStorage|SyncLifecycleManager|BackgroundSyncIndicator|RemoteAccessIndicator|AppUpdaterOverlay|CloudSyncPanel|GeneralNotesOverlay)(?:\.tsx?)?$/ }, args => {
       const target = path.resolve(args.resolveDir, args.path).replace(/\\/g, '/').replace(/\.tsx?$/, '');
@@ -76,6 +79,13 @@ const originalSource = {
     bundler.onLoad({filter:/[\\/]components[\\/](AnnualProgramView|UnitsView|SessionsView)\.tsx$/}, async args => {
       let contents = await readFile(args.path,'utf8');
       const name = path.basename(args.path,'.tsx');
+      contents="import {WebAISettings} from 'armi-web-ai-settings';\nimport {webOpenAIResponse} from 'armi-web-ai';\n"+contents.replaceAll('<AuthOverlay','<WebAISettings').replaceAll("fetch('https://api.openai.com/v1/responses',", "webOpenAIResponse('https://api.openai.com/v1/responses',");
+      if(name==='SessionsView') {
+        contents=contents.replace("const apiKey = (generalData?.gemini_api_key || process.env.API_KEY || '').trim();","const apiKey = (generalData?.ai_provider === 'openai' ? generalData?.openai_api_key || '' : generalData?.gemini_api_key || '').trim();");
+        contents=contents.replace("const preferredGeminiModel = String(generalData?.gemini_model || '').trim();","const preferredGeminiModel = String(generalData?.ai_provider === 'openai' ? generalData?.openai_model || '' : generalData?.gemini_model || '').trim();");
+        contents=contents.replace('const updated = { ...generalData, gemini_api_key: key, gemini_model: model };',"const updated = {...generalData,...(key.includes('openai') ? {ai_provider:'openai',openai_api_key:key,openai_model:model} : {ai_provider:'gemini',gemini_api_key:key,gemini_model:model})};");
+        contents=contents.replace("registerAiUsage('gemini', 'learning_session'","registerAiUsage(generalData?.ai_provider || 'gemini', 'learning_session'");
+      }
       const dataset = {AnnualProgramView:'annual',UnitsView:'units',SessionsView:'sessions'}[name];
       if (name === 'AnnualProgramView') {
         const marker = /return \(\s*<>\s*\{toast &&/;
@@ -124,7 +134,7 @@ const originalSource = {
       let contents = await readFile(args.path,'utf8');
       const marker = ".filter(action => action.id !== 'clear' || !!props.onClear)";
       if (!contents.includes(marker)) throw new Error('Review planning actions for web');
-      contents = "import {getWebIdentity as getArmiWebIdentity} from 'armi-web-runtime';\n" + contents.replace(marker, marker + ".map(action => ({...action,disabled:action.disabled || !getArmiWebIdentity()?.academic?.planningEditable || ['ai','template','settings'].includes(action.id)}))");
+      contents = "import {getWebIdentity as getArmiWebIdentity} from 'armi-web-runtime';\n" + contents.replace(marker, marker + ".map(action => ({...action,disabled:action.disabled || !getArmiWebIdentity()?.academic?.planningEditable || action.id==='template'}))");
       return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
     });
     bundler.onLoad({filter:/[\\/]sessions-view[\\/]SessionManager\.tsx$/}, async args => {
@@ -154,7 +164,7 @@ const originalSource = {
   },
 };
 await build({
-  absWorkingDir: web, entryPoints: [{ in: 'frontend/entry.tsx', out: 'web' }],
+  absWorkingDir: web, entryPoints: [{ in: 'frontend/entry.tsx', out: 'web' },{in:'frontend/student-entry.tsx',out:'student'}],
   outdir: path.join(out, 'assets'), assetNames: '[name]-[hash]', chunkNames: 'chunks/[name]-[hash]',
   publicPath: '/assets',
   bundle: true, splitting: true, format: 'esm', platform: 'browser', target: 'es2022',
@@ -167,6 +177,7 @@ await build({
   await writeFile(path.join(web, '.web-build-inputs.json'), JSON.stringify(Object.keys(result.metafile.inputs), null, 2));
 });
 await copyFile(path.join(web, 'public/index.html'), path.join(out, 'index.html'));
+await copyFile(path.join(web, 'public/student.html'), path.join(out, 'student.html'));
 await copyFile(path.join(web, 'public/_headers'), path.join(out, '_headers'));
 await copyFile(path.join(web, 'public/curriculum.json'), path.join(out, 'curriculum.json'));
 await copyFile(absolute('src/Logo_bar.ico'), path.join(out, 'favicon.ico'));

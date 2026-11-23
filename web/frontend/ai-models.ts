@@ -1,0 +1,14 @@
+import {aiApi} from './ai-client';
+export type AiProvider='gemini'|'openai';
+export type AiModelOption={id:string,label:string};
+export type AiImageCapability={available:boolean,models:AiModelOption[],source:string};
+export const DEFAULT_GEMINI_MODEL='gemini-2.5-flash',DEFAULT_OPENAI_MODEL='gpt-4.1-mini';
+export const getDefaultModelForProvider=(provider:AiProvider)=>provider==='openai'?DEFAULT_OPENAI_MODEL:DEFAULT_GEMINI_MODEL;
+export const getFallbackModelOptions=(provider:AiProvider)=>[{id:getDefaultModelForProvider(provider),label:getDefaultModelForProvider(provider)}];
+const models=new Map<string,Promise<AiModelOption[]>>();
+const fetchModels=(provider:AiProvider)=>{if(!models.has(provider)){const pending=aiApi('/api/ai/models?provider='+provider).then(data=>data.models);models.set(provider,pending);void pending.catch(()=>models.delete(provider));}return models.get(provider)!;};
+export const fetchGeminiTextModels=()=>fetchModels('gemini');
+export const fetchOpenAITextModels=()=>fetchModels('openai');
+export const clearAiModels=()=>models.clear();
+export const fetchGeminiImageCapability=async()=>({available:false,models:[],source:'unknown'});
+export const fetchOpenAIImageCapability=fetchGeminiImageCapability;

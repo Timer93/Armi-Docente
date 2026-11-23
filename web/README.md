@@ -20,8 +20,12 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   matrices y contenido estructurado. Se reutilizan las pantallas originales.
 - Configuración de Áreas, Grados, Calendario, Feriados y Horario por cuenta,
   incluyendo colores del horario y las matrices/unidades fijadas de planificación.
-- Los otros módulos siguen en consulta. Drive, IA, importación de Excel, fotos,
-  operaciones masivas y portal de estudiantes web pendientes.
+- IA de texto para Programación, Unidades y Sesiones, con clave propia por
+  docente y almacenamiento cifrado. Requiere activar 0007 y el secreto de cifrado.
+- Portal independiente de estudiantes, con interruptor por docente, códigos
+  personales, sesiones publicadas por grupo y entregas de texto.
+- Los otros módulos siguen en consulta. Drive, importación de Excel, fotos,
+  operaciones masivas y entregas de archivos pendientes.
 - No modifica ni sincroniza la base local. Una cuenta sin copia activa muestra
   campos vacíos; eso no elimina los registros del escritorio.
 
@@ -88,7 +92,7 @@ funcionando. La tabla 0004 sigue siendo necesaria para Datos generales y alumnos
 - Las unidades se reflejan al reabrir una sesión mediante la función pura
   original `mergeUnitSessionPlanning`; no hay actualización en vivo de pestañas
   abiertas, ni una reescritura masiva de sesiones, ni sincronización con PC.
-- IA, calificación, plantillas Word, archivos, recursos visuales y Drive siguen
+- Calificación, plantillas Word, archivos, recursos visuales y Drive siguen
   pendientes. Sus controles se bloquean en la compilación web y el transporte
   rechaza los servicios no migrados. Los catálogos de áreas/grados, calendarios
   y horarios propios se pueden configurar en web después de aplicar 0006, o
@@ -259,16 +263,14 @@ Registrar como trabajo pendiente, no como función disponible:
 La importación actual activa una copia completa. No observa la base local ni
 propaga cambios posteriores en ninguna dirección. Debe seguir indicándose así.
 
-### Interruptor del portal de estudiantes en web
+### Portal de estudiantes en web
 
-Requisito solicitado: al adaptar el área de compartir acceso del Banco de
-Evidencias, reemplazar los controles de cloudflared del escritorio por un
-interruptor visual de **Acceso de estudiantes**, con estados **Abierto** y
-**Cerrado**. La versión web alojada en Cloudflare no necesita un túnel de la PC.
-El interruptor controla el portal del docente; no apaga la aplicación web ni
-afecta a los demás docentes.
+El botón **Acceso de estudiantes** del encabezado abre un panel con interruptor
+**Abierto / Cerrado**. Es independiente del Banco de Evidencias del escritorio;
+no usa cloudflared ni requiere que la PC permanezca encendida. El enlace fijo
+pertenece a un docente. El estado inicial es cerrado.
 
-Condiciones para implementarlo:
+Funcionamiento implementado:
 
 - Persistir el estado por docente en D1, con valor inicial cerrado. Conservarlo
   al recargar o cerrar sesión hasta que el docente lo cambie.
@@ -282,10 +284,58 @@ Condiciones para implementarlo:
   conservar el último estado confirmado y mostrar el error sin simular éxito.
 - Respetar membresía y permisos sin consultar Apps Script por cada clic. Medir
   las operaciones del portal y evitar consultas periódicas innecesarias.
-- No presentar el interruptor como operativo hasta conectar y probar el portal
-  estudiantil web y sus comprobaciones en servidor. No reutilizar ni distribuir
-  el token del túnel del escritorio para esta función.
+- Generar un código individual por estudiante activo; el código se muestra una
+  vez y se guarda únicamente su huella. Regenerarlo o revocarlo invalida sus
+  sesiones anteriores. Cada sesión estudiantil dura como máximo dos horas.
+- Publicar expresamente hasta 200 sesiones; cada estudiante ve solo las de su
+  grado/sección, paginadas de 20 en 20. No recibe el padrón, DNI, notas, claves ni
+  el documento académico completo. Puede enviar texto de hasta 8000 caracteres,
+  con un máximo inicial de 10 entregas por hora. El docente consulta las últimas
+  30 entregas; no hay sondeo automático.
+- El cierre revoca sesiones anteriores y vuelve a comprobarse antes de confirmar
+  una entrega. Reabrir requiere iniciar sesión nuevamente. No borra entregas.
+- Se respeta la fecha de membresía conocida durante el último inicio de sesión
+  del docente. Cambios posteriores en Sheets no se propagan inmediatamente: una
+  nueva autenticación actualiza esa información. Las cuentas cuyo servicio de
+  autenticación no informa vencimiento no tienen una fecha que aplicar aquí.
+- Las entregas de archivos, Drive, calificación e integración con evidencias del
+  escritorio todavía no están migradas. No se distribuye el token del túnel.
 
 Mientras se usa una copia de consulta, los indicadores de guardado de la
 compilación web deben describir ese estado. La interfaz de escritorio conserva
 sus textos y su funcionamiento actual.
+
+### Activar IA y portal: migración 0007
+
+1. En Cloudflare, **Almacenamiento y bases de datos → D1 → armi-docente-web →
+   Consola**, ejecutar el contenido de `migrations/0007_ai_student_portal.sql`.
+   Añade tablas; no requiere reimportar datos ni modificar el escritorio.
+2. Generar una clave maestra de cifrado una sola vez, desde la raíz del proyecto
+   en PowerShell: `node web/scripts/create-ai-encryption-key.mjs | Set-Clipboard`.
+3. En **Workers y Pages → armi-docente-web → Configuración → Variables y secretos
+   de runtime**, agregar `ARMI_AI_ENCRYPTION_KEY`, marcar **Secreto**, pegar el
+   valor del portapapeles y guardar/implementar. Conservar una copia segura: al
+   cambiarlo, las claves de proveedores existentes deben conectarse nuevamente.
+   Nunca guardar este valor en GitHub ni enviarlo en capturas o conversaciones.
+4. Cada docente abre **Configuración de IA** en su planificación, selecciona
+   Gemini u OpenAI y conecta su propia clave. El selector consulta los modelos
+   disponibles para esa cuenta. No se importan las claves del escritorio.
+
+Las claves de proveedor se cifran mediante AES-256-GCM, vinculadas a la cuenta
+y proveedor. El navegador no recupera claves guardadas: solo indicadores de
+configuración y modelos. El Worker hace las llamadas a URLs oficiales fijas y
+no registra claves, instrucciones ni respuestas en Analytics Engine. El proveedor
+recibe el contenido necesario para generar la planificación; su cuota o saldo
+pertenece al docente. No hay una clave compartida de ARMI.
+
+Controles iniciales propios de ARMI Web: una generación simultánea, hasta 12
+intentos por minuto y 100 al día por docente (día UTC), máximo 16.384 tokens de
+salida y tiempo de espera de 90 segundos. Los intentos fallidos también cuentan.
+No hay reintentos ni cambios automáticos a otro modelo; no son una garantía de
+coste máximo. Las preferencias y el uso de IA se guardan aparte de los datos
+académicos. La generación de imágenes y audio sigue deshabilitada.
+
+Las pruebas utilizan SQLite y proveedores simulados, sin consumir claves ni
+saldo reales. Verificar con una cuenta propia después de activar el servicio.
+Referencias: [Gemini](https://ai.google.dev/api/generate-content) y
+[OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create).

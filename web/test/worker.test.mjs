@@ -12,6 +12,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0004_academic_edits.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0005_planning_edits.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0006_web_configuration.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0007_ai_student_portal.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -29,6 +30,7 @@ function fixture(t) {
   const calls = [];
   const analyticsQueries = [];
   const analyticsResponse = { totals: [], accounts: [] };
+  const ai={calls:[],respond:async()=>Response.json({candidates:[{content:{parts:[{text:'{"title":"Generado"}'}]}}],usageMetadata:{promptTokenCount:10,candidatesTokenCount:5}})};
   const users = {
     docenteA: { username: 'docenteA', displayName: 'Docente A', institutionName: 'Colegio A', estado: 'Habilitad@', active: true, password: 'not-for-browser' },
     docenteB: { username: 'docenteB', displayName: 'Docente B', institutionName: 'Colegio B', subscriptionStatus: 'active', subscriptionActive: true },
@@ -40,9 +42,11 @@ function fixture(t) {
       catch (error) { sqlite.exec('ROLLBACK'); throw error; }
     } },
     ARMI_AUTH_APPS_SCRIPT_URL: 'https://script.google.com/macros/s/test-deployment/exec',
+    ARMI_AI_ENCRYPTION_KEY:'ab'.repeat(32),
     ASSETS: { fetch: async () => new Response('<html>ARMI</html>', { headers: { 'content-type': 'text/html' } }) },
   };
   const requester = async (url, options) => {
+    if(String(url).startsWith('https://generativelanguage.googleapis.com/')||String(url).startsWith('https://api.openai.com/')){ai.calls.push({url,options});return ai.respond(url,options);}
     if (String(url).startsWith('https://api.cloudflare.com/')) {
       analyticsQueries.push({ url, options });
       return Response.json({ data: options.body.includes('GROUP BY') ? analyticsResponse.accounts : analyticsResponse.totals });
@@ -64,7 +68,7 @@ function fixture(t) {
     assert.equal(response.status, 200, await response.clone().text());
     return { response, cookie: response.headers.get('set-cookie').split(';')[0], data: (await response.json()).data };
   };
-  return { sqlite, env, worker, call, login, calls, users, requester, analyticsQueries, analyticsResponse, advance: ms => { now += ms; } };
+  return { sqlite, env, worker, call, login, calls, users, requester, analyticsQueries, analyticsResponse, ai, advance: ms => { now += ms; } };
 }
 
 test('real SQLite schema: two teachers retain independent profiles; identity is derived from the session', async t => {
@@ -513,4 +517,118 @@ test('missing setup migration leaves the previous modules and imported configura
   assert.equal((await f.call('/api/academic/records?dataset=frontend',{cookie:a.cookie})).status,200);
   const response=await f.call('/api/academic/settings',{method:'PUT',cookie:a.cookie,body:{}});
   assert.equal(response.status,503);assert.match((await response.json()).message,/0006_web_configuration/);
+});
+
+test('AI credentials are encrypted per teacher; proxy uses headers, not browser secrets or query keys',async t=>{
+ const f=fixture(t),a=await f.login(),b=await f.login('docenteB'),key='test-key-owned-by-A-not-real';
+ const put=body=>f.call('/api/ai/credentials',{method:'PUT',cookie:a.cookie,body});
+ assert.equal((await put({provider:'gemini',key,teacherId:b.data.user.id})).status,400);
+ const connected=await put({provider:'gemini',key});assert.equal(connected.status,200,await connected.clone().text());
+ assert.ok(!(await connected.text()).includes(key));
+ const row=f.sqlite.prepare('SELECT * FROM ai_credentials WHERE teacher_id=?').get(a.data.user.id);
+ assert.ok(!JSON.stringify(row).includes(key));assert.equal(row.iv.length,24);
+ const profile=(await(await f.call('/api/ai/profile',{cookie:b.cookie})).json()).data;assert.equal(profile.providers.gemini,undefined);
+ const body={provider:'gemini',model:'gemini-test',prompt:'Genera un JSON de prueba'};
+ assert.equal((await f.call('/api/ai/generate',{method:'POST',cookie:b.cookie,body})).status,400);
+ const generated=await f.call('/api/ai/generate',{method:'POST',cookie:a.cookie,body});assert.equal(generated.status,200,await generated.clone().text());assert.equal((await generated.json()).data.text,'{"title":"Generado"}');
+ assert.equal(f.ai.calls.length,1);assert.equal(f.ai.calls[0].options.headers['x-goog-api-key'],key);assert.ok(!f.ai.calls[0].url.includes(key));
+ assert.equal((await f.call('/api/ai/generate',{method:'POST',cookie:a.cookie,body:{...body,model:'../../other'}})).status,400);
+ assert.equal((await f.call('/api/ai/generate',{method:'POST',cookie:a.cookie,body:{...body,config:{tools:[{}]}}})).status,400);
+ f.sqlite.prepare('INSERT INTO ai_credentials(teacher_id,provider,cipher,iv,updated_at) VALUES(?,?,?,?,0)').run(b.data.user.id,'gemini',row.cipher,row.iv);
+ assert.equal((await f.call('/api/ai/generate',{method:'POST',cookie:b.cookie,body})).status,503,'Ciphertext is bound to teacher and provider');
+ assert.equal(f.ai.calls.length,1);
+ delete f.env.ARMI_AI_ENCRYPTION_KEY;
+ assert.equal((await(await f.call('/api/ai/profile',{cookie:a.cookie})).json()).data.ready,false);
+ assert.equal((await put({provider:'gemini',key})).status,503);
+});
+
+test('AI errors do not expose provider secrets, do not trigger retries, and release the generation lease',async t=>{
+ const f=fixture(t),a=await f.login(),key='test-key-provider-error-private';
+ await f.call('/api/ai/credentials',{method:'PUT',cookie:a.cookie,body:{provider:'openai',key}});
+ f.ai.respond=async()=>Response.json({error:{message:key}},{status:429});
+ const body={provider:'openai',model:'gpt-test',prompt:'Genera JSON'};
+ const result=await f.call('/api/ai/generate',{method:'POST',cookie:a.cookie,body});assert.equal(result.status,429);assert.ok(!(await result.text()).includes(key));assert.equal(f.ai.calls.length,1);assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM ai_leases').get().n,0);
+ assert.equal(JSON.parse(f.ai.calls[0].options.body).store,false);
+ f.sqlite.prepare('UPDATE ai_usage SET calls=100 WHERE teacher_id=?').run(a.data.user.id);
+ assert.equal((await f.call('/api/ai/generate',{method:'POST',cookie:a.cookie,body})).status,429);assert.equal(f.ai.calls.length,1);
+});
+
+async function schoolPortal(f,user,fingerprint='a') {
+ const metadata={year:'2026',areaId:'ept',grade:'1ro',unitNumber:'1',sessionNumber:'1'};
+ const rows=[{dataset:'general',id:'general',value:{teacher:user.data.user.username}},...['A','B'].map(section=>({dataset:'students',id:section,value:{id:section,name:'Alumno '+section,grade:'1ro',section,estado:'A',dni:'private-dni'}})),...['A','B'].map(section=>({dataset:'sessions',id:`2026-ept-1ro-${section}-U1-S1`,value:{...metadata,section,title:'Sesión '+section,purpose:'Propósito',situation:'Situación',secuencia:{proceso:{aplicacion:'Actividad'}},evaluationRecords:'private-evaluations'}}))];
+ const start=await f.call('/api/academic/imports',{method:'POST',cookie:user.cookie,body:{ownerUsername:user.data.user.username,fingerprint:fingerprint.repeat(64),counts:{general:1,students:2,annual:0,units:0,sessions:2,frontend:0}}});const id=(await start.json()).data.importId;
+ await f.call(`/api/academic/imports/${id}/chunks`,{method:'POST',cookie:user.cookie,body:{sequence:0,records:rows}});await f.call(`/api/academic/imports/${id}/commit`,{method:'POST',cookie:user.cookie,body:{}});
+ const put=body=>f.call('/api/portal',{method:'PUT',cookie:user.cookie,body});
+ assert.equal((await put({open:true,revision:0})).status,200);
+ const get=async()=>(await(await f.call('/api/portal',{cookie:user.cookie})).json()).data;
+ const state=await get();
+ return {id,state,get,put,slug:new URL(state.url).pathname.split('/')[2],issue:async studentId=>(await(await f.call('/api/portal/access',{method:'POST',cookie:user.cookie,body:{studentId}})).json()).data.code,publish:sessionId=>f.call('/api/portal/publications',{method:'PUT',cookie:user.cookie,body:{sessionId,published:true}})};
+}
+async function studentLogin(f,portal,code) {
+ const result=await f.call('/api/student/login',{method:'POST',body:{portal,code}});assert.equal(result.status,200,await result.clone().text());return result.headers.get('set-cookie').split(';')[0];
+}
+test('student portal: personal codes, grade isolation, teacher separation, no roster/private data and text submissions',async t=>{
+ const f=fixture(t),a=await f.login(),b=await f.login('docenteB');
+ assert.equal((await(await f.call('/api/portal',{cookie:a.cookie})).json()).data.open,false);
+ const portal=await schoolPortal(f,a),other=await schoolPortal(f,b,'b'),sidA='2026-ept-1ro-A-U1-S1',sidB='2026-ept-1ro-B-U1-S1';
+ await portal.publish(sidA);await portal.publish(sidB);
+ const code=await portal.issue('A'),student=await studentLogin(f,portal.slug,code);
+ assert.ok(!JSON.stringify(f.sqlite.prepare('SELECT * FROM student_access').all()).includes(code));
+ assert.match(student,/__Host-armi_student=/);
+ const data=await f.call('/api/student/data?portal='+portal.slug,{cookie:student});assert.equal(data.status,200);const text=await data.text();assert.ok(!/private-dni|private-evaluations|Alumno B/.test(text));assert.equal(JSON.parse(text).data.lessons.length,1);assert.equal(JSON.parse(text).data.lessons[0].id,sidA);
+ assert.equal((await f.call('/api/student/data?portal='+other.slug,{cookie:student})).status,401);
+ assert.equal((await f.call('/api/portal',{cookie:student})).status,401);
+ assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie:a.cookie})).status,401);
+ assert.equal((await f.call('/api/student/login',{method:'POST',body:{portal:other.slug,code}})).status,401);
+ const send=sessionId=>f.call('/api/student/submit?portal='+portal.slug,{method:'POST',cookie:student,body:{sessionId,text:'Mi respuesta'}});
+ assert.equal((await send(sidB)).status,403);assert.equal((await send(sidA)).status,200);
+ const inbox=(await(await f.call('/api/portal/inbox',{cookie:a.cookie})).json()).data;assert.equal(inbox.submissions.length,1);
+ assert.equal((await(await f.call('/api/portal/inbox',{cookie:b.cookie})).json()).data.submissions.length,0);
+ const studentB=await studentLogin(f,portal.slug,await portal.issue('B'));
+ assert.equal((await(await f.call('/api/student/data?portal='+portal.slug,{cookie:studentB})).json()).data.lessons[0].id,sidB);
+});
+test('closing and reopening a portal, rotating a code, and revoking access invalidate existing student sessions',async t=>{
+ const f=fixture(t),a=await f.login(),portal=await schoolPortal(f,a),code=await portal.issue('A');
+ const student=await studentLogin(f,portal.slug,code),read=cookie=>f.call('/api/student/data?portal='+portal.slug,{cookie});
+ assert.equal((await portal.put({open:false,revision:1})).status,200);assert.equal((await read(student)).status,401);
+ assert.equal((await portal.put({open:true,revision:1})).status,409);
+ assert.equal((await portal.put({open:true,revision:2})).status,200);assert.equal((await read(student)).status,401);
+ const second=await studentLogin(f,portal.slug,code);assert.equal((await read(second)).status,200);
+ const rotated=await portal.issue('A');assert.equal((await read(second)).status,401);assert.equal((await f.call('/api/student/login',{method:'POST',body:{portal:portal.slug,code}})).status,401);
+ const third=await studentLogin(f,portal.slug,rotated);assert.equal((await read(third)).status,200);
+ await f.call('/api/portal/access',{method:'DELETE',cookie:a.cookie,body:{studentId:'A'}});assert.equal((await read(third)).status,401);
+ assert.equal((await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{}})).status,409,'A replacement copy cannot reassign issued access codes');
+});
+
+test('one AI generation at a time per teacher; another teacher can generate independently',async t=>{
+ const f=fixture(t),a=await f.login(),b=await f.login('docenteB');
+ for(const user of [a,b])await f.call('/api/ai/credentials',{method:'PUT',cookie:user.cookie,body:{provider:'gemini',key:'test-fixture-own-key-not-real'}});
+ let release,entered;const started=new Promise(resolve=>{entered=resolve;});
+ const held=new Promise(resolve=>{release=resolve;});let first=true;
+ f.ai.respond=async()=>{if(first){first=false;entered();await held;}return Response.json({candidates:[{content:{parts:[{text:'{}'}]}}]});};
+ const body={provider:'gemini',model:'gemini-test',prompt:'Generate JSON'};
+ const pending=f.call('/api/ai/generate',{method:'POST',cookie:a.cookie,body});
+ try {
+  await started;
+  assert.equal((await f.call('/api/ai/generate',{method:'POST',cookie:a.cookie,body})).status,429);
+  assert.equal((await f.call('/api/ai/generate',{method:'POST',cookie:b.cookie,body})).status,200);
+ }finally{release();}
+ assert.equal((await pending).status,200);assert.equal(f.ai.calls.length,2);
+});
+
+test('student publication pagination includes fused sections and membership expiry invalidates existing access',async t=>{
+ const f=fixture(t),a=await f.login(),portal=await schoolPortal(f,a);
+ const base=JSON.parse(f.sqlite.prepare("SELECT payload_json FROM academic_records WHERE dataset='sessions' AND record_id='2026-ept-1ro-A-U1-S1'").get().payload_json);
+ for(let n=1;n<=23;n++){
+  const id=`2026-ept-1ro-A y B-U1-S${n}`;
+  f.sqlite.prepare("INSERT INTO planning_edits(teacher_id,dataset,record_id,payload_json,revision,deleted,updated_at,operation_id,operation_hash) VALUES(?,'sessions',?,?,1,0,0,'fixture','fixture')").run(a.data.user.id,id,JSON.stringify({...base,section:'A y B',sessionNumber:String(n),title:'Published '+n}));
+  await portal.publish(id);
+ }
+ const student=await studentLogin(f,portal.slug,await portal.issue('A'));
+ const read=async cursor=>(await(await f.call('/api/student/data?portal='+portal.slug+(cursor?'&cursor='+encodeURIComponent(cursor):''),{cookie:student})).json()).data;
+ const first=await read();assert.equal(first.lessons.length,20);assert.ok(first.nextCursor);
+ const second=await read(first.nextCursor);assert.equal(second.lessons.length,3);assert.equal(second.nextCursor,null);
+ assert.equal(new Set([...first.lessons,...second.lessons].map(row=>row.id)).size,23);
+ f.sqlite.prepare('UPDATE student_portals SET membership_until=? WHERE teacher_id=?').run(Date.parse('2026-11-21T16:59:59Z'),a.data.user.id);
+ assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie:student})).status,401);
 });

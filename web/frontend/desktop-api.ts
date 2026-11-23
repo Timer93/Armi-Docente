@@ -8,6 +8,7 @@ import { planningId } from '../src/edit-fields.js';
 import { mergeUnitSessionPlanning } from '../../backend/shared/unitSessionPlanning.js';
 import { curriculumRows } from './curriculum';
 import {persistConfiguration,configurationState} from './configuration-client';
+import {aiGeneralFields} from './ai-client';
 
 async function planningSave(dataset: string, value: any) {
   try {
@@ -55,7 +56,7 @@ export async function getDatosGenerales() {
   const identity = getWebIdentity();
   const fallback = { ...INITIAL_GENERAL_DATA, teacher: identity?.user.displayName || '', institution: identity?.user.institutionName || '' };
   if (!identity) return fallback;
-  try { return { ...fallback, ...(await readAcademic('general'))[0]?.value }; } catch { return fallback; }
+  try { return { ...fallback, ...(await readAcademic('general'))[0]?.value,...await aiGeneralFields() }; } catch { return fallback; }
 }
 export async function getModuleStatus() { return Object.fromEntries(Object.keys(INITIAL_MODULE_STATUS).map(key => [key, true])); }
 export async function getEstudiantes() { try { return (await readAcademic('students')).map(row => row.value).sort((a, b) => String(a.name).localeCompare(String(b.name), 'es')); } catch { return []; } }

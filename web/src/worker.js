@@ -1,6 +1,9 @@
 import { AuthError, authenticateWithAppsScript, configuredAuthUrl } from './apps-script-auth.js';
 import { canViewUsage, createMeasurement, createUsageReader, measureDatabase, recordUsage } from './usage.js';
 import { academicRoute } from './academic.js';
+import {aiRoute} from './ai.js';
+import {portalReady,teacherPortal,studentPortal} from './portal.js';
+import {servicesReady} from './ai.js';
 
 const SESSION_MS = 30 * 60_000;
 const MAX_BODY_BYTES = 4096;
@@ -118,6 +121,11 @@ export function createWorker({ requester = fetch, clock = Date.now } = {}) {
         env.DB.prepare('DELETE FROM auth_rate_limits WHERE expires_at <= ?').bind(now),
         env.DB.prepare('DELETE FROM auth_leases WHERE expires_at <= ?').bind(now),
       ]);
+      if(await servicesReady(env.DB))await env.DB.batch([
+        env.DB.prepare('DELETE FROM web_service_limits WHERE expires_at<=?').bind(now),
+        env.DB.prepare('DELETE FROM ai_leases WHERE expires_at<=?').bind(now),
+        env.DB.prepare('DELETE FROM student_web_sessions WHERE expires_at<=?').bind(now),
+      ]);
     },
   };
 }
@@ -135,12 +143,22 @@ async function route(request, env, requester, now, measurement, readUsage) {
     return json({ success: true, service: 'armi-web', configured });
   }
   if (!path.startsWith('/api/')) {
+    if(/^\/estudiantes\/[a-f0-9]{32}\/?$/.test(path)&&request.method==='GET')return env.ASSETS.fetch(new Request(new URL('/student.html',url),request));
     if (!['/', '/favicon.ico'].includes(path) || !['GET', 'HEAD'].includes(request.method)) {
       return json({ success: false, message: 'Página no disponible.' }, 404);
     }
     return env.ASSETS.fetch(request);
   }
   if (!env.DB) fail('La base web todavía no está configurada.', 503);
+  if(path.startsWith('/api/student/'))return studentPortal(request,env,{readJson,digest,randomToken,now,measurement});
+  if(path==='/api/portal'||path.startsWith('/api/portal/')) {
+    const teacher=await currentSession(request,env,now,measurement);
+    return json({success:true,data:await teacherPortal(request,env,teacher,{readJson,digest,randomToken,now})});
+  }
+  if(path.startsWith('/api/ai/')) {
+    const teacher=await currentSession(request,env,now,measurement);
+    return json({success:true,data:await aiRoute(request,env,teacher,{readJson,digest,randomToken,now,requester})});
+  }
   if (path.startsWith('/api/academic/')) {
     const teacher = await currentSession(request, env, now, measurement);
     return academicRoute(request, env, teacher, { readJson, digest, randomToken, now });
@@ -169,6 +187,7 @@ async function route(request, env, requester, now, measurement, readUsage) {
       env.DB.prepare('INSERT INTO web_sessions(token_hash, teacher_id, membership_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?)')
         .bind(tokenHash, teacherId, JSON.stringify(identity.membership), now, expiresAt),
     ];
+    if(await portalReady(env.DB))statements.push(env.DB.prepare('UPDATE student_portals SET membership_until=? WHERE teacher_id=? AND membership_until IS NOT ?').bind(identity.membership.expiresAt??null,teacherId,identity.membership.expiresAt??null));
     // Rotar una sesión previa de este navegador; otros dispositivos conservan su sesión.
     const previous = sessionToken(request, env);
     if (/^[a-f0-9]{64}$/.test(previous)) statements.push(env.DB.prepare('DELETE FROM web_sessions WHERE token_hash = ?').bind(await digest(previous)));

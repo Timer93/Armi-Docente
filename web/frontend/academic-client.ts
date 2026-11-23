@@ -14,7 +14,7 @@ const settingsRevisions = new Map<string,number>();
 const queues = new Map<string, Promise<any>>();
 let activeWrites = 0;
 let writeError: Error | null = null;
-function displayValue(value: any): any {
+export function displayValue(value: any): any {
   if (typeof value === 'string' && /<[a-z][\s\S]*>/i.test(value)) return DOMPurify.sanitize(value, {
     ALLOWED_TAGS: ['p', 'br', 'strong', 'b', 'em', 'i', 'u', 'ul', 'ol', 'li', 'span', 'div', 'table', 'tbody', 'thead', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'blockquote'],
     ALLOWED_ATTR: ['colspan', 'rowspan'], ALLOW_DATA_ATTR: false,
