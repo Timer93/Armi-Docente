@@ -15,6 +15,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0007_ai_student_portal.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0008_web_instruments.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0009_web_evaluation.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0010_teacher_portal_registry.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -752,4 +753,66 @@ test('grade lists are paginated and missing evaluation migration does not disabl
  assert.equal((await f.call('/api/evaluation/grades',{cookie:a.cookie})).status,503);
  const status=(await(await f.call('/api/academic/status',{cookie:a.cookie})).json()).data;
  assert.equal(status.evaluationEditable,false);assert.equal(status.editable,true);assert.equal(status.instrumentsEditable,true);
+});
+
+
+test('Sheets registry aliases remain stable and cannot be claimed by another account',async t=>{
+ const f=fixture(t);f.users.docenteA.portalIdentity={teacherRegistryNumber:45};
+ const a=await f.login(),portal=await schoolPortal(f,a);
+ assert.equal(portal.slug,'d45-profe-docentea');assert.equal(portal.state.registryNumber,45);
+ const old=f.sqlite.prepare('SELECT public_id FROM student_portals WHERE teacher_id=?').get(a.data.user.id).public_id;
+ const redirect=await f.call('/estudiantes/'+old);assert.equal(redirect.status,302);assert.equal(new URL(redirect.headers.get('location'),'https://app.armi.test').pathname,'/estudiantes/'+portal.slug);
+ f.users.docenteA.portalIdentity.teacherRegistryNumber=99;await f.login();assert.equal((await portal.get()).url,portal.state.url);
+ f.users.docenteB.portalIdentity={teacherRegistryNumber:45};f.users.docenteB.displayName=f.users.docenteA.displayName;
+ const b=await f.login('docenteB'),other=await schoolPortal(f,b,'b');
+ assert.match(other.slug,/^[a-f0-9]{32}$/);assert.ok(other.state.registryMessage);assert.equal((await portal.get()).url,portal.state.url);
+ assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM teacher_portal_registry').get().n,1);
+});
+
+test('missing alias setup preserves existing login and portals; untrusted browser numbers are ignored',async t=>{
+ const f=fixture(t);const result=await f.call('/api/auth/login',{method:'POST',body:{username:'docenteA',password:'correct',teacherRegistryNumber:45}});assert.equal(result.status,200);
+ assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM teacher_portal_registry').get().n,0);
+ f.sqlite.exec('DROP TABLE teacher_portal_registry');f.users.docenteA.portalIdentity={teacherRegistryNumber:45};
+ const a=await f.login(),portal=await schoolPortal(f,a);assert.match(portal.slug,/^[a-f0-9]{32}$/);assert.match(portal.state.registryMessage,/0010/);
+});
+
+function setPortalDni(f,teacher,id,dni){f.sqlite.prepare("UPDATE academic_records SET payload_json=json_set(payload_json,'$.dni',?) WHERE teacher_id=? AND dataset='students' AND record_id=?").run(dni,teacher,id);}
+const dniLogin=(f,portal,dni)=>f.call('/api/student/login',{method:'POST',body:{portal,dni}});
+
+test('DNI entry needs no teacher-issued code, preserves leading zero and isolates same-DNI students by teacher',async t=>{
+ const f=fixture(t);f.users.docenteA.portalIdentity={teacherRegistryNumber:45};f.users.docenteB.portalIdentity={teacherRegistryNumber:46};
+ const a=await f.login(),b=await f.login('docenteB'),portal=await schoolPortal(f,a),other=await schoolPortal(f,b,'b');
+ for(const teacher of [a,b])setPortalDni(f,teacher.data.user.id,'A','00123456');
+ setPortalDni(f,a.data.user.id,'B','87654321');
+ await portal.publish('2026-ept-1ro-A-U1-S1');await portal.publish('2026-ept-1ro-B-U1-S1');
+ assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM student_access').get().n,0);
+ const response=await dniLogin(f,portal.slug,'00123456');assert.equal(response.status,200,await response.clone().text());const cookie=response.headers.get('set-cookie').split(';')[0];
+ const data=await f.call('/api/student/data?portal='+portal.slug,{cookie});assert.equal(data.status,200);const text=await data.text();assert.ok(!/00123456|Alumno B|private-evaluations/.test(text));assert.equal(JSON.parse(text).data.lessons.length,1);
+ assert.equal((await f.call('/api/student/data?portal='+other.slug,{cookie})).status,401);
+ const legacy=f.sqlite.prepare('SELECT public_id FROM student_portals WHERE teacher_id=?').get(a.data.user.id).public_id;
+ assert.equal((await f.call('/api/student/data?portal='+legacy,{cookie})).status,200,'Legacy and friendly links identify the same owner');
+ assert.equal((await dniLogin(f,other.slug,'00123456')).status,200,'Same DNI with another teacher has an independent session');
+ assert.equal((await dniLogin(f,portal.slug,'1234567')).status,400);assert.equal((await dniLogin(f,portal.slug,'99999999')).status,401);
+ assert.ok(!JSON.stringify(f.sqlite.prepare('SELECT bucket FROM web_service_limits').all()).includes('00123456'),'Rate limiting never stores a raw DNI');
+});
+
+test('DNI blocks apply before first login, reenable invalidates old sessions, close/reopen requires a new login',async t=>{
+ const f=fixture(t),a=await f.login(),portal=await schoolPortal(f,a);setPortalDni(f,a.data.user.id,'A','00123456');
+ const manage=(method)=>f.call('/api/portal/access',{method,cookie:a.cookie,body:{studentId:'A',...(method==='POST'?{enabled:true}:{})}});
+ assert.equal((await manage('DELETE')).status,200);assert.equal((await dniLogin(f,portal.slug,'00123456')).status,401);
+ const enabled=await manage('POST');assert.deepEqual((await enabled.json()).data,{enabled:true});
+ const response=await dniLogin(f,portal.slug,'00123456');assert.equal(response.status,200);const cookie=response.headers.get('set-cookie').split(';')[0];
+ await manage('DELETE');assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie})).status,401);
+ await manage('POST');assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie})).status,401);
+ await portal.put({open:false,revision:1});assert.equal((await dniLogin(f,portal.slug,'00123456')).status,401);await portal.put({open:true,revision:2});assert.equal((await dniLogin(f,portal.slug,'00123456')).status,200);
+});
+
+test('duplicate, changed, inactive and deleted DNI records cannot select an arbitrary or stale student',async t=>{
+ const f=fixture(t),a=await f.login(),portal=await schoolPortal(f,a);setPortalDni(f,a.data.user.id,'A','00123456');setPortalDni(f,a.data.user.id,'B','00123456');
+ assert.equal((await dniLogin(f,portal.slug,'00123456')).status,401);
+ const edit={id:'B',name:'Alumno B',dni:'87654321',grade:'1ro',section:'B',estado:'A'};
+ f.sqlite.prepare("INSERT INTO academic_edits(teacher_id,dataset,record_id,payload_json,deleted,revision,operation_id,operation_hash,updated_at) VALUES(?,'students','B',?,0,1,'fixture','fixture',0)").run(a.data.user.id,JSON.stringify(edit));
+ assert.equal((await dniLogin(f,portal.slug,'00123456')).status,200,'An edited DNI replaces its imported value');assert.equal((await dniLogin(f,portal.slug,'87654321')).status,200);
+ f.sqlite.prepare("UPDATE academic_edits SET deleted=1 WHERE teacher_id=? AND record_id='B'").run(a.data.user.id);assert.equal((await dniLogin(f,portal.slug,'87654321')).status,401);
+ f.sqlite.prepare("UPDATE academic_records SET payload_json=json_set(payload_json,'$.estado','R') WHERE teacher_id=? AND dataset='students' AND record_id='A'").run(a.data.user.id);assert.equal((await dniLogin(f,portal.slug,'00123456')).status,401);
 });

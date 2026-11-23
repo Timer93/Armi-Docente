@@ -1,3 +1,4 @@
+import {registryNumber} from './portal-registry.js';
 export class AuthError extends Error {
   constructor(message, status = 401) {
     super(message);
@@ -64,6 +65,7 @@ export async function authenticateWithAppsScript(env, credentials, requester = f
   if (!canonicalUsername) throw new AuthError('El proveedor no devolvió una identidad válida.', 503);
   return {
     username: canonicalUsername,
+    teacherRegistryNumber:registryNumber(data.portalIdentity?.teacherRegistryNumber??data.teacherRegistryNumber),
     displayName: text(data.displayName || data.nameuser || data.nombre) || canonicalUsername,
     institutionName: text(data.institutionName || data.institucion),
     membership: {

@@ -22,8 +22,10 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   incluyendo colores del horario y las matrices/unidades fijadas de planificación.
 - IA de texto para Programación, Unidades y Sesiones, con clave propia por
   docente y almacenamiento cifrado. Requiere activar 0007 y el secreto de cifrado.
-- Portal independiente de estudiantes, con interruptor por docente, códigos
-  personales, sesiones publicadas por grupo y entregas de texto.
+- Portal independiente de estudiantes, con interruptor por docente, ingreso por
+  DNI, sesiones publicadas por grupo y entregas de texto. Los enlaces legibles
+  `d45-profe-arnold` usan el registro de Sheets y requieren activar 0010 y el
+  complemento de Apps Script: [instrucciones](docs/enlaces-docentes-dni.md).
 - Biblioteca de Instrumentos de evaluación: crear, editar, duplicar, previsualizar
   y eliminar rúbricas, listas de cotejo, escalas y guías en sus pantallas originales.
   Requiere activar 0008.
@@ -282,7 +284,8 @@ inicial es cerrado. La web no requiere que su PC permanezca encendida.
 El interruptor habilita el portal existente de sesiones y entregas de texto. No
 habilita subidas de archivos ni sincronización con Drive: la pantalla lo indica
 expresamente y mantiene los controles de archivos sin migrar deshabilitados.
-Esta ubicación reutiliza el servidor de 0007 y no requiere otra migración SQL.
+Esta ubicación reutiliza el servidor de 0007. Los enlaces legibles nuevos requieren
+además 0010 y el complemento de Sheets; ver [activación](docs/enlaces-docentes-dni.md).
 
 Funcionamiento implementado:
 
@@ -298,9 +301,11 @@ Funcionamiento implementado:
   conservar el último estado confirmado y mostrar el error sin simular éxito.
 - Respetar membresía y permisos sin consultar Apps Script por cada clic. Medir
   las operaciones del portal y evitar consultas periódicas innecesarias.
-- Generar un código individual por estudiante activo; el código se muestra una
-  vez y se guarda únicamente su huella. Regenerarlo o revocarlo invalida sus
-  sesiones anteriores. Cada sesión estudiantil dura como máximo dos horas.
+- El estudiante entra con su DNI de ocho dígitos, sin emitir códigos desde el
+  panel. El DNI se busca exclusivamente entre estudiantes activos del docente;
+  los duplicados deben corregirse. Bloquear o volver a habilitar el acceso
+  individual invalida sus sesiones anteriores. Duran como máximo dos horas.
+  Los códigos anteriores solo se mantienen en la API para clientes antiguos.
 - Publicar expresamente hasta 200 sesiones; cada estudiante ve solo las de su
   grado/sección, paginadas de 20 en 20. No recibe el padrón, DNI, notas, claves ni
   el documento académico completo. Puede enviar texto de hasta 8000 caracteres,

@@ -1,5 +1,6 @@
 import {AuthError} from './apps-script-auth.js';
 import {serviceLimit} from './ai.js';
+import {matchesPortal,portalRegistryInfo,resolvePortal,validPortal} from './portal-registry.js';
 const fail=(message,status=400)=>{throw new AuthError(message,status);};
 const plain=value=>String(value||'').replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').trim();
 const norm=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
@@ -22,7 +23,7 @@ async function studentSession(request,env,{digest,now,measurement}) {
  const session=await env.DB.prepare(`SELECT s.*,p.public_id,p.is_open,p.access_epoch,p.membership_until,a.revision,a.enabled FROM student_web_sessions s
  JOIN student_portals p ON p.teacher_id=s.teacher_id JOIN student_access a ON a.teacher_id=s.teacher_id AND a.student_id=s.student_id WHERE s.token_hash=? AND s.expires_at>?`).bind(await digest(token),now).first();
  if(!session||!session.is_open||!session.enabled||session.portal_epoch!==session.access_epoch||session.access_revision!==session.revision||(session.membership_until&&session.membership_until<=now))fail('El acceso está cerrado o tu sesión venció. Solicita acceso a tu docente.',401);
- if(new URL(request.url).searchParams.get('portal')!==session.public_id)fail('Inicia sesión en el enlace de tu docente.',401);
+ if(!await matchesPortal(env.DB,session.teacher_id,session.public_id,new URL(request.url).searchParams.get('portal')))fail('Inicia sesión en el enlace de tu docente.',401);
  const student=await record(env.DB,session.teacher_id,'students',session.student_id);if(!active(student))fail('Tu acceso ya no está habilitado.',401);
  if(measurement)measurement.teacherId=session.teacher_id;
  return {...session,student};
@@ -30,7 +31,10 @@ async function studentSession(request,env,{digest,now,measurement}) {
 export async function teacherPortal(request,env,teacher,{readJson,digest,randomToken,now}) {
  const db=env.DB,url=new URL(request.url);if(!await portalReady(db)){if(request.method==='GET')return {ready:false};fail('Falta activar 0007_ai_student_portal.sql en D1.',503);}
  const portal=await db.prepare('SELECT * FROM student_portals WHERE teacher_id=?').bind(teacher.id).first();
- if(url.pathname==='/api/portal'&&request.method==='GET')return {ready:true,open:Boolean(portal?.is_open),revision:portal?.revision||0,url:portal?`${url.origin}/estudiantes/${portal.public_id}`:null,published:(await db.prepare('SELECT session_id FROM student_publications WHERE teacher_id=? AND published=1').bind(teacher.id).all()).results.map(row=>row.session_id)};
+ if(url.pathname==='/api/portal'&&request.method==='GET') {
+  const registry=await portalRegistryInfo(db,teacher),identifier=portal&&(registry.slug||portal.public_id);
+  return {ready:true,open:Boolean(portal?.is_open),revision:portal?.revision||0,url:identifier?`${url.origin}/estudiantes/${identifier}`:null,registryNumber:registry.number,registryMessage:registry.message,namedUrlReady:Boolean(registry.slug),published:(await db.prepare('SELECT session_id FROM student_publications WHERE teacher_id=? AND published=1').bind(teacher.id).all()).results.map(row=>row.session_id)};
+ }
  if(url.pathname==='/api/portal'&&request.method==='PUT') {
   const body=await readJson(request);if(Object.keys(body).some(k=>!['open','revision'].includes(k))||typeof body.open!=='boolean'||!Number.isSafeInteger(body.revision)||body.revision<0)fail('Estado del portal no válido.');
   const membership=JSON.parse(teacher.membership_json);const until=typeof membership.expiresAt==='number'?membership.expiresAt:membership.expiresAt?Date.parse(membership.expiresAt):null;
@@ -44,12 +48,16 @@ export async function teacherPortal(request,env,teacher,{readJson,digest,randomT
  }
  if(url.pathname==='/api/portal/access'&&['POST','DELETE'].includes(request.method)){
   if(!portal)fail('Crea primero el enlace abriendo el portal.');
-  const body=await readJson(request);if(Object.keys(body).some(k=>k!=='studentId')||typeof body.studentId!=='string'||body.studentId.length>250)fail('Estudiante no válido.');
-  if(request.method==='DELETE'){await db.prepare('UPDATE student_access SET enabled=0,revision=revision+1 WHERE teacher_id=? AND student_id=?').bind(teacher.id,body.studentId).run();return {revoked:true};}
-  const student=await record(db,teacher.id,'students',body.studentId);if(!active(student))fail('Selecciona un estudiante activo de tu cuenta.');
+  const body=await readJson(request);if(Object.keys(body).some(k=>!['studentId','enabled'].includes(k))||typeof body.studentId!=='string'||body.studentId.length>250||(body.enabled!==undefined&&body.enabled!==true))fail('Estudiante no válido.');
+  const student=await record(db,teacher.id,'students',body.studentId);if(!student)fail('Estudiante no encontrado.',404);
+  if(request.method==='DELETE'){
+   await db.prepare('INSERT INTO student_access(teacher_id,student_id,code_hash,enabled) VALUES(?,?,?,0) ON CONFLICT(teacher_id,student_id) DO UPDATE SET enabled=0,revision=student_access.revision+1').bind(teacher.id,body.studentId,await digest(randomToken())).run();return {revoked:true};
+  }
+  if(!active(student))fail('Selecciona un estudiante activo de tu cuenta.');
   await serviceLimit(db,`issue:${teacher.id}:${Math.floor(now/60_000)}`,30,now+120_000);
   const code=randomToken().slice(0,24);
   await db.prepare('INSERT INTO student_access(teacher_id,student_id,code_hash) VALUES(?,?,?) ON CONFLICT(teacher_id,student_id) DO UPDATE SET code_hash=excluded.code_hash,revision=student_access.revision+1,enabled=1').bind(teacher.id,body.studentId,await digest(code)).run();
+  if(body.enabled===true)return {enabled:true};
   return {code};
  }
  if(url.pathname==='/api/portal/publications'&&request.method==='PUT'){
@@ -66,16 +74,32 @@ export async function studentPortal(request,env,helpers) {
  const {readJson,digest,randomToken,now}=helpers,db=env.DB,url=new URL(request.url);
  if(!await portalReady(db))fail('El portal todavía no está disponible.',503);
  if(url.pathname==='/api/student/login'&&request.method==='POST') {
-  const body=await readJson(request);if(Object.keys(body).some(k=>!['portal','code'].includes(k))||!/^[a-f0-9]{32}$/.test(body.portal||'')||typeof body.code!=='string'||body.code.length>80)fail('Revisa el enlace y el código de acceso.');
-  const ip=await digest(request.headers.get('cf-connecting-ip')||'local');await serviceLimit(db,`student:${body.portal}:${ip}:${Math.floor(now/60_000)}`,10,now+120_000);
-  const portal=await db.prepare('SELECT * FROM student_portals WHERE public_id=?').bind(body.portal).first();
+  const body=await readJson(request),byDni=body.dni!==undefined;
+  if(Object.keys(body).some(k=>!['portal','code','dni'].includes(k))||!validPortal(body.portal)||(byDni?(body.code!==undefined||typeof body.dni!=='string'||!/^\d{8}$/.test(body.dni.trim())):typeof body.code!=='string'||body.code.length>80))fail('Revisa el enlace y tu DNI de ocho dígitos.');
+  const ip=await digest(request.headers.get('cf-connecting-ip')||'local');await serviceLimit(db,`student:${body.portal}:${ip}:${Math.floor(now/60_000)}`,byDni?120:10,now+120_000);
+  if(byDni)await serviceLimit(db,`student-dni:${await digest(body.portal+':'+body.dni.trim())}:${ip}:${Math.floor(now/60_000)}`,8,now+120_000);
+  const portal=await resolvePortal(db,body.portal);
   if(portal&&helpers.measurement)helpers.measurement.teacherId=portal.teacher_id;
-  const code=body.code.replace(/[\s-]/g,'').toLowerCase();
-  const access=portal?await db.prepare('SELECT * FROM student_access WHERE teacher_id=? AND code_hash=? AND enabled=1').bind(portal.teacher_id,await digest(code)).first():null;
-  const student=access?await record(db,portal.teacher_id,'students',access.student_id):null;
-  if(!portal?.is_open||!active(student)||(portal.membership_until&&portal.membership_until<=now))fail('El acceso está cerrado o el código no es válido.',401);
+  if(!portal?.is_open||(portal.membership_until&&portal.membership_until<=now))fail('El acceso está cerrado o el estudiante no está registrado con este docente.',401);
+  let access,student;
+  if(byDni) {
+   const dni=body.dni.trim();
+   const edited=Boolean(await db.prepare("SELECT name FROM sqlite_master WHERE name='academic_edits'").first());
+   const editQuery=edited?`SELECT e.record_id,e.payload_json FROM academic_edits e WHERE e.teacher_id=? AND e.dataset='students' AND e.deleted=0 AND trim(CAST(json_extract(e.payload_json,'$.dni') AS TEXT))=? AND lower(trim(COALESCE(json_extract(e.payload_json,'$.estado'),'A'))) IN ('a','activo','active') UNION ALL `:'';
+   const rows=(await db.prepare(`${editQuery}SELECT b.record_id,b.payload_json FROM academic_records b JOIN academic_heads h ON h.teacher_id=b.teacher_id AND h.active_import_id=b.import_id WHERE b.teacher_id=? AND b.dataset='students' AND trim(CAST(json_extract(b.payload_json,'$.dni') AS TEXT))=? AND lower(trim(COALESCE(json_extract(b.payload_json,'$.estado'),'A'))) IN ('a','activo','active') ${edited?"AND NOT EXISTS(SELECT 1 FROM academic_edits e WHERE e.teacher_id=b.teacher_id AND e.dataset='students' AND e.record_id=b.record_id)":''} LIMIT 2`).bind(...(edited?[portal.teacher_id,dni]:[]),portal.teacher_id,dni).all()).results;
+   if(rows.length!==1)fail('El acceso está cerrado o el estudiante no está registrado con este docente.',401);
+   student=JSON.parse(rows[0].payload_json);
+   await db.prepare('INSERT INTO student_access(teacher_id,student_id,code_hash) VALUES(?,?,?) ON CONFLICT(teacher_id,student_id) DO NOTHING').bind(portal.teacher_id,rows[0].record_id,await digest(randomToken())).run();
+   access=await db.prepare('SELECT * FROM student_access WHERE teacher_id=? AND student_id=?').bind(portal.teacher_id,rows[0].record_id).first();
+  }else{
+   const code=body.code.replace(/[\s-]/g,'').toLowerCase();
+   access=await db.prepare('SELECT * FROM student_access WHERE teacher_id=? AND code_hash=? AND enabled=1').bind(portal.teacher_id,await digest(code)).first();
+   student=access?await record(db,portal.teacher_id,'students',access.student_id):null;
+  }
+  if(!access?.enabled||!active(student))fail('El acceso está cerrado o el estudiante no está registrado con este docente.',401);
   const token=randomToken(),expires=Math.min(now+2*60*60_000,portal.membership_until||Infinity);
-  await db.prepare('INSERT INTO student_web_sessions(token_hash,teacher_id,student_id,portal_epoch,access_revision,expires_at) VALUES(?,?,?,?,?,?)').bind(await digest(token),portal.teacher_id,access.student_id,portal.access_epoch,access.revision,expires).run();
+  const stored=await db.prepare('INSERT INTO student_web_sessions(token_hash,teacher_id,student_id,portal_epoch,access_revision,expires_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM student_portals p JOIN student_access a ON a.teacher_id=p.teacher_id WHERE p.teacher_id=? AND p.is_open=1 AND p.access_epoch=? AND (p.membership_until IS NULL OR p.membership_until>?) AND a.student_id=? AND a.enabled=1 AND a.revision=?)').bind(await digest(token),portal.teacher_id,access.student_id,portal.access_epoch,access.revision,expires,portal.teacher_id,portal.access_epoch,now,access.student_id,access.revision).run();
+  if(!stored.meta.changes)fail('El acceso se cerró. Solicita acceso a tu docente.',401);
   return Response.json({success:true,data:{authenticated:true}},{headers:{'set-cookie':cookie(request,env,token,Math.floor((expires-now)/1000))}});
  }
  const session=await studentSession(request,env,helpers);

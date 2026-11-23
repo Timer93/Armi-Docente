@@ -6,6 +6,7 @@ import {evaluationRoute} from './evaluation.js';
 import {aiRoute} from './ai.js';
 import {portalReady,teacherPortal,studentPortal} from './portal.js';
 import {servicesReady} from './ai.js';
+import {validPortal,legacyPortal,registryReady,registerTeacherPortal} from './portal-registry.js';
 
 const SESSION_MS = 30 * 60_000;
 const MAX_BODY_BYTES = 4096;
@@ -145,7 +146,14 @@ async function route(request, env, requester, now, measurement, readUsage) {
     return json({ success: true, service: 'armi-web', configured });
   }
   if (!path.startsWith('/api/')) {
-    if(/^\/estudiantes\/[a-f0-9]{32}\/?$/.test(path)&&request.method==='GET')return env.ASSETS.fetch(new Request(new URL('/student.html',url),request));
+    const studentPath=path.match(/^\/estudiantes\/([^/]+)\/?$/);
+    if(studentPath&&validPortal(studentPath[1])&&request.method==='GET') {
+      if(env.DB&&legacyPortal(studentPath[1])&&await registryReady(env.DB)) {
+        const named=await env.DB.prepare('SELECT r.public_slug FROM teacher_portal_registry r JOIN student_portals p ON p.teacher_id=r.teacher_id WHERE p.public_id=?').bind(studentPath[1]).first();
+        if(named)return new Response(null,{status:302,headers:{location:`/estudiantes/${named.public_slug}`}});
+      }
+      return env.ASSETS.fetch(new Request(new URL('/student.html',url),request));
+    }
     if (!['/', '/favicon.ico'].includes(path) || !['GET', 'HEAD'].includes(request.method)) {
       return json({ success: false, message: 'Página no disponible.' }, 404);
     }
@@ -185,6 +193,7 @@ async function route(request, env, requester, now, measurement, readUsage) {
     measurement.authCalls++;
     try { identity = await authenticateWithAppsScript(env, credentials, requester, now); }
     finally { await env.DB.prepare('DELETE FROM auth_leases WHERE id = ?').bind(leaseId).run(); }
+    identity.membership.teacherRegistryNumber=identity.teacherRegistryNumber;
     const teacherId = await digest(`apps-script:${identity.username}`);
     measurement.teacherId = teacherId;
     const token = randomToken();
@@ -202,6 +211,7 @@ async function route(request, env, requester, now, measurement, readUsage) {
     const previous = sessionToken(request, env);
     if (/^[a-f0-9]{64}$/.test(previous)) statements.push(env.DB.prepare('DELETE FROM web_sessions WHERE token_hash = ?').bind(await digest(previous)));
     await env.DB.batch(statements);
+    await registerTeacherPortal(env.DB,teacherId,identity.teacherRegistryNumber,identity.username,now);
     const row = await env.DB.prepare('SELECT * FROM teachers WHERE id = ?').bind(teacherId).first();
     return json({ success: true, data: publicSession({ ...row, membership_json: JSON.stringify(identity.membership), expires_at: expiresAt }, env) }, 200,
       { 'set-cookie': cookieHeader(request, env, token, Math.max(1, Math.floor((expiresAt - now) / 1000))) });
