@@ -1,11 +1,13 @@
 import { AuthError } from './apps-script-auth.js';
 import { fieldsFor, isPlanning, planningId } from './edit-fields.js';
+import {configurationReady} from './web-configuration.js';
 const fail = (message, status = 400) => { throw new AuthError(message, status); };
 export async function editsReady(db, planning = false) {
   return Boolean(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").bind(planning ? 'planning_edits' : 'academic_edits').first());
 }
 export async function hasEdits(db, teacherId) {
   for (const planning of [false,true]) if (await editsReady(db,planning) && await db.prepare(`SELECT 1 FROM ${planning ? 'planning_edits' : 'academic_edits'} WHERE teacher_id = ? LIMIT 1`).bind(teacherId).first()) return true;
+  if(await configurationReady(db) && await db.prepare('SELECT 1 FROM web_configurations WHERE teacher_id=?').bind(teacherId).first()) return true;
   return false;
 }
 export async function editAcademic(request, db, teacher, { readJson, digest, now, validateRecord }) {

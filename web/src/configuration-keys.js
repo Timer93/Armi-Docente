@@ -1,0 +1,1 @@
+export const FRONTEND_KEYS = ['armi_areas','armi_assignments','armi_calendar_state','armi_holidays_v7','armi_schedule_config','armi_schedule_entries','armi_schedule_color_settings','armi_pa_pinned_didactic_units_global','armi_pa_pinned_matrix_global'];

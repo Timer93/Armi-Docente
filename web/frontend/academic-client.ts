@@ -10,6 +10,7 @@ const cache = new Map<string, Promise<Array<Row>>>();
 const loadedRows = new Map<string, Row[]>();
 const deletedRows = new Map<string, Map<string,number>>();
 const snapshots = new Map<string, string | null>();
+const settingsRevisions = new Map<string,number>();
 const queues = new Map<string, Promise<any>>();
 let activeWrites = 0;
 let writeError: Error | null = null;
@@ -40,6 +41,7 @@ export function readAcademic(dataset: string) {
       snapshot = result.snapshotId || '';
       revision = result.revision;
       snapshots.set(key, result.snapshotId);
+      if(dataset==='frontend') settingsRevisions.set(key,result.settingsRevision || 0);
       for (const row of result.records) {
         if (row.deleted) deleted.set(row.id,row.revision);
         else rows.push({id:row.id,value:displayValue(row.value),revision:row.revision || 0});
@@ -77,9 +79,7 @@ export function saveAcademic(dataset: string, id: string, value: any, action = '
     if (restoring && !window.confirm('Esta planificación fue eliminada. ¿Quieres crearla nuevamente con los datos del formulario?')) throw Object.assign(new Error('Se canceló la creación de la planificación.'),{cancelled:true});
     const changes = action === 'delete' ? {} : await changesPromise;
     if (action === 'save' && row && !Object.keys(changes).length) return row;
-    activeWrites++;
-    window.dispatchEvent(new CustomEvent('armi-web-save', {detail:{state:'saving'}}));
-    try {
+    return withWebSave(async () => {
       const saved = await academicApi('/api/academic/edit','PUT',{dataset,id,changes,action:restoring ? 'restore' : action,expectedRevision:row?.revision || deletedRevision || 0,snapshotId:snapshots.get(key) || null,operationId:crypto.randomUUID()});
       // Merge acknowledgements synchronously. Saves of different students may
       // finish together; neither may replace the other's cached result.
@@ -91,11 +91,7 @@ export function saveAcademic(dataset: string, id: string, value: any, action = '
       deletedRows.set(key,deleted);
       cache.set(key,Promise.resolve(updated));
       return saved;
-    } catch (error) { writeError = error as Error; throw error; }
-    finally {
-      activeWrites--;
-      window.dispatchEvent(new CustomEvent('armi-web-save', {detail: writeError ? {state:'error',message:writeError.message} : {state:activeWrites ? 'saving':'saved'}}));
-    }
+    });
   });
   queues.set(queueKey,pending);
   void pending.catch(error => {
@@ -106,6 +102,28 @@ export function saveAcademic(dataset: string, id: string, value: any, action = '
   // Failed saves stay rejected for this record until reload; stale forms cannot
   // quietly retry over changes in another tab.
   return pending;
+}
+
+export async function withWebSave<T>(operation: () => Promise<T>) {
+  if(writeError) throw writeError;
+  activeWrites++;
+  window.dispatchEvent(new CustomEvent('armi-web-save',{detail:{state:'saving'}}));
+  try {return await operation();}
+  catch(error) {writeError=error as Error;throw error;}
+  finally {
+    activeWrites--;
+    window.dispatchEvent(new CustomEvent('armi-web-save',{detail:writeError?{state:'error',message:writeError.message}:{state:activeWrites?'saving':'saved'}}));
+  }
+}
+export function configurationMetadata() {
+  const key=`${getWebIdentity()?.user.id}:frontend`;
+  return {snapshotId:snapshots.get(key) || null,expectedRevision:settingsRevisions.get(key) || 0};
+}
+export function acceptConfiguration(result: any) {
+  const key=`${getWebIdentity()?.user.id}:frontend`;
+  const rows=result.records.map((row: any)=>({...row,value:displayValue(row.value)}));
+  cache.set(key,Promise.resolve(rows));loadedRows.set(key,rows);
+  settingsRevisions.set(key,result.settingsRevision);snapshots.set(key,result.snapshotId);
 }
 
 export function invalidateAcademic(dataset: string) {

@@ -2,22 +2,22 @@ let identity = null;
 export const getWebIdentity = () => identity;
 export const setWebIdentity = value => { identity = value; };
 
-export function createMemoryStorage() {
+export function createMemoryStorage(changed = () => {}) {
   const values = new Map();
   return {
     get length() { return values.size; },
     key(index) { return [...values.keys()][index] ?? null; },
     getItem(key) { return values.get(String(key)) ?? null; },
-    setItem(key, value) { values.set(String(key), String(value)); },
-    removeItem(key) { values.delete(String(key)); },
-    clear() { values.clear(); },
+    setItem(key, value) { key=String(key);value=String(value);if(values.get(key)===value)return;values.set(key,value);changed(key); },
+    removeItem(key) {key=String(key);if(values.delete(key))changed(key);},
+    clear() {const keys=[...values.keys()];values.clear();keys.forEach(changed);},
   };
 }
 
 // Solo el bundle web instala este límite. No se importa desde el escritorio.
 export function installWebRuntime(win) {
   const nativeFetch = win.fetch.bind(win);
-  const local = createMemoryStorage();
+  const local = createMemoryStorage(key => win.dispatchEvent?.(new CustomEvent('armi-web-storage-changed',{detail:{key}})));
   const temporary = createMemoryStorage();
   Object.defineProperty(win, 'localStorage', { configurable: true, get: () => local });
   Object.defineProperty(win, 'sessionStorage', { configurable: true, get: () => temporary });
@@ -25,6 +25,7 @@ export function installWebRuntime(win) {
   allowed.add('GET /api/academic/status');
   allowed.add('GET /api/academic/records');
   allowed.add('PUT /api/academic/edit');
+  allowed.add('PUT /api/academic/settings');
   allowed.add('POST /api/academic/imports');
   const blocked = () => Response.json({ success: false, message: 'Esta función todavía no está habilitada en la web.' }, { status: 404 });
   win.fetch = (input, options = {}) => {

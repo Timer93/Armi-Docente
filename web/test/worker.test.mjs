@@ -11,6 +11,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0003_academic_snapshots.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0004_academic_edits.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0005_planning_edits.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0006_web_configuration.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -455,4 +456,61 @@ test('missing planning migration preserves old module editing and planning consu
   assert.equal((await f.call('/api/academic/records?dataset=annual',{cookie:a.cookie})).status,200);
   const rejected=await f.call('/api/academic/edit',{method:'PUT',cookie:a.cookie,body:{dataset:'annual'}});
   assert.equal(rejected.status,503);assert.match((await rejected.json()).message,/0005_planning_edits/);
+});
+
+test('web configuration: a new teacher can persist setup without import; settings are isolated and one batch has one revision',async t=>{
+  const f=fixture(t);const a=await f.login();const b=await f.login('docenteB');
+  const values={armi_areas:[{id:'8',name:'Educación para el Trabajo'}],armi_assignments:[{id:'a1',areaId:'8',areaName:'Educación para el Trabajo',grade:'1ro',section:'A',studentCharacterization:'Mi grupo'}],armi_calendar_state:{'2026-03-10':'A'},armi_holidays_v7:[{date:'2026-04-02',name:'Feriado'}],armi_schedule_config:{startTime:'07:30',totalHours:7,breaks:[]},armi_schedule_entries:[{id:'1',day:1,hourIndex:0,areaId:'8',grade:'1ro',section:'A'}]};
+  const body={changes:values,removed:[],expectedRevision:0,snapshotId:null,operationId:crypto.randomUUID()};
+  const put=(cookie,data=body)=>f.call('/api/academic/settings',{method:'PUT',cookie,body:data});
+  assert.equal((await put('')).status,401);
+  const result=await put(a.cookie);assert.equal(result.status,200,await result.clone().text());
+  const saved=(await result.json()).data;assert.equal(saved.settingsRevision,1);assert.equal(saved.records.length,6);
+  const read=async cookie=>(await(await f.call('/api/academic/records?dataset=frontend',{cookie})).json()).data;
+  assert.deepEqual(Object.fromEntries((await read(a.cookie)).records.map(row=>[row.id,row.value])),values);
+  assert.deepEqual((await read(b.cookie)).records,[]);
+  assert.equal((await put(b.cookie,{...body,changes:{armi_areas:[{id:'9',name:'Otra área'}]}})).status,200);
+  assert.equal((await read(a.cookie)).records.find(row=>row.id==='armi_areas').value[0].id,'8');
+  const before=f.sqlite.prepare('SELECT revision FROM academic_heads WHERE teacher_id=?').get(a.data.user.id).revision;
+  assert.equal((await put(a.cookie)).status,200,'Same acknowledgement is idempotent');
+  assert.equal(f.sqlite.prepare('SELECT revision FROM academic_heads WHERE teacher_id=?').get(a.data.user.id).revision,before);
+  assert.equal((await put(a.cookie,{...body,changes:{armi_areas:[]}})).status,409,'A reused operation cannot change its contents');
+  const stale={...body,operationId:crypto.randomUUID(),changes:{armi_areas:[],armi_assignments:[]}};
+  assert.equal((await put(a.cookie,stale)).status,409);
+  assert.equal((await read(a.cookie)).records.find(row=>row.id==='armi_assignments').value.length,1,'No partial update on conflict');
+  assert.equal((await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{}})).status,409,'Imports cannot replace web setup');
+});
+
+test('configuration rejects credential keys, nested secrets, invalid shapes and foreign identities before changing saved state',async t=>{
+  const f=fixture(t);const a=await f.login();
+  const put=extra=>f.call('/api/academic/settings',{method:'PUT',cookie:a.cookie,body:{changes:{armi_areas:[]},removed:[],expectedRevision:0,snapshotId:null,operationId:crypto.randomUUID(),...extra}});
+  for(const extra of [{changes:{armi_auth_session_v1:{username:'fake'}}},{teacherId:'other'},{changes:{armi_areas:[{id:'1',name:'Área',api_key:'private'}]}},{changes:{armi_calendar_state:{photo:'data:image/png;base64,secret'}}},{changes:{armi_areas:{}}},{changes:{armi_areas:[{id:'1',name:'A'},{id:'1',name:'B'}]}},{changes:{armi_areas:[]},removed:['armi_areas']}])assert.equal((await put(extra)).status,400);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM web_configurations').get().n,0);
+});
+
+test('configuration overlays and removals preserve imported records; another tab cannot overwrite the group',async t=>{
+  const f=fixture(t);const a=await f.login();
+  const started=await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{ownerUsername:'docenteA',fingerprint:'e'.repeat(64),counts:{general:1,students:0,annual:0,units:0,sessions:0,frontend:2}}});
+  const snapshot=(await started.json()).data.importId;
+  const records=[{dataset:'general',id:'general',value:{teacher:'A'}},{dataset:'frontend',id:'armi_areas',value:[{id:'1',name:'Importada'}]},{dataset:'frontend',id:'armi_schedule_config',value:{startTime:'08:00'}}];
+  await f.call(`/api/academic/imports/${snapshot}/chunks`,{method:'POST',cookie:a.cookie,body:{sequence:0,records}});
+  await f.call(`/api/academic/imports/${snapshot}/commit`,{method:'POST',cookie:a.cookie,body:{}});
+  const put=(changes,removed=[],revision=0,snapshotId=snapshot)=>f.call('/api/academic/settings',{method:'PUT',cookie:a.cookie,body:{changes,removed,expectedRevision:revision,snapshotId,operationId:crypto.randomUUID()}});
+  assert.equal((await put({armi_areas:[]},[],0,null)).status,409);
+  assert.equal((await put({armi_areas:[{id:'2',name:'Editada'}]},['armi_schedule_config'])).status,200);
+  const read=async()=>(await(await f.call('/api/academic/records?dataset=frontend',{cookie:a.cookie})).json()).data;
+  assert.equal((await read()).records.length,1);assert.equal((await read()).records[0].value[0].name,'Editada');
+  assert.equal(JSON.parse(f.sqlite.prepare("SELECT payload_json FROM academic_records WHERE dataset='frontend' AND record_id='armi_areas'").get().payload_json)[0].name,'Importada');
+  assert.equal((await put({armi_schedule_config:{startTime:'09:00'}},[],1)).status,200);
+  assert.equal((await read()).records.length,2);assert.equal((await read()).settingsRevision,2);
+  assert.equal((await put({armi_areas:[]},[],1)).status,409);
+});
+
+test('missing setup migration leaves the previous modules and imported configuration readable',async t=>{
+  const f=fixture(t);const a=await f.login();f.sqlite.exec('DROP TABLE web_configurations');
+  const status=(await(await f.call('/api/academic/status',{cookie:a.cookie})).json()).data;
+  assert.equal(status.settingsEditable,false);assert.equal(status.editable,true);assert.equal(status.planningEditable,true);
+  assert.equal((await f.call('/api/academic/records?dataset=frontend',{cookie:a.cookie})).status,200);
+  const response=await f.call('/api/academic/settings',{method:'PUT',cookie:a.cookie,body:{}});
+  assert.equal(response.status,503);assert.match((await response.json()).message,/0006_web_configuration/);
 });

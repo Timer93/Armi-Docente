@@ -7,6 +7,7 @@ import { readAcademic, saveAcademic, invalidateAcademic } from './academic-clien
 import { planningId } from '../src/edit-fields.js';
 import { mergeUnitSessionPlanning } from '../../backend/shared/unitSessionPlanning.js';
 import { curriculumRows } from './curriculum';
+import {persistConfiguration,configurationState} from './configuration-client';
 
 async function planningSave(dataset: string, value: any) {
   try {
@@ -45,7 +46,10 @@ export async function deleteEstudiante(id: string | number) {
 }
 // The original screen uses this only as a completion hint after a confirmed
 // student save. Permissions remain exclusively on the server.
-export async function updateModuleStatus(moduleName: string) { return ['estudiantes','programacion_anual'].includes(moduleName) ? {success:true} : {success:false,message:'Este módulo todavía está en consulta.'}; }
+export async function updateModuleStatus(moduleName: string) {
+  if(['areas_grados','calendario','horario'].includes(moduleName))return saveCloudFrontendState(configurationState());
+  return ['estudiantes','programacion_anual'].includes(moduleName)?{success:true}:{success:false,message:'Este módulo todavía está en consulta.'};
+}
 
 export async function getDatosGenerales() {
   const identity = getWebIdentity();
@@ -57,7 +61,7 @@ export async function getModuleStatus() { return Object.fromEntries(Object.keys(
 export async function getEstudiantes() { try { return (await readAcademic('students')).map(row => row.value).sort((a, b) => String(a.name).localeCompare(String(b.name), 'es')); } catch { return []; } }
 export async function bootstrapPortableState() {
   let rows: Awaited<ReturnType<typeof readAcademic>> = [];
-  try { rows = await readAcademic('frontend'); } catch {}
+  try { rows = await readAcademic('frontend'); } catch(error) {return {success:false,message:(error as Error).message};}
   return { success: true, data: { frontendState: { keys: Object.fromEntries(rows.map(row => [row.id, JSON.stringify(row.value)])) }, recoveryPending: false } };
 }
 const academicMap = async (dataset: string) => Object.fromEntries((await readAcademic(dataset)).map(row => [row.id, row.value]));
@@ -74,7 +78,10 @@ export async function getSesion(year: string, areaId: string, grade: string, sec
   // a lesson, without rewriting its authored activities or grading records.
   return unit ? mergeUnitSessionPlanning(saved,unit,sessionNumber) : saved;
 }
-export async function saveCloudFrontendState() { return { success: false, message: 'La sincronización todavía no está habilitada en la web.' }; }
+export async function saveCloudFrontendState(state: Record<string,string>,keys?: string[]) {
+  try {await persistConfiguration(state,keys);return {success:true};}
+  catch(error) {return {success:false,message:(error as Error).message};}
+}
 export async function getDepartamentos() { const data = await getDatosGenerales(); return data.department ? [data.department] : []; }
 export async function getProvincias() { const data = await getDatosGenerales(); return data.province ? [data.province] : []; }
 export async function getDistritos() { const data = await getDatosGenerales(); return data.district ? [data.district] : []; }

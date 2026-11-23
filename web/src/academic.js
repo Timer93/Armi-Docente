@@ -1,9 +1,11 @@
 import { AuthError } from './apps-script-auth.js';
 import { editsReady, hasEdits, editAcademic } from './academic-edits.js';
 import { isPlanning } from './edit-fields.js';
+import {configurationReady,configurationRecords,saveConfiguration} from './web-configuration.js';
 
 export const DATASETS = ['general', 'students', 'annual', 'units', 'sessions', 'frontend'];
-export const FRONTEND_KEYS = ['armi_areas', 'armi_assignments', 'armi_calendar_state', 'armi_holidays_v7', 'armi_schedule_config', 'armi_schedule_entries', 'armi_schedule_color_settings', 'armi_pa_pinned_didactic_units_global', 'armi_pa_pinned_matrix_global'];
+import {FRONTEND_KEYS} from './configuration-keys.js';
+export {FRONTEND_KEYS};
 const response = data => Response.json({ success: true, data });
 const fail = (message, status = 400) => { throw new AuthError(message, status); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -42,12 +44,13 @@ export async function academicRoute(request, env, teacher, { readJson, digest, r
   const db = env.DB;
   const teacherId = teacher.id; // Exclusivamente de la sesión comprobada en servidor.
   try {
+    if(url.pathname==='/api/academic/settings' && request.method==='PUT') return response(await saveConfiguration(request,db,teacher,{readJson,digest,now,validateRecord,permittedKeys:FRONTEND_KEYS}));
     if (url.pathname === '/api/academic/edit' && request.method === 'PUT') return response(await editAcademic(request, db, teacher, { readJson, digest, now, validateRecord }));
     if (url.pathname === '/api/academic/status' && request.method === 'GET') {
       const current = await head(db, teacherId);
       const counts = current.active_import_id
         ? (await db.prepare('SELECT dataset, COUNT(*) AS count FROM academic_records WHERE teacher_id = ? AND import_id = ? GROUP BY dataset').bind(teacherId, current.active_import_id).all()).results : [];
-      return response({ ready: true, editable: await editsReady(db), planningEditable: await editsReady(db,true), hasWebEdits: await hasEdits(db, teacherId), snapshotId: current.active_import_id, revision: current.revision, counts: Object.fromEntries(counts.map(row => [row.dataset, row.count])) });
+      return response({ ready: true, editable: await editsReady(db), planningEditable: await editsReady(db,true), settingsEditable: await configurationReady(db), hasWebEdits: await hasEdits(db, teacherId), snapshotId: current.active_import_id, revision: current.revision, counts: Object.fromEntries(counts.map(row => [row.dataset, row.count])) });
     }
     if (url.pathname === '/api/academic/records' && request.method === 'GET') {
       const dataset = url.searchParams.get('dataset');
@@ -58,6 +61,7 @@ export async function academicRoute(request, env, teacher, { readJson, digest, r
       if (requestedSnapshot && requestedSnapshot !== current.active_import_id) fail('La copia activa cambió. Recarga la página.', 409);
       const requestedRevision = url.searchParams.get('revision');
       if (requestedRevision !== null && String(current.revision) !== requestedRevision) fail('Los datos cambiaron durante la lectura. Recarga la página.', 409);
+      if(dataset==='frontend' && await configurationReady(db)) return response({...await configurationRecords(db,teacherId,current.active_import_id),nextCursor:null,snapshotId:current.active_import_id,revision:current.revision});
       if ((['general','students'].includes(dataset) || isPlanning(dataset)) && await editsReady(db,isPlanning(dataset))) {
         const table = isPlanning(dataset) ? 'planning_edits' : 'academic_edits';
         const includeDeleted = isPlanning(dataset) && url.searchParams.get('includeDeleted') === '1' ? 1 : 0;

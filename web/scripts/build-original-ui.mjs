@@ -28,7 +28,7 @@ const originalSource = {
       const normalizedRepo = repo.replace(/\\/g, '/');
       if (target === `${normalizedRepo}/components/auth/AuthContext`) return { path: webFile('auth.tsx') };
       if (target === `${normalizedRepo}/services/apiService`) return { path: webFile('desktop-api.ts') };
-      if (target === `${normalizedRepo}/utils/observePortableStorage`) return { path: webFile('desktop-only.tsx') };
+      if (target === `${normalizedRepo}/utils/observePortableStorage`) return { path: webFile('observe-storage.js') };
       if (target.startsWith(`${normalizedRepo}/components/`) && isolated.has(path.basename(target))) return { path: webFile('desktop-only.tsx') };
     });
     bundler.onLoad({ filter: /[\\/]components[\\/]auth[\\/]LoginScreen\.tsx$/ }, async args => {
@@ -91,6 +91,33 @@ const originalSource = {
         contents = contents.replace(marker,`<div data-armi-web-editor="${dataset}" className="animate-fade-in pb-20 space-y-6 relative">`);
       }
       contents = contents.replaceAll('Unidad Sincronizada.','Unidad guardada en la web.');
+      return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
+    });
+    bundler.onLoad({filter:/[\\/]components[\\/](AreasGradosView|CalendarView|ScheduleView)\.tsx$/},async args=>{
+      let contents=await readFile(args.path,'utf8');
+      const name=path.basename(args.path,'.tsx');
+      const markers=name==='AreasGradosView'?['animate-fade-in flex flex-col h-full space-y-8','animate-fade-in relative flex flex-col h-full space-y-6']:name==='CalendarView'?['relative select-none pb-20','calendar-ie-print-sheet relative animate-fade-in bg-white p-6']:['animate-fade-in pb-12 select-none relative schedule-print-page'];
+      for(const marker of markers) {
+        const source=`<div className="${marker}`;
+        if(!contents.includes(source))throw new Error(`Review configuration web editor: ${name}`);
+        contents=contents.replace(source,`<div data-armi-web-editor="settings" className="${marker}`);
+      }
+      if(name==='AreasGradosView') {
+        const call="await updateModuleStatus('areas_grados', newAssigns.length > 0);";
+        if(!contents.includes(call))throw new Error('Review assignment save acknowledgement');
+        contents=contents.replace(call,`const result=${call.slice(0,-1)};if(!result.success){showToast(result.message || 'No se pudo guardar en la web.','error');return false;}`);
+        contents=contents.replace('            onSuccess();\r\n        } catch (e) {','            onSuccess();return true;\r\n        } catch (e) {').replace('            onSuccess();\n        } catch (e) {','            onSuccess();return true;\n        } catch (e) {');
+        for(const call of ['await saveAssignmentsToLocal(updated);','await saveAssignmentsToLocal([...assignments, newItem]);'])contents=contents.replace(call,`if(!${call.slice(6,-1)}){setLoading(false);setSaving(false);return;}`.replace('!saveAssignmentsToLocal','!await saveAssignmentsToLocal'));
+        contents=contents.replace('const confirmDeleteArea = () => {','const confirmDeleteArea = async () => {').replace('saveAssignmentsToLocal(assignments.filter(a => a.areaId !== confirmDeleteAreaId));','if(!await saveAssignmentsToLocal(assignments.filter(a => a.areaId !== confirmDeleteAreaId)))return;');
+        contents=contents.replace('const confirmDeleteAssignment = () => {','const confirmDeleteAssignment = async () => {').replace('saveAssignmentsToLocal(assignments.filter(a => a.id !== confirmDeleteAssignmentId));','if(!await saveAssignmentsToLocal(assignments.filter(a => a.id !== confirmDeleteAssignmentId)))return;');
+        contents=contents.replaceAll('Área agregada correctamente','Área añadida. Guardado web pendiente.');
+      }
+      if(name==='CalendarView')contents=contents.replaceAll('✅ ¡Planificación sincronizada y módulo desbloqueado!','Calendario guardado en la web.');
+      if(name==='ScheduleView') {
+        const call="await updateModuleStatus('horario', entries.length > 0);";
+        if(!contents.includes(call))throw new Error('Review timetable save acknowledgement');
+        contents=contents.replace(call,`const result=${call.slice(0,-1)};if(!result.success)throw new Error(result.message || 'No se pudo guardar el horario.');`);
+      }
       return {contents,loader:'tsx',resolveDir:path.dirname(args.path)};
     });
     bundler.onLoad({filter:/[\\/]sessions-view[\\/]SessionActions\.tsx$/}, async args => {

@@ -18,6 +18,8 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   sobrescrituras desde pestañas desactualizadas y avisos de guardado/error.
 - Guardado y eliminación de planificaciones anuales, unidades y sesiones, con
   matrices y contenido estructurado. Se reutilizan las pantallas originales.
+- Configuración de Áreas, Grados, Calendario, Feriados y Horario por cuenta,
+  incluyendo colores del horario y las matrices/unidades fijadas de planificación.
 - Los otros módulos siguen en consulta. Drive, IA, importación de Excel, fotos,
   operaciones masivas y portal de estudiantes web pendientes.
 - No modifica ni sincroniza la base local. Una cuenta sin copia activa muestra
@@ -89,8 +91,8 @@ funcionando. La tabla 0004 sigue siendo necesaria para Datos generales y alumnos
 - IA, calificación, plantillas Word, archivos, recursos visuales y Drive siguen
   pendientes. Sus controles se bloquean en la compilación web y el transporte
   rechaza los servicios no migrados. Los catálogos de áreas/grados, calendarios
-  y horarios propios siguen llegando de la copia importada; su edición web aún
-  está pendiente, por lo que una cuenta nueva necesita configurar esas piezas
+  y horarios propios se pueden configurar en web después de aplicar 0006, o
+  recuperar desde una copia. Una cuenta nueva necesita completar estas piezas
   antes de elaborar planificación completa.
 
 `public/curriculum.json` contiene únicamente columnas explícitas del catálogo
@@ -99,6 +101,35 @@ cuentas, datos de docentes, alumnos ni desempeños personalizados. Se carga como
 archivo estático una vez por página; no consulta D1 para cada selección de área.
 `scripts/export-public-curriculum.mjs --database <ruta>` permite actualizarlo desde
 una base de catálogo revisada, en modo de solo lectura; no se ejecuta en despliegue.
+
+### Activar Áreas, Grados, Calendario y Horario
+
+Ejecutar `migrations/0006_web_configuration.sql` en la consola D1 de
+**armi-docente-web** y recargar la aplicación. Añade solo `web_configurations`;
+conserva copias importadas, planes, estudiantes y las modificaciones previas.
+No requiere volver a importar ni modificar el escritorio. Si falta la tabla,
+estos apartados permanecen en consulta y los demás módulos siguen funcionando.
+
+Se reutilizan las pantallas originales y su almacenamiento, reemplazado en web
+por memoria de la página. El observador web escucha únicamente las nueve claves
+académicas admitidas, agrupa cambios durante 500 ms y envía solo diferencias.
+Nunca publica la sesión, credenciales, preferencias privadas u otras claves.
+Áreas y asignaciones se guardan al editarlas; Calendario y Horario conservan sus
+botones de guardar. La confirmación de progreso espera el guardado real del lote.
+
+El servidor guarda una configuración con revisión por docente y combina sus
+valores con los de la copia original. Cada lote es atómico: las áreas, asignaciones,
+calendario u horario de otra pestaña no se reemplazan parcialmente cuando hay un
+conflicto. Las eliminaciones se registran para no reaparecer desde la copia.
+No hay sondeo periódico ni escrituras cuando los valores no cambiaron. Un error
+de guardado detiene los reintentos automáticos y mantiene el aviso visible;
+conservar cualquier borrador necesario antes de recargar para resolverlo.
+
+La carga inicial debe completarse antes de observar ediciones; si falla la
+lectura, se muestra el estado de recuperación en lugar de interpretar que la
+cuenta está vacía. Una cuenta nueva puede configurar estos apartados sin importar
+una base de escritorio. El catálogo nacional de instituciones/ubicaciones sigue
+pendiente y conserva la limitación indicada en Datos generales.
 
 ## Desarrollo y comprobación
 
