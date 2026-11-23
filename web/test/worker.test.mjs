@@ -16,6 +16,7 @@ function fixture(t) {
   sqlite.exec(fs.readFileSync(new URL('../migrations/0008_web_instruments.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0009_web_evaluation.sql', import.meta.url), 'utf8'));
   sqlite.exec(fs.readFileSync(new URL('../migrations/0010_teacher_portal_registry.sql', import.meta.url), 'utf8'));
+  sqlite.exec(fs.readFileSync(new URL('../migrations/0011_student_passwords.sql', import.meta.url), 'utf8'));
   t.after(() => sqlite.close());
   function prepare(sql, args = []) {
     return {
@@ -558,7 +559,7 @@ test('AI errors do not expose provider secrets, do not trigger retries, and rele
 
 async function schoolPortal(f,user,fingerprint='a') {
  const metadata={year:'2026',areaId:'ept',grade:'1ro',unitNumber:'1',sessionNumber:'1'};
- const rows=[{dataset:'general',id:'general',value:{teacher:user.data.user.username}},...['A','B'].map(section=>({dataset:'students',id:section,value:{id:section,name:'Alumno '+section,grade:'1ro',section,estado:'A',dni:'private-dni'}})),...['A','B'].map(section=>({dataset:'sessions',id:`2026-ept-1ro-${section}-U1-S1`,value:{...metadata,section,title:'Sesión '+section,purpose:'Propósito',situation:'Situación',secuencia:{proceso:{aplicacion:'Actividad'}},evaluationRecords:'private-evaluations'}}))];
+ const rows=[{dataset:'general',id:'general',value:{teacher:user.data.user.username}},...['A','B'].map(section=>({dataset:'students',id:section,value:{id:section,name:'Alumno '+section,grade:'1ro',section,estado:'A',dni:section==='A'?'00123456':'87654321'}})),...['A','B'].map(section=>({dataset:'sessions',id:`2026-ept-1ro-${section}-U1-S1`,value:{...metadata,section,title:'Sesión '+section,purpose:'Propósito',situation:'Situación',secuencia:{proceso:{aplicacion:'Actividad'}},evaluationRecords:'private-evaluations'}}))];
  const start=await f.call('/api/academic/imports',{method:'POST',cookie:user.cookie,body:{ownerUsername:user.data.user.username,fingerprint:fingerprint.repeat(64),counts:{general:1,students:2,annual:0,units:0,sessions:2,frontend:0}}});const id=(await start.json()).data.importId;
  await f.call(`/api/academic/imports/${id}/chunks`,{method:'POST',cookie:user.cookie,body:{sequence:0,records:rows}});await f.call(`/api/academic/imports/${id}/commit`,{method:'POST',cookie:user.cookie,body:{}});
  const put=body=>f.call('/api/portal',{method:'PUT',cookie:user.cookie,body});
@@ -568,8 +569,17 @@ async function schoolPortal(f,user,fingerprint='a') {
  return {id,state,get,put,slug:new URL(state.url).pathname.split('/')[2],issue:async studentId=>(await(await f.call('/api/portal/access',{method:'POST',cookie:user.cookie,body:{studentId}})).json()).data.code,publish:sessionId=>f.call('/api/portal/publications',{method:'PUT',cookie:user.cookie,body:{sessionId,published:true}})};
 }
 async function studentLogin(f,portal,code) {
- const result=await f.call('/api/student/login',{method:'POST',body:{portal,code}});assert.equal(result.status,200,await result.clone().text());return result.headers.get('set-cookie').split(';')[0];
+ const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(code))),x=>x.toString(16).padStart(2,'0')).join('');
+ const access=f.sqlite.prepare('SELECT teacher_id,student_id FROM student_access WHERE code_hash=?').get(hash);assert.ok(access);
+ const student=f.sqlite.prepare("SELECT payload_json FROM academic_records WHERE teacher_id=? AND dataset='students' AND record_id=?").get(access.teacher_id,access.student_id);
+ const dni=JSON.parse(student.payload_json).dni;
+ const result=await f.call('/api/student/login',{method:'POST',body:{portal,dni,password:Boolean(f.sqlite.prepare('SELECT 1 FROM student_passwords WHERE teacher_id=? AND student_id=?').get(access.teacher_id,access.student_id))?'Personal123':dni}});
+ assert.equal(result.status,200,await result.clone().text());const cookie=result.headers.get('set-cookie').split(';')[0];
+ if((await result.json()).data.requiresPasswordChange){const changed=await f.call('/api/student/change-password?portal='+portal,{method:'POST',cookie,body:{password:'Personal123',confirmation:'Personal123'}});assert.equal(changed.status,200,await changed.clone().text());}
+ return cookie;
 }
+
+
 test('student portal: personal codes, grade isolation, teacher separation, no roster/private data and text submissions',async t=>{
  const f=fixture(t),a=await f.login(),b=await f.login('docenteB');
  assert.equal((await(await f.call('/api/portal',{cookie:a.cookie})).json()).data.open,false);
@@ -582,7 +592,7 @@ test('student portal: personal codes, grade isolation, teacher separation, no ro
  assert.equal((await f.call('/api/student/data?portal='+other.slug,{cookie:student})).status,401);
  assert.equal((await f.call('/api/portal',{cookie:student})).status,401);
  assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie:a.cookie})).status,401);
- assert.equal((await f.call('/api/student/login',{method:'POST',body:{portal:other.slug,code}})).status,401);
+ assert.equal((await f.call('/api/student/login',{method:'POST',body:{portal:other.slug,code}})).status,400);
  const send=sessionId=>f.call('/api/student/submit?portal='+portal.slug,{method:'POST',cookie:student,body:{sessionId,text:'Mi respuesta'}});
  assert.equal((await send(sidB)).status,403);assert.equal((await send(sidA)).status,200);
  const inbox=(await(await f.call('/api/portal/inbox',{cookie:a.cookie})).json()).data;assert.equal(inbox.submissions.length,1);
@@ -597,7 +607,7 @@ test('closing and reopening a portal, rotating a code, and revoking access inval
  assert.equal((await portal.put({open:true,revision:1})).status,409);
  assert.equal((await portal.put({open:true,revision:2})).status,200);assert.equal((await read(student)).status,401);
  const second=await studentLogin(f,portal.slug,code);assert.equal((await read(second)).status,200);
- const rotated=await portal.issue('A');assert.equal((await read(second)).status,401);assert.equal((await f.call('/api/student/login',{method:'POST',body:{portal:portal.slug,code}})).status,401);
+ const rotated=await portal.issue('A');assert.equal((await read(second)).status,401);assert.equal((await f.call('/api/student/login',{method:'POST',body:{portal:portal.slug,code}})).status,400);
  const third=await studentLogin(f,portal.slug,rotated);assert.equal((await read(third)).status,200);
  await f.call('/api/portal/access',{method:'DELETE',cookie:a.cookie,body:{studentId:'A'}});assert.equal((await read(third)).status,401);
  assert.equal((await f.call('/api/academic/imports',{method:'POST',cookie:a.cookie,body:{}})).status,409,'A replacement copy cannot reassign issued access codes');
@@ -777,7 +787,7 @@ test('missing alias setup preserves existing login and portals; untrusted browse
 });
 
 function setPortalDni(f,teacher,id,dni){f.sqlite.prepare("UPDATE academic_records SET payload_json=json_set(payload_json,'$.dni',?) WHERE teacher_id=? AND dataset='students' AND record_id=?").run(dni,teacher,id);}
-const dniLogin=(f,portal,dni)=>f.call('/api/student/login',{method:'POST',body:{portal,dni}});
+const dniLogin=(f,portal,dni)=>f.call('/api/student/login',{method:'POST',body:{portal,dni,password:dni}});
 
 test('DNI entry needs no teacher-issued code, preserves leading zero and isolates same-DNI students by teacher',async t=>{
  const f=fixture(t);f.users.docenteA.portalIdentity={teacherRegistryNumber:45};f.users.docenteB.portalIdentity={teacherRegistryNumber:46};
@@ -787,6 +797,7 @@ test('DNI entry needs no teacher-issued code, preserves leading zero and isolate
  await portal.publish('2026-ept-1ro-A-U1-S1');await portal.publish('2026-ept-1ro-B-U1-S1');
  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM student_access').get().n,0);
  const response=await dniLogin(f,portal.slug,'00123456');assert.equal(response.status,200,await response.clone().text());const cookie=response.headers.get('set-cookie').split(';')[0];
+ assert.equal((await f.call('/api/student/change-password?portal='+portal.slug,{method:'POST',cookie,body:{password:'Personal123',confirmation:'Personal123'}})).status,200);
  const data=await f.call('/api/student/data?portal='+portal.slug,{cookie});assert.equal(data.status,200);const text=await data.text();assert.ok(!/00123456|Alumno B|private-evaluations/.test(text));assert.equal(JSON.parse(text).data.lessons.length,1);
  assert.equal((await f.call('/api/student/data?portal='+other.slug,{cookie})).status,401);
  const legacy=f.sqlite.prepare('SELECT public_id FROM student_portals WHERE teacher_id=?').get(a.data.user.id).public_id;
@@ -815,4 +826,34 @@ test('duplicate, changed, inactive and deleted DNI records cannot select an arbi
  assert.equal((await dniLogin(f,portal.slug,'00123456')).status,200,'An edited DNI replaces its imported value');assert.equal((await dniLogin(f,portal.slug,'87654321')).status,200);
  f.sqlite.prepare("UPDATE academic_edits SET deleted=1 WHERE teacher_id=? AND record_id='B'").run(a.data.user.id);assert.equal((await dniLogin(f,portal.slug,'87654321')).status,401);
  f.sqlite.prepare("UPDATE academic_records SET payload_json=json_set(payload_json,'$.estado','R') WHERE teacher_id=? AND dataset='students' AND record_id='A'").run(a.data.user.id);assert.equal((await dniLogin(f,portal.slug,'00123456')).status,401);
+});
+
+
+test('passwords: first DNI password grants only setup access; personal password is hashed and enforced',async t=>{
+ const f=fixture(t),a=await f.login(),portal=await schoolPortal(f,a);
+ const attempt=password=>f.call('/api/student/login',{method:'POST',body:{portal:portal.slug,dni:'00123456',...(password===undefined?{}:{password})}});
+ assert.equal((await attempt()).status,400);assert.equal((await attempt('wrong')).status,401);
+ const first=await attempt('00123456');assert.equal(first.status,200);assert.equal((await first.clone().json()).data.requiresPasswordChange,true);const cookie=first.headers.get('set-cookie').split(';')[0];
+ assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie})).status,403);
+ assert.equal((await f.call('/api/student/submit?portal='+portal.slug,{method:'POST',cookie,body:{sessionId:'2026-ept-1ro-A-U1-S1',text:'bypass'}})).status,403);
+ const second=await attempt('00123456'),stale=second.headers.get('set-cookie').split(';')[0];
+ const change=(password,confirmation=password)=>f.call('/api/student/change-password?portal='+portal.slug,{method:'POST',cookie,body:{password,confirmation}});
+ for(const pair of [['00123456','00123456'],['short1','short1'],['Personal123','different']])assert.equal((await change(...pair)).status,400);
+ assert.equal((await change('Personal123')).status,200);const stored=f.sqlite.prepare('SELECT * FROM student_passwords').get();assert.match(stored.password_hash,/^pbkdf2-sha256\$100000\$/);assert.ok(!stored.password_hash.includes('Personal123'));
+ assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie})).status,200);
+ assert.equal((await f.call('/api/student/data?portal='+portal.slug,{cookie:stale})).status,401);
+ assert.equal((await attempt('00123456')).status,401);const again=await attempt('Personal123');assert.equal(again.status,200);assert.equal((await again.json()).data.requiresPasswordChange,false);
+ assert.equal((await change('Changed456')).status,200);assert.equal((await attempt('Personal123')).status,401);
+ assert.equal((await attempt('Changed456')).status,200);
+});
+
+test('password changes recheck the portal gate at final save; missing schema disables all student entry',async t=>{
+ const f=fixture(t),a=await f.login(),portal=await schoolPortal(f,a);
+ const first=await dniLogin(f,portal.slug,'00123456'),cookie=first.headers.get('set-cookie').split(';')[0];
+ const prepare=f.env.DB.prepare;f.env.DB.prepare=(sql,...args)=>{if(sql.startsWith('INSERT INTO student_passwords('))f.sqlite.exec('UPDATE student_portals SET is_open=0');return prepare(sql,...args);};
+ assert.equal((await f.call('/api/student/change-password?portal='+portal.slug,{method:'POST',cookie,body:{password:'Personal123',confirmation:'Personal123'}})).status,409);
+ assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM student_passwords').get().n,0);
+ f.env.DB.prepare=prepare;f.sqlite.exec('DROP TABLE student_password_sessions');
+ assert.equal((await dniLogin(f,portal.slug,'00123456')).status,503);
+ assert.equal((await (await f.call('/api/portal',{cookie:a.cookie})).json()).data.passwordReady,false);
 });

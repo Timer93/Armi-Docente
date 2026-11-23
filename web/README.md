@@ -28,8 +28,9 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   complemento de Apps Script: [instrucciones](docs/enlaces-docentes-dni.md).
   La pantalla de acceso reutiliza el HTML y los estilos de
   `backend/public/student-portal.html` durante la compilación. El adaptador web
-  conserva el ingreso por DNI sin contraseña ni servicios locales de Windows;
+  conserva el ingreso por DNI y contraseña, sin servicios locales de Windows;
   no carga los scripts de archivos, temporizadores o sincronización del escritorio.
+  Requiere activar 0011: [contraseñas estudiantiles](docs/contrasenas-estudiantes.md).
 - Biblioteca de Instrumentos de evaluación: crear, editar, duplicar, previsualizar
   y eliminar rúbricas, listas de cotejo, escalas y guías en sus pantallas originales.
   Requiere activar 0008.
@@ -305,11 +306,12 @@ Funcionamiento implementado:
   conservar el último estado confirmado y mostrar el error sin simular éxito.
 - Respetar membresía y permisos sin consultar Apps Script por cada clic. Medir
   las operaciones del portal y evitar consultas periódicas innecesarias.
-- El estudiante entra con su DNI de ocho dígitos, sin emitir códigos desde el
+- El estudiante entra con su DNI de ocho dígitos y contraseña, sin emitir códigos desde el
   panel. El DNI se busca exclusivamente entre estudiantes activos del docente;
   los duplicados deben corregirse. Bloquear o volver a habilitar el acceso
   individual invalida sus sesiones anteriores. Duran como máximo dos horas.
-  Los códigos anteriores solo se mantienen en la API para clientes antiguos.
+  Los códigos anteriores ya no sirven para entrar. En el primer ingreso la clave
+  inicial es el DNI y debe cambiarse antes de acceder a las sesiones. Requiere 0011.
 - Publicar expresamente hasta 200 sesiones; cada estudiante ve solo las de su
   grado/sección, paginadas de 20 en 20. No recibe el padrón, DNI, notas, claves ni
   el documento académico completo. Puede enviar texto de hasta 8000 caracteres,

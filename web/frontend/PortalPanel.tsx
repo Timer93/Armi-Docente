@@ -46,11 +46,12 @@ export function PortalPanel({inline=false}:{inline?:boolean}) {
   </section>:<button type="button" onClick={manage}>Acceso de estudiantes</button>}
   {open&&createPortal(<div className="web-ai-overlay"><section className="web-ai-panel" role="dialog" aria-modal="true" aria-labelledby="portal-heading">
    <h2 id="portal-heading">Acceso de estudiantes</h2>
-   <p>El estudiante entra con su DNI, sin códigos adicionales. Este enlace identifica a su docente y muestra solo sus sesiones y entregas.</p>
+   <p>El estudiante entra con su DNI y contraseña. En el primer ingreso usa su DNI como contraseña y debe crear una personal. Este enlace identifica a su docente.</p>
    {state?.ready?<>
     {switchButton('Estado del portal')}
     {state.url&&<p><a href={state.url} target="_blank" rel="noreferrer">{state.url}</a><br/><button onClick={()=>void navigator.clipboard.writeText(state.url)}>Copiar enlace</button></p>}
     {state.registryMessage&&<p role="status">{state.registryMessage}</p>}
+    {state.passwordReady===false&&<p role="alert">Falta activar 0011_student_passwords.sql en D1 para el acceso con contraseña.</p>}
     <p>Verifica que cada estudiante tenga un DNI de ocho dígitos, sin duplicados activos dentro de tu registro.</p>
     <label>Estudiante<select disabled={busy} value={student} onChange={e=>setStudent(e.target.value)}><option value="">Seleccionar…</option>{students.map(row=><option key={row.id} value={String(row.id)}>{row.name} · {String(row.dni||'').trim()||'Sin DNI'} · {row.grade} {row.section}</option>)}</select></label>
     {student&&!validDni&&<p role="status">{!/^\d{8}$/.test(selectedDni)?'Completa el DNI del estudiante en Estudiantes.':'Este DNI no corresponde a un único estudiante activo. Revisa tu registro de Estudiantes.'}</p>}
