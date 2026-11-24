@@ -1,6 +1,7 @@
 import {AuthError} from './apps-script-auth.js';
 import {serviceLimit} from './ai.js';
 import {driveUploadRoute,MAX_DRIVE_UPLOAD_BYTES} from './drive-uploads.js';
+import {automaticSyncStatus,publishAutomaticChanges} from './automatic-sync.js';
 const fail=(message,status=400,diagnostic)=>{const error=new AuthError(message,status);if(diagnostic)error.driveDiagnostic=diagnostic;throw error;};
 const SCOPE='https://www.googleapis.com/auth/drive';
 const hasDriveScope=value=>typeof value==='string'&&value.split(/\s+/).includes(SCOPE);
@@ -156,6 +157,10 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
   return new Response(null,{status:302,headers:{location:'/?armi-drive=connected'}});
   }catch(error){if(!error.driveDiagnostic)error.driveDiagnostic=stage;throw error;}
  }
+ if(url.pathname==='/api/drive/sync/status'&&request.method==='GET'){
+  let authorized=false;if(row){try{authorized=hasDriveScope((await open(env,`${teacher.id}:drive`,row.token_cipher,row.token_iv)).scope);}catch{}}
+  return Response.json({success:true,data:{...await automaticSyncStatus(db,teacher.id),connected:Boolean(row?.folder_id),authorized}});
+ }
  if(!row)fail('Conecta tu cuenta de Google antes de continuar.');
  if(url.pathname==='/api/drive/connection'&&request.method==='DELETE'){
   const body=await readJson(request);if(Object.keys(body).some(k=>k!=='revision')||body.revision!==row.revision)fail('La conexión cambió. Recarga su estado.',409);
@@ -164,6 +169,7 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  }
  await serviceLimit(db,`drive-read:${teacher.id}:${Math.floor(now/60000)}`,120,now+120000);
  const token=await accessToken(env,row,requester,now);
+ if(url.pathname==='/api/drive/sync'&&request.method==='POST'){const body=await readJson(request);if(Object.keys(body).length)fail('Solicitud no v\u00e1lida.');await serviceLimit(db,`drive-sync:${teacher.id}:${Math.floor(now/30000)}`,2,now+120000);return Response.json({success:true,data:await publishAutomaticChanges(env,teacher,row,token,{now,requester,remote,readRemoteJson,unchanged,digest})});}
  if(url.pathname==='/api/drive/upload'||url.pathname.startsWith('/api/drive/upload/'))return driveUploadRoute(request,env,teacher,row,token,{readJson,now,requester,remote,readRemoteJson,seal,open,within,unchanged,fileId});
  if(url.pathname==='/api/drive/picker'&&request.method==='GET'){
   // ASSETS canonicalizes .html with a 307. Serve the canonical asset internally

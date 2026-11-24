@@ -25,7 +25,11 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
 - Conexión limitada a Google Drive por docente, con selector de Google, consulta,
   descarga y vista previa de archivos autorizados. Requiere 0012 y configurar el
   cliente OAuth/Picker sin facturación: [activación y prueba del espejo](docs/google-drive-limitado.md).
-  No activa todavía subidas de evidencias ni sincronización académica automática.
+  No activa todavía subidas de evidencias ni recepción de cambios en Windows.
+- Cola automática de cambios académicos por docente, con envío agrupado a Drive.
+  Requiere la migración 0013. Conserva pendientes ante fallos y distingue el envío
+  a Drive de la recepción en Windows, todavía pendiente. Véase
+  [estado de la sincronización automática](docs/sincronizacion-automatica.md).
 - Portal independiente de estudiantes, con interruptor por docente, ingreso por
   DNI, sesiones publicadas por grupo y entregas de texto. Los enlaces legibles
   `d45-profe-arnold` usan el registro de Sheets y requieren activar 0010 y el

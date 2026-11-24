@@ -10,7 +10,7 @@ import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 
 test('workerd: real outbound fetch completes Drive OAuth and blocks redirects for tokens, files and AI', {timeout:60000}, async t=>{
  const bundle=await build({entryPoints:[fileURLToPath(new URL('../src/worker.js',import.meta.url))],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
- const calls=[];let challenge='',redirectToken=false,redirectFile=false,redirectAI=false,uploaded=null,redirectUpload=false;
+ const calls=[],syncFiles=new Map();let generated=0;let challenge='',redirectToken=false,redirectFile=false,redirectAI=false,uploaded=null,redirectUpload=false;
  const assets=fs.mkdtempSync(path.join(os.tmpdir(),'armi-picker-runtime-'));
  fs.copyFileSync(new URL('../public/drive-picker.html',import.meta.url),path.join(assets,'drive-picker.html'));
  t.after(()=>{fs.unlinkSync(path.join(assets,'drive-picker.html'));fs.rmdirSync(assets);});
@@ -31,18 +31,21 @@ test('workerd: real outbound fetch completes Drive OAuth and blocks redirects fo
    return Response.json({access_token:'runtime-access-token',refresh_token:'runtime-refresh-token',expires_in:3600,scope:'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/drive'});
   }
   if(url.href==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'runtime-google-account',email:'runtime@example.test',email_verified:true});
-  if(url.pathname==='/drive/v3/files/generateIds')return Response.json({ids:['runtime-upload-file']});
+  if(url.pathname==='/drive/v3/files/generateIds')return Response.json({ids:[generated++===0?'runtime-upload-file':'runtime-auto-file-'+generated]});
+  if(url.pathname.startsWith('/drive/v3/files/runtime-auto-file-')){const file=syncFiles.get(url.pathname.split('/').at(-1));return file?Response.json(file):new Response('',{status:404});}
   if(url.pathname==='/drive/v3/files/runtime-upload-file')return uploaded?Response.json(uploaded):new Response('',{status:404});
   if(url.pathname==='/upload/drive/v3/files'){
    if(redirectUpload)return Response.redirect('https://untrusted.example/upload',307);
    const bytes=Buffer.from(await request.arrayBuffer()),boundary=request.headers.get('content-type').split('boundary=')[1];
    const first=bytes.indexOf('\r\n\r\n')+4,end=bytes.indexOf('\r\n--'+boundary,first),metadata=JSON.parse(bytes.subarray(first,end).toString());
    const start=bytes.indexOf('\r\n\r\n',end)+4,last=bytes.lastIndexOf('\r\n--'+boundary),body=bytes.subarray(start,last);
+   if(metadata.mimeType==='application/json'){const packet=JSON.parse(body.toString());assert.equal(packet.format,'armi-web-changes');assert.equal(packet.records[0].after.value.teacher,'Runtime changed name');syncFiles.set(metadata.id,{...metadata,size:String(body.length),sha256Checksum:createHash('sha256').update(body).digest('hex')});return Response.json({id:metadata.id});}
    assert.equal(body.toString(),'runtime-upload-body');assert.equal(metadata.parents[0],'runtime-folder-root');
    uploaded={...metadata,size:String(body.length),sha256Checksum:createHash('sha256').update(body).digest('hex')};
    return Response.json({id:metadata.id});
   }
   if(url.pathname==='/drive/v3/files/runtime-folder-root')return Response.json({id:'runtime-folder-root',name:'My Drive folder',mimeType:'application/vnd.google-apps.folder',parents:[]});
+  if(url.pathname==='/drive/v3/files'&&request.method==='POST'){const metadata=await request.json();syncFiles.set(metadata.id,metadata);return Response.json({id:metadata.id});}
   if(url.pathname==='/drive/v3/files')return Response.json({files:[]});
   if(url.pathname==='/drive/v3/files/runtime-image-file'){
    if(url.searchParams.get('alt')==='media')return redirectFile?Response.redirect('https://untrusted.example/content',302):new Response('fixture-image');
@@ -53,10 +56,15 @@ test('workerd: real outbound fetch completes Drive OAuth and blocks redirects fo
  }}));
  t.after(()=>mf.dispose());
  const db=await mf.getD1Database('DB');
- for(const file of ['0001_identity.sql','0007_ai_student_portal.sql','0012_drive_connection.sql']){
+ for(const file of ['0001_identity.sql','0003_academic_snapshots.sql','0004_academic_edits.sql','0005_planning_edits.sql','0006_web_configuration.sql','0007_ai_student_portal.sql','0008_web_instruments.sql','0009_web_evaluation.sql','0012_drive_connection.sql']){
   const sql=fs.readFileSync(new URL('../migrations/'+file,import.meta.url),'utf8').replace(/^\s*--.*$/gm,'');
   for(const statement of sql.split(';').map(value=>value.trim()).filter(Boolean))await db.prepare(statement).run();
  }
+ const setup=fs.readFileSync(new URL('../migrations/0013_automatic_sync_outbox.sql',import.meta.url),'utf8');
+ const triggers=[...setup.matchAll(/CREATE TRIGGER[\s\S]*?END;/g)].map(match=>match[0]);
+ const base=setup.replace(/CREATE TRIGGER[\s\S]*?END;/g,'').replace(/^\s*--.*$/gm,'');
+ for(const statement of base.split(';').map(value=>value.trim()).filter(Boolean))await db.prepare(statement).run();
+ for(const trigger of triggers)await db.prepare(trigger).run();
  let cookie='';
  const call=(path,method='GET',body)=>mf.dispatchFetch('https://web.armi.test'+path,{method,redirect:'manual',headers:{origin:'https://web.armi.test',cookie,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
  const anonymousPicker=await call('/api/drive/picker?mode=folder&requestId=00000000-0000-4000-8000-000000000000');
@@ -93,6 +101,10 @@ test('workerd: real outbound fetch completes Drive OAuth and blocks redirects fo
  assert.equal((await acceptedUpload.json()).data.file.id,'runtime-upload-file');
  assert.equal((await profile()).uploadMaxBytes,5000000);
  const download=await call('/api/drive/content?file=runtime-image-file');assert.equal(download.status,200);assert.equal(await download.text(),'fixture-image');
+ const owner=(await db.prepare('SELECT teacher_id FROM drive_connections').first()).teacher_id;
+ await db.prepare("INSERT INTO academic_edits(teacher_id,dataset,record_id,payload_json,revision,operation_id,operation_hash,updated_at) VALUES(?,'general','general',?,1,'op','hash',1000)").bind(owner,JSON.stringify({teacher:'Runtime changed name'})).run();
+ const automatic=await call('/api/drive/sync','POST',{});assert.equal(automatic.status,200,await automatic.clone().text());
+ const delivery=(await automatic.json()).data;assert.equal(delivery.sent,1);assert.equal(delivery.pending,0);assert.equal(delivery.desktopConfirmed,false);
  redirectFile=true;assert.equal((await call('/api/drive/content?file=runtime-image-file')).status,502);
  await call('/api/ai/credentials','PUT',{provider:'gemini',key:'runtime-own-ai-key-not-real'});
  const models=await call('/api/ai/models?provider=gemini');assert.equal(models.status,200,await models.clone().text());

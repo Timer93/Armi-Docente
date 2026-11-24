@@ -5,6 +5,7 @@ import { installWebRuntime, getWebIdentity } from './runtime.js';
 import { ImportSnapshot } from './ImportSnapshot';
 import {PortalPanel} from './PortalPanel';
 import {DrivePanel} from './DrivePanel';
+import {AutomaticWorkSync} from './AutomaticWorkSync';
 import './web.css';
 import '../../index.css';
 
@@ -50,7 +51,7 @@ function WebHost({ App }: { App: React.ComponentType }) {
   const editable = getWebIdentity()?.academic?.editable;
   const planning = getWebIdentity()?.academic?.planningEditable;
   const settings=getWebIdentity()?.academic?.settingsEditable;
-  return <>{session && <><div className="web-adaptation-notice"><strong>ARMI Docente · Web</strong><span>{settings?'Guardado académico en la web. Conexión de archivos desde Google Drive; sincronización con Windows pendiente.':planning ? 'Guardado web: Programación, Unidades y Sesiones. Archivos, Drive y sincronización pendientes.' : editable ? 'Datos generales y registro de estudiantes: guardado web. Falta activar el guardado de planificación. Drive y sincronización pendientes.' : 'Copia de consulta. Falta activar el guardado web en la base de datos.'}</span><ImportSnapshot /><PortalPanel /><DrivePanel /></div>{(editable || planning || settings) && <div className={`web-save-status ${save.state}`} role="status" aria-live="polite">{save.state === 'pending'?'Cambios pendientes de guardar':save.state === 'saving' ? 'Guardando en la web…' : save.state === 'saved' ? 'Guardado en la web' : save.state === 'error' ? save.message : 'Guardado web disponible'}{save.state === 'error' && <button onClick={() => window.location.reload()}>Recargar</button>}</div>}</>}<App /></>;
+  return <>{session && <><div className="web-adaptation-notice"><strong>ARMI Docente · Web</strong><span>{settings?'Guardado académico en la web. Conexión de archivos desde Google Drive; sincronización con Windows pendiente.':planning ? 'Guardado web: Programación, Unidades y Sesiones. Archivos, Drive y sincronización pendientes.' : editable ? 'Datos generales y registro de estudiantes: guardado web. Falta activar el guardado de planificación. Drive y sincronización pendientes.' : 'Copia de consulta. Falta activar el guardado web en la base de datos.'}</span><ImportSnapshot /><PortalPanel /><DrivePanel /></div><AutomaticWorkSync key={getWebIdentity()?.user.id}/>{(editable || planning || settings) && <div className={`web-save-status ${save.state}`} role="status" aria-live="polite">{save.state === 'pending'?'Cambios pendientes de guardar':save.state === 'saving' ? 'Guardando en la web…' : save.state === 'saved' ? 'Guardado en la web' : save.state === 'error' ? save.message : 'Guardado web disponible'}{save.state === 'error' && <button onClick={() => window.location.reload()}>Recargar</button>}</div>}</>}<App /></>;
 }
 
 async function start() {

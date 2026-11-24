@@ -4,7 +4,12 @@ import { getWebIdentity } from './runtime.js';
 import { fieldsFor, isPlanning } from '../src/edit-fields.js';
 
 const client = createApiClient({ onUnauthorized: () => window.location.reload() });
-export const academicApi = (path: string, method = 'GET', body?: unknown) => client.request(path, method, body);
+export const academicApi = async (path: string, method = 'GET', body?: unknown) => {
+  const owner=getWebIdentity()?.user.id;
+  const result=await client.request(path,method,body);
+  if(method!=='GET'&&owner&&owner===getWebIdentity()?.user.id&&/^\/api\/(academic\/(edit|settings)|instruments|evaluation\/)/.test(path))window.dispatchEvent(new CustomEvent('armi-work-committed',{detail:{teacherId:owner}}));
+  return result;
+};
 type Row = { id: string; value: any; revision: number };
 const cache = new Map<string, Promise<Array<Row>>>();
 const loadedRows = new Map<string, Row[]>();

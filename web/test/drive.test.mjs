@@ -6,9 +6,10 @@ import {driveRoute} from '../src/drive.js';
 import {driveCallbackPage} from '../src/drive-callback-page.js';
 
 const ROOT_A='folder-AAAAAA',ROOT_B='folder-BBBBBB',FILE_A='image-AAAAAAA',OUTSIDE='image-OUTSIDE',MARKER='marker-AAAAAA';
-function fixture(t){
+function fixture(t,{automatic=false}={}){
  const sqlite=new DatabaseSync(':memory:');
  for(const name of ['0001_identity.sql','0007_ai_student_portal.sql','0012_drive_connection.sql'])sqlite.exec(fs.readFileSync(new URL('../migrations/'+name,import.meta.url),'utf8'));
+ if(automatic)for(const name of ['0003_academic_snapshots.sql','0004_academic_edits.sql','0005_planning_edits.sql','0006_web_configuration.sql','0008_web_instruments.sql','0009_web_evaluation.sql','0013_automatic_sync_outbox.sql'])sqlite.exec(fs.readFileSync(new URL('../migrations/'+name,import.meta.url),'utf8'));
  t.after(()=>sqlite.close());
  function prepare(sql,args=[]){return{bind(...values){return prepare(sql,values);},async first(){return sqlite.prepare(sql).get(...args)||null;},async all(){return{results:sqlite.prepare(sql).all(...args)};},async run(){return{meta:{changes:Number(sqlite.prepare(sql).run(...args).changes)}};}};}
  const env={ARMI_GOOGLE_CLIENT_ID:'fixture.apps.googleusercontent.com',ARMI_GOOGLE_CLIENT_SECRET:'fixture-secret-not-real',ARMI_DRIVE_ENCRYPTION_KEY:'ab'.repeat(32),ARMI_DRIVE_REDIRECT_URI:'https://web.armi.test/api/drive/oauth/callback',DB:{prepare,async batch(statements){sqlite.exec('BEGIN');try{const result=[];for(const statement of statements)result.push(await statement.run());sqlite.exec('COMMIT');return result;}catch(error){sqlite.exec('ROLLBACK');throw error;}}}};
@@ -41,6 +42,7 @@ function fixture(t){
    if(documents.has(metadata.id))return new Response('',{status:409});
    const checksum=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',body)),x=>x.toString(16).padStart(2,'0')).join('');
    documents.set(metadata.id,{...metadata,parents:metadata.parents,body,size:String(body.length),sha256Checksum:checksum});
+   provider.onUpload?.();
    if(provider.loseUploadResponse)throw new Error('Connection lost after Google saved the file');
    return Response.json({id:metadata.id});
   }
@@ -48,6 +50,9 @@ function fixture(t){
   if(url.href==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'google-'+token,email:token+'@example.test',email_verified:provider.emailVerified!==false});
   assert.equal(url.hostname,'www.googleapis.com');
   if(url.pathname.endsWith('/about'))return Response.json({user:{permissionId:'google-'+token,emailAddress:token+'@example.test'}});
+  if(url.pathname==='/drive/v3/files'&&options.method==='POST'){
+   const file=JSON.parse(options.body);if(documents.has(file.id))return new Response('',{status:409});documents.set(file.id,file);return Response.json({id:file.id});
+  }
   if(url.pathname==='/drive/v3/files'){
    const query=url.searchParams.get('q'),parent=query.match(/^'([^']+)' in parents/)[1],name=query.match(/ and name = '([^']+)'/)?.[1];
    return Response.json({files:[...documents.values()].filter(file=>file.parents.includes(parent)&&(!name||file.name===name)&&(!provider.authorized||provider.authorized.has(file.id))).map(({body,...file})=>file)});
@@ -278,4 +283,49 @@ test('Drive uploads reject internal mirror folders, other teachers, altered tick
  f.sqlite.exec("UPDATE drive_connections SET revision=revision+1 WHERE teacher_id='A'");
  assert.equal((await f.call(a,'/api/drive/upload',options)).status,409);
  assert.equal(f.calls.filter(call=>new URL(call.url).pathname==='/upload/drive/v3/files').length,0);
+});
+
+test('Automatic sync captures committed work, groups edits, preserves pending work after response loss and never claims desktop receipt',async t=>{
+ const f=fixture(t,{automatic:true}),[a,b]=f.teachers;await f.connect(a);await f.link(a);
+ const insert=f.sqlite.prepare("INSERT INTO academic_edits(teacher_id,dataset,record_id,payload_json,revision,operation_id,operation_hash,updated_at) VALUES(?,'general','general',?,1,'op','hash',1000)");
+ insert.run(a.id,JSON.stringify({teacher:'First value'}));insert.run(b.id,JSON.stringify({teacher:'Private teacher B'}));
+ const first=f.sqlite.prepare("SELECT id FROM web_sync_outbox WHERE teacher_id='A'").get().id;
+ f.sqlite.prepare("UPDATE academic_edits SET payload_json=?,revision=2 WHERE teacher_id='A'").run(JSON.stringify({teacher:'Final value'}));
+ const changed=f.sqlite.prepare("SELECT * FROM web_sync_outbox WHERE teacher_id='A'").get();assert.ok(changed.id>first);assert.equal(changed.before_json,'null');
+ assert.equal(JSON.parse(changed.after_json).value.teacher,'Final value');
+ f.provider.loseUploadResponse=true;
+ const lost=await f.call(a,'/api/drive/sync',{method:'POST',body:{}});assert.equal(lost.status,502);
+ let status=(await(await f.call(a,'/api/drive/sync/status')).json()).data;assert.equal(status.pending,1);assert.equal(status.desktopConfirmed,false);
+ const pending=f.sqlite.prepare("SELECT * FROM web_sync_deliveries WHERE teacher_id='A'").get();assert.ok(pending.packet_json);assert.ok(!pending.packet_json.includes('Private teacher B'));assert.ok(!pending.packet_json.includes('refresh-A'));
+ f.provider.loseUploadResponse=false;f.advance(30000);
+ const sent=await f.call(a,'/api/drive/sync',{method:'POST',body:{}});assert.equal(sent.status,200,await sent.clone().text());assert.equal((await sent.json()).data.pending,0);
+ status=(await(await f.call(a,'/api/drive/sync/status')).json()).data;assert.ok(status.lastSentAt);assert.equal(status.desktopConfirmed,false);
+ assert.equal(f.calls.filter(call=>new URL(call.url).pathname==='/upload/drive/v3/files').length,1,'Retry checks the same immutable Google file rather than creating a duplicate');
+ assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM web_sync_outbox WHERE teacher_id='B'").get().n,1);
+ f.sqlite.exec(fs.readFileSync(new URL('../migrations/0013_automatic_sync_outbox.sql',import.meta.url),'utf8'));
+ assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM web_sync_outbox WHERE teacher_id='A'").get().n,0,'Repeated setup does not enqueue already sent work again');
+});
+
+test('Automatic sync acknowledgements retain edits made while a packet is transferring',async t=>{
+ const f=fixture(t,{automatic:true}),[a]=f.teachers;await f.connect(a);await f.link(a);
+ f.sqlite.prepare("INSERT INTO academic_edits(teacher_id,dataset,record_id,payload_json,revision,operation_id,operation_hash,updated_at) VALUES('A','general','general',?,1,'op','hash',1000)").run(JSON.stringify({teacher:'Before upload'}));
+ f.provider.onUpload=()=>f.sqlite.prepare("UPDATE academic_edits SET payload_json=?,revision=revision+1 WHERE teacher_id='A'").run(JSON.stringify({teacher:'Changed during upload'}));
+ const result=await f.call(a,'/api/drive/sync',{method:'POST',body:{}});assert.equal(result.status,200,await result.clone().text());assert.equal((await result.json()).data.pending,1);
+ assert.equal(JSON.parse(f.sqlite.prepare("SELECT after_json FROM web_sync_outbox WHERE teacher_id='A'").get().after_json).value.teacher,'Changed during upload');
+ const state=f.sqlite.prepare("SELECT * FROM web_sync_deliveries WHERE teacher_id='A'").get();assert.equal(state.packet_json,null);
+ delete f.provider.onUpload;f.advance(30000);assert.equal((await f.call(a,'/api/drive/sync',{method:'POST',body:{}})).status,200);
+ assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM web_sync_outbox WHERE teacher_id='A'").get().n,0);
+});
+
+test('Automatic sync captures transactionally and refuses changed roots or incomplete setup',async t=>{
+ const f=fixture(t,{automatic:true}),[a]=f.teachers;await f.connect(a);await f.link(a);
+ const insert=()=>f.sqlite.prepare("INSERT INTO academic_edits(teacher_id,dataset,record_id,payload_json,revision,operation_id,operation_hash,updated_at) VALUES('A','general','general',?,1,'op','hash',1000)").run(JSON.stringify({teacher:'Saved value'}));
+ f.sqlite.exec('BEGIN');insert();f.sqlite.exec('ROLLBACK');assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM web_sync_outbox').get().n,0,'A failed save never emits a change');
+ insert();assert.equal((await f.call(a,'/api/drive/sync',{method:'POST',body:{}})).status,200);
+ f.sqlite.prepare("UPDATE academic_edits SET revision=2,payload_json=? WHERE teacher_id='A'").run(JSON.stringify({teacher:'Pending value'}));
+ f.sqlite.prepare("UPDATE drive_connections SET folder_id=?,revision=revision+1 WHERE teacher_id='A'").run(ROOT_B);
+ const count=f.calls.length;assert.equal((await f.call(a,'/api/drive/sync',{method:'POST',body:{}})).status,409);assert.equal(f.calls.length,count);
+ assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM web_sync_outbox').get().n,1);
+ f.sqlite.exec('DROP TRIGGER sync_academic_edits_update');
+ assert.equal((await(await f.call(a,'/api/drive/sync/status')).json()).data.ready,false);
 });
