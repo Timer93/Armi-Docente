@@ -86,3 +86,13 @@ El Worker solicita `skipDrivePreparation=true` en Login. El script `scripts/Armi
 Google puede requerir sesión y autorización de cookies/almacenamiento en cada navegador, especialmente en móviles. El flujo no acepta permisos por el usuario ni garantiza suprimir las pantallas de Google. La sesión de la aplicación móvil de Drive no reemplaza la sesión del navegador.
 
 El panel distingue «Ya uso ARMI en mi computadora» y «Empiezo en la web». La ruta habitual de Windows es una ayuda para encontrar una carpeta, no prueba de que ya exista. Un usuario nuevo puede crear una carpeta vacía en su propio Drive y seleccionarla. La web todavía no crea la estructura de sincronización ni sube archivos; no ofrecer botones que prometan esa función. Las referencias del servicio anterior y claves de configuración se muestran únicamente cuando la sesión tiene `admin.canViewUsage`; esto es presentación, no sustituye autorización de servidor.
+
+## Navegación y confirmación en móviles
+
+La vista de carpetas inicia con `setParent('root')` y `DocsViewMode.LIST`, para navegar desde Mi unidad por niveles; la búsqueda de Google puede mostrar resultados de otras ubicaciones. La vista para autorizar archivos inicia dentro de la carpeta ya vinculada. Este selector muestra Google Drive, no las carpetas locales del teléfono que no se hayan subido.
+
+Al seleccionar, la página aislada del selector confirma directamente la operación con el Worker, comprueba docente y revisión y muestra «Confirmando tu selección». No depende de que el navegador ejecute JavaScript en la pestaña de ARMI en segundo plano. Solo después del guardado envía `armi-drive-saved` a la pestaña principal y cierra. Hay una opción para volver a ARMI si el navegador impide el cierre; al recuperar el foco tras cerrar el selector, el panel consulta la vinculación. No hay sondeo periódico ni reintentos automáticos de escrituras.
+
+La vuelta en la misma pestaña registra la revisión confirmada y solo recarga el perfil: no repite el guardado. El Worker contrasta `x-armi-teacher-id` con la sesión actual para rechazar un cambio de cuenta durante la elección. El encabezado es una comprobación de consistencia, no un mecanismo de autenticación adicional. Las pruebas automatizadas cubren pérdida del opener, errores al guardar, cambio de revisión y doble selección. Falta confirmar en Brave móvil real: si el navegador abre directamente docs.google.com fuera de la página de ARMI, Google puede perder su canal de retorno y esta prueba no lo reproduce.
+
+Referencias: [Carpeta inicial](https://developers.google.com/workspace/drive/picker/reference/picker.docsview.setparent), [Vista de lista para permisos limitados](https://developers.google.com/workspace/drive/picker/reference/picker.docsview.setmode).

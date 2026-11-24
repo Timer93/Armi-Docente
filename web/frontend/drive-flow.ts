@@ -5,7 +5,7 @@ const key='armi-drive-flow';
 let nativeStorage:Storage|null=null;
 try{nativeStorage=window.sessionStorage;}catch{}
 export function driveFlowStorage():Storage{if(!nativeStorage)throw new Error('Permite el almacenamiento de ARMI en este navegador para continuar con Google.');return nativeStorage;}
-type Pending={kind:'connect'|'picker';teacherId:string;expiresAt:number;requestId?:string;mode?:'folder'|'files';revision?:number;email?:string};
+type Pending={kind:'connect'|'picker';teacherId:string;expiresAt:number;requestId?:string;mode?:'folder'|'files';revision?:number;email?:string;savedRevision?:number};
 export function saveDriveFlow(storage:Storage,value:Omit<Pending,'expiresAt'>,now=Date.now()){
  storage.setItem(key,JSON.stringify({...value,expiresAt:now+15*60*1000}));
 }
@@ -14,14 +14,15 @@ export function readDriveFlow(storage:Storage,now=Date.now()):Pending|null{
  storage.removeItem(key);return null;
 }
 export function clearDriveFlow(storage:Storage){storage.removeItem(key);}
-export function finishDrivePicker(storage:Storage,requestId:string,mode:string,ids:string[]){
+export function finishDrivePicker(storage:Storage,requestId:string,mode:string,ids:string[],savedRevision?:number){
  const pending=readDriveFlow(storage);
  if(pending?.kind!=='picker'||pending.requestId!==requestId||pending.mode!==mode)throw new Error('La selección venció. Abre Google Drive desde ARMI.');
- storage.setItem(key,JSON.stringify({...pending,ids:ids.filter(id=>/^[a-zA-Z0-9_-]{10,200}$/.test(id)).slice(0,20)}));
+ if(savedRevision!==undefined&&(!Number.isInteger(savedRevision)||savedRevision!==Number(pending.revision)+1))throw new Error('La conexión cambió. Regresa a ARMI.');
+ storage.setItem(key,JSON.stringify({...pending,...(savedRevision===undefined?{}:{savedRevision}),ids:ids.filter(id=>/^[a-zA-Z0-9_-]{10,200}$/.test(id)).slice(0,20)}));
 }
 export function takeDriveSelection(storage:Storage,teacherId:string,profile:{revision:number;email:string},now=Date.now()){
  const pending=readDriveFlow(storage,now) as (Pending&{ids?:string[]})|null;
  clearDriveFlow(storage);
- if(pending?.kind!=='picker'||pending.teacherId!==teacherId||pending.revision!==profile.revision||pending.email!==profile.email||!['folder','files'].includes(pending.mode||'')||!Array.isArray(pending.ids)||!pending.ids.length||pending.ids.length>20||pending.ids.some(id=>typeof id!=='string'||!/^[a-zA-Z0-9_-]{10,200}$/.test(id)))return null;
+ if(pending?.kind!=='picker'||pending.teacherId!==teacherId||(pending.savedRevision??pending.revision)!==profile.revision||pending.email!==profile.email||!['folder','files'].includes(pending.mode||'')||!Array.isArray(pending.ids)||!pending.ids.length||pending.ids.length>20||pending.ids.some(id=>typeof id!=='string'||!/^[a-zA-Z0-9_-]{10,200}$/.test(id)))return null;
  return pending;
 }

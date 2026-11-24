@@ -44,8 +44,8 @@ function fixture(t){
   if(url.searchParams.get('alt')==='media')return new Response(file.body,{headers:{'content-type':file.mimeType}});
   const {body,...metadata}=file;return Response.json(metadata);
  };
- const call=async(teacher,path,{method='GET',body}={})=>{
-  const request=new Request('https://web.armi.test'+path,{method,headers:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+ const call=async(teacher,path,{method='GET',body,headers={}}={})=>{
+  const request=new Request('https://web.armi.test'+path,{method,headers:{'content-type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body)});
   try{return await driveRoute(request,env,teacher,{requester,digest,randomToken:()=>crypto.randomUUID().replaceAll('-','')+crypto.randomUUID().replaceAll('-',''),now,readJson:r=>r.json()});}
   catch(error){if(!error.status)throw error;return Response.json({message:error.message,diagnostic:error.driveDiagnostic},{status:error.status});}
  };
@@ -148,6 +148,8 @@ test('limited Drive consent does not silently include old files, and Picker sele
  f.env.ARMI_GOOGLE_PICKER_API_KEY='AIza'+'a'.repeat(35);f.env.ARMI_GOOGLE_PROJECT_NUMBER='123456789012';
  const config=(await(await f.call(a,'/api/drive/picker-config')).json()).data;
  assert.equal(config.accessToken,'access-A');assert.ok(!JSON.stringify(config).includes('refresh-A'));
+ assert.equal(config.teacherId,a.id);assert.equal(config.revision,(await f.profile(a)).revision);
+ const rejected=await f.call(a,'/api/drive/folder',{method:'PUT',headers:{'x-armi-teacher-id':'B'},body:{folder:ROOT_A,revision:config.revision}});assert.equal(rejected.status,409);
  assert.equal((await f.profile(a)).pickerConfigured,true);
 });
 

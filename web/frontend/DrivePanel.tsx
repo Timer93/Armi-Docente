@@ -26,16 +26,22 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
  const connect=()=>void action(async()=>{const result=await academicApi('/api/drive/connect','POST',{});saveDriveFlow(driveFlowStorage(),{kind:'connect',teacherId:teacherId()});window.location.assign(result.authorizationUrl);});
  useEffect(()=>{
   const url=new URL(window.location.href),result=url.searchParams.get('armi-drive');
-  if(compact||!['connected','selected','cancelled'].includes(result||''))return;
+  if(compact||!['connected','selected','saved','linked','cancelled'].includes(result||''))return;
   url.searchParams.delete('armi-drive');history.replaceState(null,'',url.pathname+url.search+url.hash);
   setOpen(true);resetFiles();
   void action(async()=>{
    const current=await load();
-   if(result==='selected'){
+   if(result==='selected'||result==='saved'){
     const selection=takeDriveSelection(driveFlowStorage(),teacherId(),current);
     if(!selection)throw new Error('La cuenta o la conexión cambió. Elige la carpeta nuevamente.');
-    await applySelection(selection.mode!,selection.ids!,current);return;
+    if(result==='saved'){
+     if(selection.savedRevision===undefined)throw new Error('Vuelve a abrir Google Drive para comprobar la selección.');
+     if(current.folder)await browse(current.folder.id,current.folder.name);
+     setMessage('Tu carpeta quedó guardada. Ya puedes consultar sus archivos.');
+    }else await applySelection(selection.mode!,selection.ids!,current);
+    return;
    }
+   if(result==='linked'){clearDriveFlow(driveFlowStorage());setMessage(current.folder?'Tu carpeta quedó guardada. Ya puedes consultar sus archivos.':'Elige tu carpeta de trabajo para continuar.');return;}
    const pending=readDriveFlow(driveFlowStorage());clearDriveFlow(driveFlowStorage());
    if(result==='connected'){
     if(pending?.kind==='connect'&&pending.teacherId===teacherId()&&current.connected&&!current.folder&&current.pickerConfigured){select('folder',current,true);return;}
@@ -68,24 +74,30 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
   setError('');setMessage('');
   try{
    const requestId=crypto.randomUUID();
+   const pickerUrl='/api/drive/picker?mode='+mode+'&requestId='+requestId+'&revision='+current.revision+'&teacherId='+encodeURIComponent(teacherId());
    if(!sameTab){
-    const popup=window.open('/api/drive/picker?mode='+mode+'&requestId='+requestId,'armi-google-drive-picker','popup,width=1000,height=720');
+    const popup=window.open(pickerUrl,'armi-google-drive-picker','popup,width=1000,height=720');
     picker.current={window:popup,requestId,mode};
     if(!popup)setError('Permite abrir el selector de Google en una ventana nueva para conservar tu trabajo de ARMI.');
     return;
    }
    saveDriveFlow(driveFlowStorage(),{kind:'picker',teacherId:teacherId(),requestId,mode,revision:current.revision,email:current.email});
-   window.location.assign('/api/drive/picker?mode='+mode+'&requestId='+requestId+'&flow=tab');
+   window.location.assign(pickerUrl+'&flow=tab');
   }catch{setError('El navegador no permitió continuar. Habilita el almacenamiento de este sitio e intenta de nuevo.');}
  };
  useEffect(()=>{
   const selected=(event:MessageEvent)=>{
    const pending=picker.current,data=event.data;
-   if(!open||event.origin!==window.location.origin||!pending||event.source!==pending.window||data?.type!=='armi-drive-selected'||data.requestId!==pending.requestId||data.mode!==pending.mode||!Array.isArray(data.ids)||!data.ids.length||data.ids.length>20||data.ids.some((id:unknown)=>typeof id!=='string'||!/^[a-zA-Z0-9_-]{10,200}$/.test(id)))return;
+   if(!open||event.origin!==window.location.origin||!pending||event.source!==pending.window||!['armi-drive-selected','armi-drive-saved'].includes(data?.type)||data.requestId!==pending.requestId||data.mode!==pending.mode)return;
+   if(data.type==='armi-drive-saved'){
+    picker.current=null;void action(async()=>{resetFiles();const current=await load();if(current.folder)await browse(current.folder.id,current.folder.name);setMessage('Tu selección quedó guardada.');});return;
+   }
+   if(!Array.isArray(data.ids)||!data.ids.length||data.ids.length>20||data.ids.some((id:unknown)=>typeof id!=='string'||!/^[a-zA-Z0-9_-]{10,200}$/.test(id)))return;
    picker.current=null;
    void action(()=>applySelection(data.mode,data.ids,profile));
   };
-  window.addEventListener('message',selected);return()=>window.removeEventListener('message',selected);
+  const returned=()=>{if(open&&picker.current?.window?.closed){picker.current=null;void action(async()=>{resetFiles();await load();});}};
+  window.addEventListener('message',selected);window.addEventListener('focus',returned);return()=>{window.removeEventListener('message',selected);window.removeEventListener('focus',returned);};
  },[profile,open]);
  const applySelection=async(mode:'folder'|'files',ids:string[],current:any)=>{
     if(mode==='folder')await academicApi('/api/drive/folder','PUT',{folder:ids[0],revision:current.revision});

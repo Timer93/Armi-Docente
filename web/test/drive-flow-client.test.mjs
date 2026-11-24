@@ -24,3 +24,12 @@ test('same-tab continuation rejects changed teachers, revisions, Google accounts
  assert.throws(()=>api.finishDrivePicker(storage,'nonce','files',['selected-folder-123']));
  api.saveDriveFlow(storage,{kind:'connect',teacherId:'teacher-A'},1000);assert.equal(api.readDriveFlow(storage,1000+16*60*1000),null);
 });
+
+test('a selection saved inside Picker returns only to the matching committed revision',()=>{
+ const {api,storage}=fixture();
+ api.saveDriveFlow(storage,{kind:'picker',teacherId:'teacher-A',mode:'folder',requestId:'nonce',...profile});
+ assert.throws(()=>api.finishDrivePicker(storage,'nonce','folder',['selected-folder-123'],profile.revision+2));
+ api.finishDrivePicker(storage,'nonce','folder',['selected-folder-123'],profile.revision+1);
+ assert.equal(api.takeDriveSelection(storage,'teacher-A',{...profile,revision:profile.revision+1}).savedRevision,profile.revision+1);
+ assert.equal(api.takeDriveSelection(storage,'teacher-A',{...profile,revision:profile.revision+1}),null);
+});

@@ -96,6 +96,7 @@ async function unchanged(db,row){if(!await db.prepare('SELECT 1 FROM drive_conne
 
 export async function driveRoute(request,env,teacher,{readJson,digest,randomToken,now,requester}){
  const url=new URL(request.url),db=env.DB,ready=await driveReady(db),settings=config(env),picker=pickerConfig(env);
+ if(request.headers.has('x-armi-teacher-id')&&request.headers.get('x-armi-teacher-id')!==teacher.id)fail('La cuenta cambió. Regresa a ARMI y vuelve a elegir la carpeta.',409);
  if(url.pathname==='/api/drive/profile'&&request.method==='GET'){
   const row=ready?await db.prepare('SELECT google_email,folder_id,folder_name,mirror_verified,revision FROM drive_connections WHERE teacher_id=?').bind(teacher.id).first():null;
   const membership=JSON.parse(teacher.membership_json||'{}');
@@ -170,7 +171,7 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
   if(!picker.configured)fail('El administrador debe completar la configuración del selector de Google.',503);
   // Only the teacher's isolated Picker page receives a short-lived, per-file
   // access token. Never return refresh tokens or pass tokens to the parent page.
-  return Response.json({success:true,data:{accessToken:token,developerKey:picker.developerKey,appId:picker.appId,folderId:row.folder_id||null}});
+  return Response.json({success:true,data:{accessToken:token,developerKey:picker.developerKey,appId:picker.appId,folderId:row.folder_id||null,revision:row.revision,teacherId:teacher.id}});
  }
  if(url.pathname==='/api/drive/folder'&&request.method==='PUT'){
   const body=await readJson(request);if(Object.keys(body).some(k=>!['folder','revision'].includes(k))||body.revision!==row.revision)fail('La conexión cambió. Recarga su estado.',409);
