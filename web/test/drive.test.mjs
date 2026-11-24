@@ -151,6 +151,29 @@ test('limited Drive consent does not silently include old files, and Picker sele
  assert.equal((await f.profile(a)).pickerConfigured,true);
 });
 
+test('folder suggestions belong to each teacher; Picker config trims pasted whitespace and reports missing fields without secrets',async t=>{
+ const f=fixture(t),[a,b]=f.teachers;
+ a.membership_json=JSON.stringify({syncUserKey:'sync-a',driveFolderUrl:'https://drive.google.com/drive/folders/'+ROOT_A});
+ b.membership_json=JSON.stringify({syncUserKey:'sync-b'});
+ assert.equal((await f.profile(a)).suggestedFolder,'https://drive.google.com/drive/folders/'+ROOT_A);
+ assert.equal((await f.profile(a)).folder,null);assert.equal((await f.profile(b)).suggestedFolder,'');
+ assert.equal(f.calls.length,0,'A saved folder is only a suggestion, not an automatic Google grant');
+ assert.deepEqual((await f.profile(a)).pickerSetup,{apiKeyReady:false,projectNumberReady:false,projectMatchesClient:true});
+ await f.connect(a);
+ const key='AIza'+'a'.repeat(35);f.env.ARMI_GOOGLE_PICKER_API_KEY=' '+key+'\r\n';
+ f.env.ARMI_GOOGLE_PROJECT_NUMBER=' 938978696413\n';f.env.ARMI_GOOGLE_CLIENT_ID='938978696413-fixture.apps.googleusercontent.com';
+ assert.equal((await f.profile(a)).pickerConfigured,true);
+ const config=(await(await f.call(a,'/api/drive/picker-config')).json()).data;
+ assert.equal(config.developerKey,key);assert.equal(config.appId,'938978696413');
+ assert.ok(!JSON.stringify(await f.profile(a)).includes(key));
+ f.env.ARMI_GOOGLE_PROJECT_NUMBER='armi-docente-cloud';
+ assert.equal((await f.profile(a)).pickerSetup.projectNumberReady,false);assert.equal((await f.profile(a)).pickerConfigured,false);
+ f.env.ARMI_GOOGLE_PROJECT_NUMBER='111111111111';
+ assert.equal((await f.profile(a)).pickerSetup.projectMatchesClient,false);assert.equal((await f.call(a,'/api/drive/picker-config')).status,503);
+ f.env.ARMI_GOOGLE_PROJECT_NUMBER='938978696413';f.env.ARMI_GOOGLE_PICKER_API_KEY='not-a-google-key';
+ assert.equal((await f.profile(a)).pickerSetup.apiKeyReady,false);assert.equal((await f.profile(a)).pickerConfigured,false);
+});
+
 test('Drive never upgrades a limited authorization to broad Drive read access',async t=>{
  const f=fixture(t),[a]=f.teachers;f.provider.tokenScope='https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly';
  const result=await f.finish(a,await f.start(a));assert.equal(result.status,502);

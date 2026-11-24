@@ -8,6 +8,12 @@ const fileId=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{10,200}$/.test(valu
 const hex=bytes=>Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
 const unhex=value=>Uint8Array.from(value.match(/../g)||[],x=>parseInt(x,16));
 const scopeKey=value=>String(value||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9._-]+/g,'-').replace(/^-+|-+$/g,'');
+function pickerConfig(env){
+ const developerKey=String(env.ARMI_GOOGLE_PICKER_API_KEY||'').trim(),appId=String(env.ARMI_GOOGLE_PROJECT_NUMBER||'').trim();
+ const clientProject=String(env.ARMI_GOOGLE_CLIENT_ID||'').match(/^(\d+)-/)?.[1];
+ const setup={apiKeyReady:/^AIza[a-zA-Z0-9_-]{20,100}$/.test(developerKey),projectNumberReady:/^\d{6,30}$/.test(appId),projectMatchesClient:!clientProject||appId===clientProject};
+ return {developerKey,appId,setup,configured:Object.values(setup).every(Boolean)};
+}
 export async function driveReady(db){return (await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('drive_connections','drive_oauth_states')").all()).results.length===2;}
 function config(env){
  try{
@@ -86,10 +92,10 @@ function folderInput(value){
 async function unchanged(db,row){if(!await db.prepare('SELECT 1 FROM drive_connections WHERE teacher_id=? AND revision=?').bind(row.teacher_id,row.revision).first())fail('La conexión cambió en otra pestaña. Abre nuevamente el panel.',409);}
 
 export async function driveRoute(request,env,teacher,{readJson,digest,randomToken,now,requester}){
- const url=new URL(request.url),db=env.DB,ready=await driveReady(db),settings=config(env);
+ const url=new URL(request.url),db=env.DB,ready=await driveReady(db),settings=config(env),picker=pickerConfig(env);
  if(url.pathname==='/api/drive/profile'&&request.method==='GET'){
   const row=ready?await db.prepare('SELECT google_email,folder_id,folder_name,mirror_verified,revision FROM drive_connections WHERE teacher_id=?').bind(teacher.id).first():null;
-  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:/^AIza[a-zA-Z0-9_-]{20,100}$/.test(env.ARMI_GOOGLE_PICKER_API_KEY||'')&&/^\d{6,30}$/.test(env.ARMI_GOOGLE_PROJECT_NUMBER||''),connected:Boolean(row),email:row?.google_email||'',suggestedFolder:JSON.parse(teacher.membership_json||'{}').driveFolderUrl||'',folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:true}});
+  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:JSON.parse(teacher.membership_json||'{}').driveFolderUrl||'',folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:true}});
  }
  if(!ready)fail('Falta activar 0012_drive_connection.sql en D1.',503,'DRIVE-DATOS');
  if(!settings)fail('El administrador debe configurar la conexión de Google Drive para ARMI Web.',503,'DRIVE-CONFIG');
@@ -147,10 +153,10 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  const token=await accessToken(env,row,requester,now);
  if(url.pathname==='/api/drive/picker'&&request.method==='GET')return env.ASSETS.fetch(new Request(new URL('/drive-picker.html',url),request));
  if(url.pathname==='/api/drive/picker-config'&&request.method==='GET'){
-  if(!/^AIza[a-zA-Z0-9_-]{20,100}$/.test(env.ARMI_GOOGLE_PICKER_API_KEY||'')||!/^\d{6,30}$/.test(env.ARMI_GOOGLE_PROJECT_NUMBER||''))fail('El administrador debe completar la configuración del selector de Google.',503);
+  if(!picker.configured)fail('El administrador debe completar la configuración del selector de Google.',503);
   // Only the teacher's isolated Picker page receives a short-lived, per-file
   // access token. Never return refresh tokens or pass tokens to the parent page.
-  return Response.json({success:true,data:{accessToken:token,developerKey:env.ARMI_GOOGLE_PICKER_API_KEY,appId:env.ARMI_GOOGLE_PROJECT_NUMBER,folderId:row.folder_id||null}});
+  return Response.json({success:true,data:{accessToken:token,developerKey:picker.developerKey,appId:picker.appId,folderId:row.folder_id||null}});
  }
  if(url.pathname==='/api/drive/folder'&&request.method==='PUT'){
   const body=await readJson(request);if(Object.keys(body).some(k=>!['folder','revision'].includes(k))||body.revision!==row.revision)fail('La conexión cambió. Recarga su estado.',409);

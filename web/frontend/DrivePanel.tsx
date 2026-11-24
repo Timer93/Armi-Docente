@@ -1,14 +1,39 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
+import {Check,ChevronRight,Download,ExternalLink,FileText,FolderOpen,Image as ImageIcon,Link2,LoaderCircle,RefreshCw,ShieldCheck,X} from 'lucide-react';
 import {academicApi} from './academic-client';
+import './drive-panel.css';
+
+const folderType='application/vnd.google-apps.folder';
+const images=['image/png','image/jpeg','image/gif','image/webp'];
+function DriveMark(){return <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#0f9d58" d="M18 4h12L14 32H2z"/><path fill="#fbbc04" d="M30 4l16 28H34L18 4z"/><path fill="#4285f4" d="M2 32h44l-6 11H8z"/></svg>;}
+function sizeLabel(value:string){const size=Number(value);return !Number.isFinite(size)||size<=0?'Archivo':size<1048576?`${Math.max(1,Math.round(size/1024))} KB`:`${(size/1048576).toFixed(1)} MB`;}
 
 export function DrivePanel({compact=false}:{compact?:boolean}){
- const [open,setOpen]=useState(false),[profile,setProfile]=useState<any>(null),[folder,setFolder]=useState(''),[files,setFiles]=useState<any[]>([]),[path,setPath]=useState<any[]>([]),[page,setPage]=useState<string|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[preview,setPreview]=useState<any>(null);
- const picker=useRef<{window:Window|null;requestId:string}|null>(null);
- const action=async(fn:()=>Promise<unknown>)=>{setBusy(true);setMessage('');try{await fn();}catch(error){setMessage((error as Error).message);}finally{setBusy(false);}};
- const load=async()=>{const value=await academicApi('/api/drive/profile');setProfile(value);if(!value.folder&&value.suggestedFolder)setFolder(value.suggestedFolder);return value;};
- const show=()=>{setOpen(true);setPreview(null);void action(async()=>{setFiles([]);setPath([]);setPage(null);await load();});};
+ const [open,setOpen]=useState(false),[profile,setProfile]=useState<any>(null),[folder,setFolder]=useState(''),[files,setFiles]=useState<any[]>([]),[path,setPath]=useState<any[]>([]),[page,setPage]=useState<string|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState(''),[preview,setPreview]=useState<any>(null);
+ const picker=useRef<{window:Window|null;requestId:string;mode:'folder'|'files'}|null>(null),panel=useRef<HTMLElement|null>(null);
+ const resetFiles=()=>{setFiles([]);setPath([]);setPage(null);setPreview(null);};
+ const action=async(fn:()=>Promise<unknown>)=>{setBusy(true);setMessage('');setError('');try{await fn();}catch(error){setError((error as Error).message);}finally{setBusy(false);}};
+ const load=async()=>{const value=await academicApi('/api/drive/profile');setProfile(value);setFolder(value.folder?'https://drive.google.com/drive/folders/'+value.folder.id:value.suggestedFolder||'');return value;};
+ const show=()=>{setOpen(true);setProfile(null);resetFiles();void action(load);};
+ const close=()=>{setOpen(false);setPreview(null);picker.current=null;};
+ const connect=()=>void action(async()=>{const result=await academicApi('/api/drive/connect','POST',{});window.location.assign(result.authorizationUrl);});
  useEffect(()=>{const url=new URL(window.location.href);if(!compact&&url.searchParams.get('armi-drive')==='connected'){url.searchParams.delete('armi-drive');history.replaceState(null,'',url.pathname+url.search+url.hash);show();}},[]);
+ useEffect(()=>{
+  if(!open)return;
+  const previous=document.activeElement as HTMLElement,overflow=document.body.style.overflow;document.body.style.overflow='hidden';
+  panel.current?.querySelector<HTMLElement>('#drive-heading')?.focus();
+  const keydown=(event:KeyboardEvent)=>{
+   if(event.key==='Escape'){event.preventDefault();close();return;}
+   if(event.key!=='Tab')return;
+   const elements=Array.from(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),summary,[tabindex="0"]')||[]).filter(element=>element.getClientRects().length>0);
+   const first=elements[0],last=elements.at(-1);
+   if(event.shiftKey&&(document.activeElement===first||!elements.includes(document.activeElement as HTMLElement))){event.preventDefault();last?.focus();}
+   else if(!event.shiftKey&&(document.activeElement===last||!elements.includes(document.activeElement as HTMLElement))){event.preventDefault();first?.focus();}
+  };
+  document.addEventListener('keydown',keydown);
+  return()=>{document.body.style.overflow=overflow;document.removeEventListener('keydown',keydown);previous?.focus();};
+ },[open]);
  const browse=async(id:string,name:string,more=false)=>{
   const result=await academicApi('/api/drive/files?parent='+encodeURIComponent(id)+(more&&page?'&pageToken='+encodeURIComponent(page):''));
   setFiles(old=>more?[...old,...result.files]:result.files);setPage(result.nextPageToken);setPreview(null);
@@ -16,58 +41,55 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
  };
  const fileUrl=(file:any,inline=false)=>'/api/drive/content?file='+encodeURIComponent(file.id)+(inline?'&preview=1':'');
  const select=(mode:'folder'|'files')=>{
-  const requestId=crypto.randomUUID(),popup=window.open('/api/drive/picker?mode='+mode+'&requestId='+requestId,'armi-google-drive-picker','popup,width=1000,height=720');
-  picker.current={window:popup,requestId};if(!popup)setMessage('Permite la ventana emergente para abrir el selector de Google.');
+  setError('');setMessage('');const requestId=crypto.randomUUID(),popup=window.open('/api/drive/picker?mode='+mode+'&requestId='+requestId,'armi-google-drive-picker','popup,width=1000,height=720');
+  picker.current={window:popup,requestId,mode};if(!popup)setError('Permite la ventana emergente para abrir el selector de Google.');
  };
  useEffect(()=>{
   const selected=(event:MessageEvent)=>{
    const pending=picker.current,data=event.data;
-   if(event.origin!==window.location.origin||!pending||event.source!==pending.window||data?.type!=='armi-drive-selected'||data.requestId!==pending.requestId||!Array.isArray(data.ids))return;
+   if(!open||event.origin!==window.location.origin||!pending||event.source!==pending.window||data?.type!=='armi-drive-selected'||data.requestId!==pending.requestId||data.mode!==pending.mode||!Array.isArray(data.ids)||!data.ids.length)return;
    picker.current=null;
    void action(async()=>{
     if(data.mode==='folder')await academicApi('/api/drive/folder','PUT',{folder:data.ids[0],revision:profile.revision});
     else if(data.mode==='files'&&profile.folder){await academicApi('/api/drive/selection','POST',{ids:data.ids});await academicApi('/api/drive/folder','PUT',{folder:profile.folder.id,revision:profile.revision});}
     else throw new Error('Vincula primero la carpeta de este docente.');
-    setFiles([]);setPath([]);setPage(null);setPreview(null);const current=await load();
-    if(current.folder)await browse(current.folder.id,current.folder.name);
+    resetFiles();const current=await load();if(current.folder)await browse(current.folder.id,current.folder.name);
     setMessage('Selección comprobada. Se muestran únicamente archivos que Google autorizó para ARMI.');
    });
   };
   window.addEventListener('message',selected);return()=>window.removeEventListener('message',selected);
- },[profile]);
+ },[profile,open]);
+ const connected=Boolean(profile?.connected),linked=Boolean(profile?.folder),available=profile?.ready&&profile?.configured;
  return <><button type="button" className={compact?'text-[9px] text-slate-500':''} onClick={show}>Google Drive</button>
- {open&&createPortal(<div className="web-ai-overlay"><section className="web-ai-panel drive-panel" role="dialog" aria-modal="true" aria-labelledby="drive-heading">
-  <h2 id="drive-heading">Mi Google Drive</h2>
-  <p>Conecta tu cuenta y elige la carpeta de archivos de este docente.</p>
-  {!profile?<p>Cargando conexión…</p>:!profile.ready?<p role="status">El administrador debe activar la conexión de Drive en la base de datos.</p>:!profile.configured?<p role="status">Falta configurar el acceso de Google para ARMI Web. Tus datos actuales siguen guardados en la web.</p>:<>
-   <p><strong>{profile.connected?'Cuenta vinculada: '+profile.email:'Cuenta de Google sin conectar'}</strong></p>
-   <p>Comparte con ARMI únicamente la carpeta y los archivos que elijas.</p>
-   {!profile.connected&&<button type="button" disabled={busy} onClick={()=>void action(async()=>{const result=await academicApi('/api/drive/connect','POST',{});window.location.assign(result.authorizationUrl);})}>Conectar mi Google Drive</button>}
-   {profile.connected&&<>
-    {profile.pickerConfigured?<button type="button" disabled={busy} onClick={()=>select('folder')}>{profile.folder?'Cambiar carpeta':'Elegir carpeta con Google'}</button>:<p>El administrador debe completar la configuración del selector de Google para autorizar archivos existentes.</p>}
-    <details><summary>Usar el enlace de una carpeta ya autorizada</summary><label>Enlace de la carpeta<input type="url" value={folder} placeholder="https://drive.google.com/drive/folders/…" onChange={event=>setFolder(event.target.value)}/></label>
-    <button type="button" disabled={busy||!folder.trim()} onClick={()=>void action(async()=>{await academicApi('/api/drive/folder','PUT',{folder:folder.trim(),revision:profile.revision});setFolder('');setFiles([]);setPath([]);setPage(null);setPreview(null);await load();setMessage('Carpeta vinculada. Ya puedes consultar sus archivos.');})}>Vincular carpeta existente</button></details>
-    {profile.folder&&<>
-     <p><strong>{profile.folder.name}</strong><br/>{profile.folder.mirrorVerified?'La identidad de la carpeta espejo coincide con este docente.':'La carpeta permite consultar archivos; todavía no se confirmó como carpeta espejo de este docente.'}</p>
-     <button type="button" disabled={busy} onClick={()=>void action(async()=>{setPath([]);await browse(profile.folder.id,profile.folder.name);})}>Ver archivos de Drive</button>
-     <button type="button" disabled={busy||!profile.pickerConfigured} onClick={()=>select('files')}>Autorizar archivos o carpetas existentes</button>
-     <p>Si faltan archivos, autorízalos con Google. Una lista incompleta no significa que se hayan borrado.</p>
-     {path.length>0&&<nav aria-label="Carpeta de Drive">{path.map(item=><button type="button" key={item.id} disabled={busy} onClick={()=>void action(()=>browse(item.id,item.name))}>{item.name}</button>)}</nav>}
-     {path.length>0&&files.length===0&&!busy&&<p>No hay archivos autorizados visibles en esta carpeta. Puede contener otros archivos que todavía no compartiste con ARMI.</p>}
-     <ul className="drive-files">{files.map(file=><li key={file.id}><strong>{file.name}</strong>{file.mimeType==='application/vnd.google-apps.folder'?<button type="button" disabled={busy} onClick={()=>void action(()=>browse(file.id,file.name))}>Abrir carpeta</button>:<>
-      {['image/png','image/jpeg','image/gif','image/webp'].includes(file.mimeType)&&<button type="button" disabled={busy} onClick={()=>setPreview(file)}>Vista previa</button>}
-      {file.mimeType==='application/pdf'&&<a href={fileUrl(file,true)} target="_blank" rel="noreferrer">Ver PDF</a>}
-      {!file.mimeType.startsWith('application/vnd.google-apps.')&&<a href={fileUrl(file)} target="_blank" rel="noreferrer">Descargar</a>}
-     </>}</li>)}</ul>
-     {page&&<button type="button" disabled={busy} onClick={()=>void action(()=>browse(path.at(-1).id,path.at(-1).name,true))}>Ver más archivos</button>}
-     {preview&&<figure><figcaption>{preview.name}</figcaption><img alt={preview.name} src={fileUrl(preview,true)} onError={()=>setMessage('No se pudo abrir la imagen. Revisa los permisos o vuelve a conectar Google.')}/><button type="button" onClick={()=>setPreview(null)}>Cerrar vista previa</button></figure>}
-    </>}
-    <details><summary>Opciones de conexión</summary><button type="button" disabled={busy} onClick={()=>void action(async()=>{const result=await academicApi('/api/drive/connect','POST',{});window.location.assign(result.authorizationUrl);})}>Volver a conectar Google</button><button type="button" disabled={busy} onClick={()=>void action(async()=>{await academicApi('/api/drive/connection','DELETE',{revision:profile.revision});setFiles([]);setPath([]);setPreview(null);setPage(null);await load();})}>Desvincular de ARMI Web</button></details>
+ {open&&createPortal(<div className="drive-overlay"><section ref={panel} className="drive-panel" role="dialog" aria-modal="true" aria-labelledby="drive-heading" aria-describedby="drive-description" aria-busy={busy}>
+  <header className="drive-heading"><div className="drive-brand"><span className="drive-brand-icon"><DriveMark/></span><div><span className="drive-eyebrow">TU ESPACIO DE ARCHIVOS</span><h2 id="drive-heading" tabIndex={-1}>Mi Google Drive</h2></div></div><button type="button" className="drive-icon-button" aria-label="Cerrar Google Drive" onClick={close}><X size={21}/></button></header>
+  <p id="drive-description" className="drive-description">Tu cuenta, tu carpeta y tus archivos. Tú eliges qué compartir con ARMI.</p>
+  <ol className="drive-steps" aria-label="Configuración de Google Drive">{[['Cuenta',connected],['Carpeta',linked],['Archivos',false]].map(([name,done],index)=><li key={String(name)} className={done?'is-complete':(index===0&&!connected||index===1&&connected&&!linked||index===2&&linked)?'is-current':''}><span>{done?<Check size={15}/>:index+1}</span>{String(name)}</li>)}</ol>
+  <div className="drive-content">
+  {!profile?<div className="drive-empty"><LoaderCircle className="drive-spinner" size={26}/><p>Cargando conexión…</p>{!busy&&error&&<button type="button" onClick={()=>void action(load)}>Reintentar</button>}</div>:!available?<div className="drive-callout" role="status"><ShieldCheck size={22}/><div><strong>La conexión necesita preparación</strong><p>{!profile.ready?'El administrador debe activar la conexión de Drive en la base de datos.':'Falta configurar el acceso de Google para ARMI Web. Tus datos actuales siguen guardados en la web.'}</p><button type="button" disabled={busy} onClick={()=>void action(load)}><RefreshCw size={15}/>Comprobar de nuevo</button></div></div>:<>
+   <section className={'drive-account '+(connected?'is-connected':'')} aria-label="Cuenta de Google"><span className="drive-account-icon"><DriveMark/></span><div><span className="drive-label">{connected?'CUENTA CONECTADA':'PRIMER PASO'}</span><strong>{connected?profile.email:'Conecta tu Google Drive'}</strong><p>{connected?'Esta cuenta autoriza el acceso a tus archivos.':'Usa la cuenta donde guardas tus materiales o tu carpeta espejo.'}</p></div>{connected?<span className="drive-badge"><Check size={14}/>Conectada</span>:<button type="button" className="drive-primary" disabled={busy} onClick={connect}>Conectar mi Google Drive<ChevronRight size={17}/></button>}</section>
+   {connected&&<>
+    <section className="drive-folder-card" aria-labelledby="drive-folder-heading"><div className="drive-section-heading"><span className="drive-folder-icon"><FolderOpen size={24}/></span><div><span className="drive-label">{linked?'CARPETA VINCULADA':'SIGUIENTE PASO'}</span><h3 id="drive-folder-heading">{linked?profile.folder.name:'Elige tu carpeta de trabajo'}</h3></div></div>
+     {linked?<><p>{profile.folder.mirrorVerified?'La identidad de la carpeta espejo coincide con este docente.':'Carpeta vinculada. La identidad del espejo de Windows aún no está confirmada.'}</p><div className="drive-actions"><button type="button" className="drive-primary" disabled={busy} onClick={()=>void action(async()=>{setPath([]);await browse(profile.folder.id,profile.folder.name);})}><FolderOpen size={17}/>Ver archivos de Drive</button>{profile.pickerConfigured&&<button type="button" disabled={busy} onClick={()=>select('folder')}>Cambiar carpeta</button>}</div></>:<>
+      <p>{profile.suggestedFolder?'Encontramos un enlace de carpeta en tu cuenta de ARMI. Es una sugerencia: Google debe autorizarla antes de vincularla.':'Todavía no hay una carpeta vinculada. Puedes elegir una carpeta existente de tu Google Drive.'}</p>
+      {profile.suggestedFolder&&<div className="drive-suggestion"><Link2 size={19}/><div><strong>Carpeta sugerida por tu cuenta</strong><a href={profile.suggestedFolder} target="_blank" rel="noreferrer">Ver en Google Drive<ExternalLink size={13}/></a><small>Puedes elegir esa carpeta u otra que tengas autorizada.</small></div></div>}
+      {profile.pickerConfigured&&<button type="button" className="drive-primary" disabled={busy} onClick={()=>select('folder')}><FolderOpen size={18}/>Elegir carpeta con Google<ChevronRight size={17}/></button>}
+     </>}
+     {!profile.pickerConfigured&&<div className="drive-setup-notice"><strong>El selector de carpetas aún no está listo</strong><p>Tu cuenta ya está conectada. Falta completar una configuración de ARMI para que puedas elegir una carpeta con Google.</p><button type="button" disabled={busy} onClick={()=>void action(load)}><RefreshCw size={15}/>Comprobar de nuevo</button><details><summary>Detalle para el administrador</summary><ul>{profile.pickerSetup&&!profile.pickerSetup.apiKeyReady&&<li>Revisar el valor de ARMI_GOOGLE_PICKER_API_KEY: falta o no tiene el formato esperado.</li>}{profile.pickerSetup&&!profile.pickerSetup.projectNumberReady&&<li>Revisar ARMI_GOOGLE_PROJECT_NUMBER: debe contener el número del proyecto, solo dígitos.</li>}{profile.pickerSetup&&profile.pickerSetup.projectNumberReady&&!profile.pickerSetup.projectMatchesClient&&<li>El número de proyecto no coincide con el cliente OAuth configurado.</li>}{!profile.pickerSetup&&<li>Revisar la clave de Google Picker y el número del proyecto en Cloudflare.</li>}</ul></details></div>}
+     <details className="drive-details"><summary><Link2 size={15}/>Vincular mediante un enlace ya autorizado</summary><div><p>Pegar un enlace no concede permisos. Usa esta opción si Google ya autorizó esa carpeta para ARMI.</p><label htmlFor="drive-folder-link">Enlace de la carpeta</label><input id="drive-folder-link" type="url" value={folder} placeholder="https://drive.google.com/drive/folders/…" onChange={event=>setFolder(event.target.value)}/><button type="button" disabled={busy||!folder.trim()} onClick={()=>void action(async()=>{await academicApi('/api/drive/folder','PUT',{folder:folder.trim(),revision:profile.revision});resetFiles();await load();setMessage('Carpeta vinculada. Ya puedes consultar sus archivos.');})}>Vincular carpeta existente</button></div></details>
+    </section>
+    {linked&&<section className="drive-library" aria-labelledby="drive-files-heading"><div className="drive-section-heading"><FileText size={22}/><div><span className="drive-label">TUS MATERIALES</span><h3 id="drive-files-heading">Archivos autorizados</h3></div>{profile.pickerConfigured&&<button type="button" disabled={busy} onClick={()=>select('files')}>Autorizar archivos o carpetas existentes</button>}</div><p className="drive-muted">¿Falta algún archivo? Compártelo con ARMI desde el selector. Una lista incompleta no significa que se haya borrado.</p>
+     {path.length>0?<><nav className="drive-breadcrumbs" aria-label="Carpeta de Drive">{path.map(item=><button type="button" key={item.id} disabled={busy} onClick={()=>void action(()=>browse(item.id,item.name))}><FolderOpen size={14}/>{item.name}<ChevronRight size={13}/></button>)}</nav>
+     {!files.length&&!busy&&<div className="drive-empty"><FolderOpen size={29}/><strong>No hay archivos autorizados visibles</strong><p>Esta carpeta puede contener archivos que todavía no compartiste con ARMI.</p></div>}
+     <ul className="drive-file-list">{files.map(file=><li key={file.id}><span className="drive-file-icon">{file.mimeType===folderType?<FolderOpen size={23}/>:images.includes(file.mimeType)?<ImageIcon size={23}/>:<FileText size={23}/>}</span><div className="drive-file-name"><strong>{file.name}</strong><small>{file.mimeType===folderType?'Carpeta':sizeLabel(file.size)}</small></div><div className="drive-file-actions">{file.mimeType===folderType?<button type="button" disabled={busy} onClick={()=>void action(()=>browse(file.id,file.name))}>Abrir carpeta<ChevronRight size={16}/></button>:<>{images.includes(file.mimeType)&&<button type="button" disabled={busy} onClick={()=>setPreview(file)}>Vista previa</button>}{file.mimeType==='application/pdf'&&<a href={fileUrl(file,true)} target="_blank" rel="noreferrer">Ver PDF<ExternalLink size={14}/></a>}{!file.mimeType.startsWith('application/vnd.google-apps.')&&<a href={fileUrl(file)} target="_blank" rel="noreferrer"><Download size={15}/>Descargar</a>}</>}</div></li>)}</ul>{page&&<button type="button" disabled={busy} onClick={()=>void action(()=>browse(path.at(-1).id,path.at(-1).name,true))}>Ver más archivos</button>}</>:<p className="drive-muted">Pulsa «Ver archivos de Drive» para consultar el contenido autorizado.</p>}
+     {preview&&<figure className="drive-preview"><figcaption><strong>{preview.name}</strong><button type="button" onClick={()=>setPreview(null)}>Cerrar vista previa<X size={15}/></button></figcaption><img alt={preview.name} src={fileUrl(preview,true)} onError={()=>setError('No se pudo abrir la imagen. Revisa los permisos o vuelve a conectar Google.')}/></figure>}
+    </section>}
+    <details className="drive-details drive-connection-options"><summary>Opciones de conexión</summary><div><p>Puedes cambiar la cuenta de Google o desvincularla. Desvincular no elimina tus archivos de Drive.</p><div className="drive-actions"><button type="button" disabled={busy} onClick={connect}><RefreshCw size={15}/>Volver a conectar Google</button><button type="button" className="drive-danger" disabled={busy} onClick={()=>void action(async()=>{await academicApi('/api/drive/connection','DELETE',{revision:profile.revision});resetFiles();await load();setMessage('Cuenta desvinculada. Tus archivos permanecen en Google Drive.');})}>Desvincular de ARMI Web</button></div></div></details>
    </>}
   </>}
-  <p className="drive-stage-note">Puedes consultar y descargar archivos. La subida y la sincronización con Windows siguen pendientes. <a href="/privacidad" target="_blank" rel="noreferrer">Privacidad y uso de datos</a> · <a href="/condiciones" target="_blank" rel="noreferrer">Condiciones del Servicio</a>.</p>
-  {message&&<p role="status">{message}</p>}
-  <footer><button type="button" disabled={busy} onClick={()=>{setOpen(false);setPreview(null);}}>Cerrar</button></footer>
+  {busy&&profile&&<p className="drive-progress" role="status"><LoaderCircle size={17} className="drive-spinner"/>Procesando…</p>}{message&&<p className="drive-feedback is-success" role="status"><Check size={18}/>{message}</p>}{error&&<p className="drive-feedback is-error" role="alert">{error}</p>}
+  <div className="drive-stage-note"><ShieldCheck size={19}/><p>Consulta y descarga disponibles al vincular tu carpeta. <strong>La subida y la sincronización con Windows siguen pendientes.</strong></p></div>
+  </div><footer className="drive-footer"><nav aria-label="Privacidad de Drive"><a href="/privacidad" target="_blank" rel="noreferrer">Privacidad</a><span>·</span><a href="/condiciones" target="_blank" rel="noreferrer">Condiciones</a></nav><button type="button" onClick={close}>Cerrar</button></footer>
  </section></div>,document.body)}
  </>;
 }

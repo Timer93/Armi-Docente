@@ -8,6 +8,8 @@ El código solicita `drive.file openid email`. Rechaza autorizaciones que incluy
 
 Elegir una carpeta **no demuestra que todos sus archivos estén autorizados**. La lista solo muestra los archivos que Google devuelve para ARMI. El docente puede pulsar **Autorizar archivos o carpetas existentes**. Una lista vacía no se interpreta como eliminación, no se escribe en Windows y no permite activar una importación automática. Los archivos nuevos creados fuera de ARMI también deben comprobarse; no anunciar sincronización completa por seleccionar la carpeta.
 
+El panel separa **Cuenta → Carpeta → Archivos**. Si Apps Script devuelve un enlace válido de carpeta para la cuenta autenticada, aparece como sugerencia; no hay un enlace fijo para un docente concreto, ni se escanea todo su Drive por nombre. La carpeta solo queda vinculada al seleccionarla y pasar las comprobaciones del servidor. Si no existe sugerencia, el usuario puede elegir una carpeta con Google Picker. Si falta su configuración, **Detalle para el administrador** identifica la clave o el número de proyecto que hay que revisar, sin mostrar valores secretos. Se eliminan espacios al principio o final de estos dos valores y se comprueba que el número de proyecto corresponda al prefijo numérico del cliente OAuth.
+
 ## Configuración administrativa, una vez para ARMI
 
 1. Crear un proyecto llamado **ARMI Docente** en [Google Cloud](https://console.cloud.google.com/projectcreate), sin vincular cuenta de facturación ni contratar la prueba de pago. La facturación no es un paso de este procedimiento.
