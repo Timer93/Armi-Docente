@@ -4,6 +4,7 @@ import {Check,ChevronRight,Download,ExternalLink,FileText,FolderOpen,Image as Im
 import {academicApi} from './academic-client';
 import {getWebIdentity} from './runtime';
 import {driveFlowStorage,clearDriveFlow,readDriveFlow,saveDriveFlow,takeDriveSelection} from './drive-flow';
+import {prepareDriveUpload,transferDriveUpload,type DriveTransfer} from './drive-upload-client';
 import './drive-panel.css';
 
 const folderType='application/vnd.google-apps.folder';
@@ -15,6 +16,8 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
  const [open,setOpen]=useState(false),[profile,setProfile]=useState<any>(null),[folder,setFolder]=useState(''),[files,setFiles]=useState<any[]>([]),[path,setPath]=useState<any[]>([]),[page,setPage]=useState<string|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState(''),[preview,setPreview]=useState<any>(null);
  const panel=useRef<HTMLElement|null>(null),picker=useRef<{window:Window|null;requestId:string;mode:'folder'|'files'}|null>(null);
  const [folderStart,setFolderStart]=useState<'desktop'|'web'>('desktop');
+ const [uploadFile,setUploadFile]=useState<File|null>(null),[transfer,setTransfer]=useState<DriveTransfer|null>(null),[uploadDestination,setUploadDestination]=useState<any>(null),[uploadLabel,setUploadLabel]=useState('');
+ const fileInput=useRef<HTMLInputElement|null>(null);
  const isAdmin=Boolean(getWebIdentity()?.admin?.canViewUsage);
  const teacherId=()=>getWebIdentity()?.user.id||'';
  const resetFiles=()=>{setFiles([]);setPath([]);setPage(null);setPreview(null);};
@@ -69,6 +72,26 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
   setFiles(old=>more?[...old,...result.files]:result.files);setPage(result.nextPageToken);setPreview(null);
   if(!more)setPath(old=>{const index=old.findIndex(item=>item.id===id);return index>=0?old.slice(0,index+1):[...old,{id,name}];});
  };
+ const chooseUpload=(file:File|null)=>{
+  if(!file)return;
+  setError('');setMessage('');
+  if(file.size<1||file.size>(profile?.uploadMaxBytes||5_000_000)){setError('Selecciona un archivo con contenido de hasta 5 MB.');return;}
+  const destination=path.at(-1)||profile.folder;
+  setUploadFile(file);setTransfer(null);setUploadDestination({teacherId:teacherId(),revision:profile.revision,parent:destination.id,parentName:destination.name});
+ };
+ const sendUpload=(statusOnly=false)=>void action(async()=>{
+  if(!uploadFile||!uploadDestination)return;
+  try{
+   let current=transfer;
+   if(!current){setUploadLabel('Preparando archivo…');current=await prepareDriveUpload(uploadFile,uploadDestination,{api:academicApi,owner:teacherId});setTransfer(current);}
+   setUploadLabel(statusOnly?'Comprobando subida…':'Subiendo archivo a Drive…');
+   const result=await transferDriveUpload(current,statusOnly,{owner:teacherId});
+   if(!result.uploaded){setMessage('Google aún no registra este archivo. Puedes reintentar la misma subida.');return;}
+   setUploadFile(null);setTransfer(null);setUploadDestination(null);
+   await browse(current.context.parent,current.context.parentName);
+   setMessage('Archivo guardado en Google Drive. También estará en esa carpeta de tu computadora cuando Google Drive termine de descargarlo.');
+  }finally{setUploadLabel('');}
+ });
  const fileUrl=(file:any,inline=false)=>'/api/drive/content?file='+encodeURIComponent(file.id)+(inline?'&preview=1':'');
  const select=(mode:'folder'|'files',current=profile,sameTab=false)=>{
   setError('');setMessage('');
@@ -122,7 +145,7 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
      {linked?<><div className="drive-root-location"><span className="drive-label">CARPETA RAÍZ DE ESTE DOCENTE</span><strong>{profile.folder.name}</strong><a href={profile.folder.url} target="_blank" rel="noreferrer">{profile.folder.url}<ExternalLink size={13}/></a><button type="button" disabled={busy} onClick={()=>copyFolder(profile.folder.url)}>Copiar enlace</button></div><p>{profile.folder.mirrorVerified?'Esta es la misma carpeta de ARMI que utilizas en tu computadora.':'Esta carpeta ya está seleccionada para tu cuenta de ARMI.'}</p><div className="drive-actions"><button type="button" className="drive-primary" disabled={busy||profile.requiresReauthorization} onClick={()=>void action(async()=>{setPath([]);await browse(profile.folder.id,profile.folder.name);})}><FolderOpen size={17}/>Ver archivos de Drive</button>{profile.pickerConfigured&&<button type="button" disabled={busy} onClick={()=>select('folder')}>Cambiar carpeta</button>}</div></>:<>
       <p className="drive-unselected">Todavía no has seleccionado una carpeta.</p>
       <fieldset className="drive-start-options"><legend>¿Cómo quieres empezar?</legend><label><input type="radio" name="drive-folder-start" value="desktop" checked={folderStart==='desktop'} onChange={()=>setFolderStart('desktop')}/>Ya uso ARMI en mi computadora</label><label><input type="radio" name="drive-folder-start" value="web" checked={folderStart==='web'} onChange={()=>setFolderStart('web')}/>Empiezo en la web</label></fieldset>
-      {folderStart==='desktop'?<><p>Elige en Google Drive la misma carpeta que utilizas con ARMI en tu computadora.</p><div className="drive-root-location"><span className="drive-label">BUSCA ESTA CARPETA</span><strong>{profile.expectedMirrorName}</strong><small>Normalmente se encuentra dentro de {profile.expectedMirrorPath}. La ubicación puede variar según lo que elegiste en tu computadora.</small></div></>:<div className="drive-new-folder"><p>Elige una carpeta propia para tus materiales. Si todavía no tienes una, crea una carpeta vacía en Google Drive y después selecciónala aquí.</p><a href="https://drive.google.com/drive/my-drive" target="_blank" rel="noreferrer">Abrir Google Drive<ExternalLink size={14}/></a><p>Por ahora ARMI permite consultar archivos. La creación automática de carpetas y la subida de archivos aún no están disponibles.</p></div>}
+      {folderStart==='desktop'?<><p>Elige en Google Drive la misma carpeta que utilizas con ARMI en tu computadora.</p><div className="drive-root-location"><span className="drive-label">BUSCA ESTA CARPETA</span><strong>{profile.expectedMirrorName}</strong><small>Normalmente se encuentra dentro de {profile.expectedMirrorPath}. La ubicación puede variar según lo que elegiste en tu computadora.</small></div></>:<div className="drive-new-folder"><p>Elige una carpeta propia para tus materiales. Si todavía no tienes una, crea una carpeta vacía en Google Drive y después selecciónala aquí.</p><a href="https://drive.google.com/drive/my-drive" target="_blank" rel="noreferrer">Abrir Google Drive<ExternalLink size={14}/></a><p>Puedes consultar y subir archivos. La creación automática de la estructura de sincronización todavía no está disponible.</p></div>}
       {profile.pickerConfigured&&<button type="button" className="drive-primary" disabled={busy} onClick={()=>select('folder')}><FolderOpen size={18}/>Elegir carpeta con Google<ChevronRight size={17}/></button>}
      </>}
      {!profile.pickerConfigured&&<div className="drive-setup-notice"><strong>El selector de carpetas aún no está listo</strong><p>Tu cuenta ya está conectada. Falta completar una configuración de ARMI para que puedas elegir una carpeta con Google.</p><button type="button" disabled={busy} onClick={()=>void action(load)}><RefreshCw size={15}/>Comprobar de nuevo</button>{isAdmin&&<details><summary>Detalle para el administrador</summary><ul>{profile.pickerSetup&&!profile.pickerSetup.apiKeyReady&&<li>Revisar el valor de ARMI_GOOGLE_PICKER_API_KEY: falta o no tiene el formato esperado.</li>}{profile.pickerSetup&&!profile.pickerSetup.projectNumberReady&&<li>Revisar ARMI_GOOGLE_PROJECT_NUMBER: debe contener el número del proyecto, solo dígitos.</li>}{profile.pickerSetup&&profile.pickerSetup.projectNumberReady&&!profile.pickerSetup.projectMatchesClient&&<li>El número de proyecto no coincide con el cliente OAuth configurado.</li>}{!profile.pickerSetup&&<li>Revisar la clave de Google Picker y el número del proyecto en Cloudflare.</li>}</ul></details>}</div>}
@@ -130,6 +153,12 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
      {profile.pickerConfigured&&<details className="drive-details"><summary>¿Google pide cookies o iniciar sesión?</summary><div><p>Tu cuenta sigue conectada a ARMI. El selector de Google también necesita acceder a la sesión del navegador.</p><ol><li>Abre <a href="https://drive.google.com/" target="_blank" rel="noreferrer">Google Drive en este navegador</a> e inicia sesión con <strong>{profile.email}</strong>.</li><li>Vuelve a «Elegir carpeta con Google» y permite las cookies necesarias si Google las solicita. Acepta también el permiso del navegador, si aparece.</li><li>Si el aviso continúa, revisa los permisos de cookies para este sitio en tu navegador. <a href="https://support.microsoft.com/en-US/edge/temporarily-allow-cookies-and-site-data-in-microsoft-edge" target="_blank" rel="noreferrer">Ayuda de Edge</a>.</li></ol><p>La sesión de la aplicación de Drive del teléfono puede ser distinta. ARMI no puede activar esos permisos del navegador por ti.</p></div></details>}
      <details className="drive-details"><summary><Link2 size={15}/>Vincular mediante el enlace de una carpeta</summary><div><p>Pega el enlace de una carpeta accesible desde tu cuenta de Google conectada.</p><label htmlFor="drive-folder-link">Enlace de la carpeta</label><input id="drive-folder-link" type="url" value={folder} placeholder="https://drive.google.com/drive/folders/…" onChange={event=>setFolder(event.target.value)}/><button type="button" disabled={busy||!folder.trim()} onClick={()=>void action(async()=>{await academicApi('/api/drive/folder','PUT',{folder:folder.trim(),revision:profile.revision});resetFiles();await load();setMessage('Carpeta vinculada. Ya puedes consultar sus archivos.');})}>Vincular carpeta existente</button></div></details>
     </section>
+    {linked&&!profile.requiresReauthorization&&<section className="drive-upload" aria-label="Subir un archivo a Drive"><h3>Subir un archivo</h3><p>Destino: <strong>{(path.at(-1)||profile.folder).name}</strong>. Hasta 5 MB por archivo.</p><p className="drive-muted">Se guarda un archivo nuevo en esta carpeta; los archivos existentes no se reemplazan. Esto no actualiza las notas ni los registros de ARMI en Windows.</p>
+     <input ref={fileInput} type="file" hidden aria-label="Elegir archivo para Drive" onChange={event=>{chooseUpload(event.target.files?.[0]||null);event.currentTarget.value='';}}/>
+     {!uploadFile?<button type="button" disabled={busy||path.some(item=>item.name.startsWith('.armi'))} onClick={()=>fileInput.current?.click()}>Elegir archivo</button>:<div><strong>{uploadFile.name}</strong><p>{sizeLabel(String(uploadFile.size))} &middot; Carpeta: {uploadDestination?.parentName}</p><div className="drive-actions"><button type="button" className="drive-primary" disabled={busy} onClick={()=>sendUpload(false)}>{transfer?'Reintentar la misma subida':'Subir archivo'}</button>{transfer&&<button type="button" disabled={busy} onClick={()=>sendUpload(true)}>Comprobar subida</button>}<button type="button" disabled={busy} onClick={()=>{setUploadFile(null);setTransfer(null);setUploadDestination(null);}}>Cerrar selección</button></div></div>}
+     {uploadLabel&&<p role="status"><LoaderCircle className="drive-spinner" size={17}/>{uploadLabel}</p>}
+     {path.some(item=>item.name.startsWith('.armi'))&&<p className="drive-muted">Esta carpeta contiene datos internos de ARMI y solo permite consulta. Elige una carpeta de materiales para subir archivos.</p>}
+    </section>}
     {linked&&!profile.requiresReauthorization&&<section className="drive-library" aria-labelledby="drive-files-heading"><div className="drive-section-heading"><FileText size={22}/><div><span className="drive-label">TUS MATERIALES</span><h3 id="drive-files-heading">Archivos de tu carpeta</h3></div><button type="button" disabled={busy} onClick={()=>void action(()=>browse(path.at(-1)?.id||profile.folder.id,path.at(-1)?.name||profile.folder.name))}><RefreshCw size={15}/>Actualizar lista</button></div><p className="drive-muted">Puedes abrir las subcarpetas y consultar sus archivos sin autorizarlos uno por uno. Pulsa «Actualizar lista» para ver cambios recientes.</p>
      {path.length>0?<><nav className="drive-breadcrumbs" aria-label="Carpeta de Drive">{path.map(item=><button type="button" key={item.id} disabled={busy} onClick={()=>void action(()=>browse(item.id,item.name))}><FolderOpen size={14}/>{item.name}<ChevronRight size={13}/></button>)}</nav>
      {!files.length&&!busy&&<div className="drive-empty"><FolderOpen size={29}/><strong>No hay archivos visibles en esta carpeta</strong><p>Si esperabas encontrar archivos, comprueba la carpeta seleccionada y actualiza la lista.</p></div>}
@@ -140,7 +169,7 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
    </>}
   </>}
   {busy&&profile&&<p className="drive-progress" role="status"><LoaderCircle size={17} className="drive-spinner"/>Procesando…</p>}{message&&<p className="drive-feedback is-success" role="status"><Check size={18}/>{message}</p>}{error&&<p className="drive-feedback is-error" role="alert">{error}</p>}
-  <div className="drive-stage-note"><ShieldCheck size={19}/><p>Consulta y descarga disponibles al vincular tu carpeta. <strong>La subida y la sincronización con Windows siguen pendientes.</strong></p></div>
+  <div className="drive-stage-note"><ShieldCheck size={19}/><p>Consulta, descarga y subida de archivos nuevos a tu carpeta de Drive. <strong>La sincronización de datos académicos con Windows sigue pendiente.</strong></p></div>
   </div><footer className="drive-footer"><nav aria-label="Privacidad de Drive"><a href="/privacidad" target="_blank" rel="noreferrer">Privacidad</a><span>·</span><a href="/condiciones" target="_blank" rel="noreferrer">Condiciones</a></nav><button type="button" onClick={close}>Cerrar</button></footer>
  </section></div>,document.body)}
  </>;

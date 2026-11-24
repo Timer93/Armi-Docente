@@ -185,11 +185,11 @@ async function route(request, env, requester, now, measurement, readUsage) {
     let driveCallsInRequest=0;
     const driveRequester=(target,options)=>{
       const address=new URL(target);
-      if(address.origin==='https://www.googleapis.com'&&address.pathname.startsWith('/drive/v3/')){
+      if(address.origin==='https://www.googleapis.com'&&(address.pathname.startsWith('/drive/v3/')||address.pathname.startsWith('/upload/drive/v3/'))){
         if(driveCallsInRequest>=40)fail('Esta operación necesita revisar demasiadas carpetas. Selecciona menos archivos o una carpeta más cercana a los archivos.',400);
         driveCallsInRequest++;
         measurement.driveCalls++;
-        measurement.driveUnitsEstimated+=address.searchParams.get('alt')==='media'?200:address.pathname==='/drive/v3/files'?100:5;
+        measurement.driveUnitsEstimated+=address.pathname.startsWith('/upload/')?200:address.searchParams.get('alt')==='media'?200:address.pathname==='/drive/v3/files'?100:5;
       }
       return requester(target,options);
     };

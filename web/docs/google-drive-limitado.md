@@ -1,4 +1,4 @@
-﻿# Google Drive por docente: carpeta y subcarpetas
+# Google Drive por docente: carpeta y subcarpetas
 
 Actualizado el 24 de noviembre de 2026. Sustituye el flujo anterior de autorización archivo por archivo.
 
@@ -8,7 +8,7 @@ Se solicita `https://www.googleapis.com/auth/drive openid email`. Google concede
 
 Esto permite consultar los archivos existentes y nuevos accesibles para esa cuenta dentro de la raíz y sus subcarpetas sin autorizarlos uno por uno. Se navega por niveles, con paginación de 50 elementos y actualización manual, sin sondeo ni descarga automática de todo el árbol.
 
-Esta versión solo lee Drive. No habilita subida, edición, eliminación, creación automática de carpetas ni sincronización académica con Windows. Los binarios descargables están limitados a 100 MB; los documentos nativos de Google aún no tienen exportación. Los datos académicos web siguen en D1 y el login sigue en Sheets/Apps Script. El escritorio permanece intacto.
+Esta versión permite lectura y subida de archivos nuevos de hasta 5 MB al destino elegido dentro de la carpeta. No habilita reemplazo, edición, eliminación, creación automática de carpetas ni sincronización académica con Windows. Los binarios descargables están limitados a 100 MB; los documentos nativos de Google aún no tienen exportación. Los datos académicos web siguen en D1 y el login sigue en Sheets/Apps Script. El escritorio permanece intacto.
 
 ## Configuración pendiente en Google Cloud
 
@@ -47,4 +47,14 @@ Picker inicia en Mi unidad con LIST y `setParent('root')`; la búsqueda puede mo
 - Una lista vacía nunca significa borrado ni dispara cambios en Windows.
 - Pruebas con proveedor simulado cubren alcance explícito, tokens antiguos, reconexión, descendientes, archivos externos, aislamiento, cifrado y revisión. Workerd valida el runtime, sin sustituir la prueba real ni la aprobación de Google.
 
-Aceptación pendiente: configurar/aprobar el alcance en Google, reconectar, abrir subcarpetas, descargar una muestra y comprobar que un archivo añadido desde Windows aparece al actualizar. La subida y la sincronización de cambios se desarrollan después; vincular una carpeta no las termina.
+Aceptación pendiente: configurar/aprobar el alcance en Google, reconectar, abrir subcarpetas, descargar una muestra y comprobar que un archivo añadido desde Windows aparece al actualizar. La sincronización de cambios académicos se desarrolla después; vincular una carpeta no la termina.
+
+## Subidas nuevas y continuidad del trabajo
+
+La transferencia usa un ID de archivo generado por Google y una preparación cifrada que caduca a los 30 minutos, asociada al docente, cuenta Google, raíz, carpeta destino y revisión de conexión. El servidor verifica tamaño y SHA-256 antes de enviar. Siempre crea archivos; nunca PATCH, nunca reemplazo de manifiestos o bases existentes. El mismo ID permite comprobar o repetir una transferencia sin crear otro archivo si se pierde la respuesta. No hay reintentos automáticos. La preparación y el File se conservan solo en memoria de la pestaña; cerrar/recargar pierde ese seguimiento y requiere comprobar manualmente el destino antes de empezar otra subida.
+
+Se admiten hasta 20 preparaciones por hora y docente, con tamaño máximo de 5.000.000 bytes. Se usa multipart para archivos pequeños; los grandes necesitarán subidas reanudables. Las llamadas de subida se incluyen en las métricas de Drive. No se requiere SQL nuevo. El navegador y el servidor rechazan cambios de cuenta; el servidor revalida ascendencia y bloquea carpetas cuyo nombre empieza por .armi, incluida cualquier descendiente de .armi-sync. Las respuestas no incluyen tokens Google. Un nombre repetido no reemplaza otro archivo: Google puede mostrar ambos. Comprobar una subida reutiliza su preparación; comenzar otra genera un ID nuevo.
+
+Los archivos estarán en la misma ubicación de Google Drive para escritorio cuando ese cliente los descargue. No implica que ARMI Windows incorpore automáticamente un adjunto a una sesión o evidencia: para ello falta registrar referencias y reconciliar el catálogo del espejo. El motor actual emplea incremental-v1, revisión de identidad 4, referencias portables, recibos y catálogos por dispositivo. La siguiente fase debe reutilizar ese contrato o añadir un puente controlado, sin sobrescribir database-dump.json, manifest.json ni los eventos existentes. Debe comparar una base común con los cambios web y escritorio y presentar conflictos antes de sustituir datos.
+
+Al haber pasado de lectura a creación de archivos, actualizar la justificación y demostración de Google antes de una nueva presentación o cuando el revisor solicite aclaraciones: la descripción anterior de solo lectura ya no representa todas las funciones.

@@ -20,7 +20,7 @@ function fixture(t){
   [FILE_A,{id:FILE_A,name:'Evidence.png',mimeType:'image/png',parents:[ROOT_A],size:'3',body:new Uint8Array([1,2,3])}],
   [OUTSIDE,{id:OUTSIDE,name:'Private unrelated file',mimeType:'image/png',parents:[ROOT_B],size:'3',body:'bad'}],
  ]);
- let now=1000;const calls=[],challenges=new Map(),provider={status:200,refreshCalls:0};
+ let now=1000,generatedId=0;const calls=[],challenges=new Map(),provider={status:200,refreshCalls:0};
  const digest=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),x=>x.toString(16).padStart(2,'0')).join('');
  const requester=async(value,options={})=>{
   const url=new URL(value);calls.push({url:url.href,options});
@@ -31,6 +31,18 @@ function fixture(t){
    if(body.get('grant_type')==='refresh_token'){identity=body.get('refresh_token').slice(8);provider.refreshCalls++;}
    else{identity=body.get('code');const actual=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body.get('code_verifier')))).toString('base64url');assert.equal(actual,challenges.get(identity));}
    return Response.json({access_token:'access-'+identity,refresh_token:'refresh-'+identity,expires_in:3600,scope:provider.tokenScope||'https://www.googleapis.com/auth/drive'});
+  }
+  if(url.pathname==='/drive/v3/files/generateIds')return Response.json({ids:['uploaded-file-'+String(++generatedId).padStart(5,'0')]});
+  if(url.pathname==='/upload/drive/v3/files'){
+   if(provider.uploadRedirect)return Response.redirect('https://untrusted.example/upload',307);
+   const bytes=Buffer.from(await options.body.arrayBuffer()),boundary=options.headers['content-type'].split('boundary=')[1];
+   const first=bytes.indexOf('\r\n\r\n')+4,metaEnd=bytes.indexOf('\r\n--'+boundary,first),metadata=JSON.parse(bytes.subarray(first,metaEnd).toString());
+   const contentStart=bytes.indexOf('\r\n\r\n',metaEnd)+4,contentEnd=bytes.lastIndexOf('\r\n--'+boundary),body=bytes.subarray(contentStart,contentEnd);
+   if(documents.has(metadata.id))return new Response('',{status:409});
+   const checksum=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',body)),x=>x.toString(16).padStart(2,'0')).join('');
+   documents.set(metadata.id,{...metadata,parents:metadata.parents,body,size:String(body.length),sha256Checksum:checksum});
+   if(provider.loseUploadResponse)throw new Error('Connection lost after Google saved the file');
+   return Response.json({id:metadata.id});
   }
   const token=options.headers.authorization.replace('Bearer access-','');
   if(url.href==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'google-'+token,email:token+'@example.test',email_verified:provider.emailVerified!==false});
@@ -44,8 +56,8 @@ function fixture(t){
   if(url.searchParams.get('alt')==='media')return new Response(file.body,{headers:{'content-type':file.mimeType}});
   const {body,...metadata}=file;return Response.json(metadata);
  };
- const call=async(teacher,path,{method='GET',body,headers={}}={})=>{
-  const request=new Request('https://web.armi.test'+path,{method,headers:{'content-type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body)});
+ const call=async(teacher,path,{method='GET',body,raw,headers={}}={})=>{
+  const request=new Request('https://web.armi.test'+path,{method,headers:{'content-type':'application/json',...headers},body:raw!==undefined?raw:body===undefined?undefined:JSON.stringify(body)});
   try{return await driveRoute(request,env,teacher,{requester,digest,randomToken:()=>crypto.randomUUID().replaceAll('-','')+crypto.randomUUID().replaceAll('-',''),now,readJson:r=>r.json()});}
   catch(error){if(!error.status)throw error;return Response.json({message:error.message,diagnostic:error.driveDiagnostic},{status:error.status});}
  };
@@ -225,4 +237,45 @@ test('Legacy encrypted tokens require explicit reauthorization; reconnect keeps 
  await f.connect(a);const profile=await f.profile(a);assert.equal(profile.requiresReauthorization,false);assert.equal(profile.folder.id,ROOT_A);
  f.advance(3600000);assert.equal((await f.call(a,'/api/drive/files')).status,200);
  assert.equal((await f.profile(a)).requiresReauthorization,false);
+});
+
+test('Drive uploads create one file, verify its bytes and let lost responses be checked without duplicates',async t=>{
+ const f=fixture(t),[a]=f.teachers;await f.connect(a);await f.link(a);
+ const bytes=new Uint8Array([1,2,3]),sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),v=>v.toString(16).padStart(2,'0')).join('');
+ const prepare=await f.call(a,'/api/drive/upload/prepare',{method:'POST',body:{name:'Evidence.png',size:3,mimeType:'image/png',sha256,parent:ROOT_A,revision:(await f.profile(a)).revision}});
+ assert.equal(prepare.status,200,await prepare.clone().text());const intent=(await prepare.json()).data;
+ const options={method:'POST',raw:bytes,headers:{'content-type':'application/octet-stream','x-armi-upload-ticket':intent.ticket}};
+ f.provider.loseUploadResponse=true;
+ const lost=await f.call(a,'/api/drive/upload',options);assert.equal(lost.status,502);assert.ok((await lost.text()).includes('Comprobar subida'));
+ const status=await f.call(a,'/api/drive/upload/status',{headers:{'x-armi-upload-ticket':intent.ticket}});
+ assert.equal((await status.json()).data.uploaded,true);
+ f.provider.loseUploadResponse=false;
+ const retry=await f.call(a,'/api/drive/upload',options);assert.equal(retry.status,200);assert.equal((await retry.json()).data.reused,true);
+ assert.equal(f.calls.filter(call=>new URL(call.url).pathname==='/upload/drive/v3/files').length,1);
+ assert.equal([...f.documents.values()].filter(file=>file.appProperties?.armiTeacher===a.id).length,1);
+ assert.deepEqual([...f.documents.get(intent.file.id).body],[1,2,3]);assert.deepEqual([...f.documents.get(FILE_A).body],[1,2,3],'Existing files are never replaced');
+ const wrong=await f.call(a,'/api/drive/upload',{...options,raw:new Uint8Array([3,2,1])});assert.equal(wrong.status,409);
+});
+
+test('Drive uploads reject internal mirror folders, other teachers, altered tickets and changed roots',async t=>{
+ const f=fixture(t),[a,b]=f.teachers;await f.connect(a);await f.link(a);await f.connect(b);await f.link(b,ROOT_B);
+ const internal='internal-folder-A',nested='internal-child-AA';
+ f.documents.set(internal,{id:internal,name:'.armi-sync',mimeType:'application/vnd.google-apps.folder',parents:[ROOT_A]});
+ f.documents.set(nested,{id:nested,name:'current',mimeType:'application/vnd.google-apps.folder',parents:[internal]});
+ const bytes=new Uint8Array([4]),sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),v=>v.toString(16).padStart(2,'0')).join('');
+ const base={parent:ROOT_A,revision:(await f.profile(a)).revision,name:'New.pdf',size:1,mimeType:'application/pdf',sha256};
+ for(const changes of [{parent:ROOT_B},{parent:nested},{name:'.armi-sync-root.json'},{size:5000001},{name:'../escape.png'},{mimeType:'application/vnd.google-apps.document'}]){
+  const result=await f.call(a,'/api/drive/upload/prepare',{method:'POST',body:{...base,...changes}});assert.ok(result.status>=400);
+ }
+ const {ticket}=((await(await f.call(a,'/api/drive/upload/prepare',{method:'POST',body:base})).json()).data);
+ const options={method:'POST',raw:bytes,headers:{'content-type':'application/octet-stream','x-armi-upload-ticket':ticket}};
+ assert.equal((await f.call(b,'/api/drive/upload',options)).status,503,'Encrypted upload authorization belongs to its teacher');
+ assert.equal((await f.call(a,'/api/drive/upload',{...options,headers:{...options.headers,'x-armi-upload-ticket':ticket.slice(0,-2)+'ff'}})).status,503);
+ assert.equal((await f.call(a,'/api/drive/upload',{...options,raw:new Uint8Array([1,2])})).status,413);
+ f.documents.set(ROOT_A,{...f.documents.get(ROOT_A),name:'.armi-sync'});
+ assert.equal((await f.call(a,'/api/drive/upload',options)).status,403);
+ f.documents.set(ROOT_A,{...f.documents.get(ROOT_A),name:'Root A'});
+ f.sqlite.exec("UPDATE drive_connections SET revision=revision+1 WHERE teacher_id='A'");
+ assert.equal((await f.call(a,'/api/drive/upload',options)).status,409);
+ assert.equal(f.calls.filter(call=>new URL(call.url).pathname==='/upload/drive/v3/files').length,0);
 });

@@ -1,5 +1,6 @@
 import {AuthError} from './apps-script-auth.js';
 import {serviceLimit} from './ai.js';
+import {driveUploadRoute,MAX_DRIVE_UPLOAD_BYTES} from './drive-uploads.js';
 const fail=(message,status=400,diagnostic)=>{const error=new AuthError(message,status);if(diagnostic)error.driveDiagnostic=diagnostic;throw error;};
 const SCOPE='https://www.googleapis.com/auth/drive';
 const hasDriveScope=value=>typeof value==='string'&&value.split(/\s+/).includes(SCOPE);
@@ -26,12 +27,12 @@ function config(env){
 async function cryptKey(env){return crypto.subtle.importKey('raw',unhex(env.ARMI_DRIVE_ENCRYPTION_KEY),'AES-GCM',false,['encrypt','decrypt']);}
 async function seal(env,aad,value){const iv=crypto.getRandomValues(new Uint8Array(12));return {cipher:hex(new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:new TextEncoder().encode(aad)},await cryptKey(env),new TextEncoder().encode(JSON.stringify(value))))),iv:hex(iv)};}
 async function open(env,aad,cipher,iv){try{return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unhex(iv),additionalData:new TextEncoder().encode(aad)},await cryptKey(env),unhex(cipher))));}catch{fail('No se pudo abrir la conexión guardada. Conecta nuevamente tu cuenta de Google.',503);}}
-async function remote(requester,url,options={},oauthToken=false){
+async function remote(requester,url,options={},oauthToken=false,allowedStatuses=[]){
  try{
   // Workers supports manual/follow only. Manual preserves rejection of redirects
   // without forwarding authorization headers or OAuth secrets to another host.
   const response=await requester(url,{...options,redirect:'manual',signal:AbortSignal.timeout(20000)});
-  if(!response.ok){
+  if(!response.ok&&!allowedStatuses.includes(response.status)){
    if(oauthToken){
     // Only interpret known error identifiers; never expose descriptions or bodies.
     let payload;try{payload=await readRemoteJson(response,16384);}catch{}
@@ -107,7 +108,7 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
   const legacy=legacyFolder(membership),mirrorUser=scopeKey(membership.syncUserKey||teacher.provider_username);
   // The legacy Apps Script archive URL is not the Drive Desktop mirror. Never
   // prefill or suggest it as the active synchronization root.
-  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:'',suggestedFolderName:'',legacyFolder:legacy,expectedMirrorPath:'ARMI Sync/users/'+mirrorUser,expectedMirrorName:mirrorUser,legacyLocationLinked:Boolean(row?.folder_id&&legacy?.id===row.folder_id&&!row.mirror_verified),folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,url:'https://drive.google.com/drive/folders/'+row.folder_id,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:requiresReauthorization,requiresReauthorization}});
+  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:'',suggestedFolderName:'',legacyFolder:legacy,expectedMirrorPath:'ARMI Sync/users/'+mirrorUser,expectedMirrorName:mirrorUser,legacyLocationLinked:Boolean(row?.folder_id&&legacy?.id===row.folder_id&&!row.mirror_verified),folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,url:'https://drive.google.com/drive/folders/'+row.folder_id,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:false,uploadMaxBytes:MAX_DRIVE_UPLOAD_BYTES,limitedAccess:requiresReauthorization,requiresReauthorization}});
  }
  if(!ready)fail('Falta activar 0012_drive_connection.sql en D1.',503,'DRIVE-DATOS');
  if(!settings)fail('El administrador debe configurar la conexión de Google Drive para ARMI Web.',503,'DRIVE-CONFIG');
@@ -163,6 +164,7 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  }
  await serviceLimit(db,`drive-read:${teacher.id}:${Math.floor(now/60000)}`,120,now+120000);
  const token=await accessToken(env,row,requester,now);
+ if(url.pathname==='/api/drive/upload'||url.pathname.startsWith('/api/drive/upload/'))return driveUploadRoute(request,env,teacher,row,token,{readJson,now,requester,remote,readRemoteJson,seal,open,within,unchanged,fileId});
  if(url.pathname==='/api/drive/picker'&&request.method==='GET'){
   // ASSETS canonicalizes .html with a 307. Serve the canonical asset internally
   // so the browser stays on the authenticated URL with mode/requestId intact.
