@@ -26,6 +26,7 @@ function WebHost({ App }: { App: React.ComponentType }) {
     // control deshabilitado por React (p. ej. mientras elimina un estudiante).
     const disableEditing = () => {
       const permits = (element: Element) => {
+        if(element.closest('[data-armi-web-template-reader]'))return Boolean(getWebIdentity());
         const editor = element.closest('[data-armi-web-editor]')?.getAttribute('data-armi-web-editor');
         return Boolean(editor && (editor==='portal'?getWebIdentity():editor==='evaluation'?getWebIdentity()?.academic?.evaluationEditable:editor==='instruments'?getWebIdentity()?.academic?.instrumentsEditable:editor==='settings'?getWebIdentity()?.academic?.settingsEditable:['annual','units','sessions'].includes(editor) ? getWebIdentity()?.academic?.planningEditable : getWebIdentity()?.academic?.editable));
       };
@@ -35,7 +36,7 @@ function WebHost({ App }: { App: React.ComponentType }) {
         const aiControl=/\bIA\b/i.test(label)&&!/imagen|visual|audio/i.test(label);
         const editor=control.closest('[data-armi-web-editor]')?.getAttribute('data-armi-web-editor')||'';
         const unavailableEvaluationAction=editor==='evaluation'&&/evidencia|archivo|adjuntar|plazo|subir|descargar|plantilla|foto/i.test(label);
-        const unavailablePlanningAction = ['annual','units','sessions'].includes(editor) && !aiControl && (/plantilla|correspondencia|\bword\b|excel|\bpdf\b|descargar|subir|adjuntar|importar|generar/i.test(label)||(!getWebIdentity()?.academic?.evaluationEditable&&/calificaci[oó]n/i.test(label)));
+        const unavailablePlanningAction = !control.closest('[data-armi-web-template-reader]') && ['annual','units','sessions'].includes(editor) && !aiControl && (/plantilla|correspondencia|\bword\b|excel|\bpdf\b|descargar|subir|adjuntar|importar|generar/i.test(label)||(!getWebIdentity()?.academic?.evaluationEditable&&/calificaci[oó]n/i.test(label)));
         const unavailablePin = !getWebIdentity()?.academic?.settingsEditable && /fijar|desfijar/i.test(label);
         const unavailableSettingsExport=control.closest('[data-armi-web-editor]')?.getAttribute('data-armi-web-editor')==='settings' && /\bword\b|excel|descargar|plantilla|\bIA\b/i.test(label);
         const supported = permits(control) && !control.closest('[data-web-unavailable]') && control.getAttribute('type') !== 'file' && !unavailableEvaluationAction && !unavailablePlanningAction && !unavailablePin && !unavailableSettingsExport;

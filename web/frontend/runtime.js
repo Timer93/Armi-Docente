@@ -33,6 +33,8 @@ export function installWebRuntime(win) {
   for(const route of ['GET /api/drive/profile','POST /api/drive/connect','PUT /api/drive/folder','POST /api/drive/selection','DELETE /api/drive/connection','GET /api/drive/files','GET /api/drive/content'])allowed.add(route);
   for(const route of ['POST /api/drive/upload/prepare','POST /api/drive/upload','GET /api/drive/upload/status'])allowed.add(route);
   for(const route of ['GET /api/drive/sync/status','POST /api/drive/sync'])allowed.add(route);
+  allowed.add('GET /api/drive/templates');
+  allowed.add('GET /api/drive/sync/receipt');
   allowed.add('POST /api/academic/imports');
   const blocked = () => Response.json({ success: false, message: 'Esta función todavía no está habilitada en la web.' }, { status: 404 });
   win.fetch = (input, options = {}) => {

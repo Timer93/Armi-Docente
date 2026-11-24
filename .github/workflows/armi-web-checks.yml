@@ -26,4 +26,5 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm test
+      - run: node --test ../scripts/test-web-work-receiver.mjs
       - run: npm run check:deploy

@@ -1,7 +1,8 @@
 import {AuthError} from './apps-script-auth.js';
 import {serviceLimit} from './ai.js';
 import {driveUploadRoute,MAX_DRIVE_UPLOAD_BYTES} from './drive-uploads.js';
-import {automaticSyncStatus,publishAutomaticChanges} from './automatic-sync.js';
+import {automaticSyncStatus,publishAutomaticChanges,checkDesktopReceipt} from './automatic-sync.js';
+import {readDriveTemplates} from './drive-templates.js';
 const fail=(message,status=400,diagnostic)=>{const error=new AuthError(message,status);if(diagnostic)error.driveDiagnostic=diagnostic;throw error;};
 const SCOPE='https://www.googleapis.com/auth/drive';
 const hasDriveScope=value=>typeof value==='string'&&value.split(/\s+/).includes(SCOPE);
@@ -169,6 +170,8 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  }
  await serviceLimit(db,`drive-read:${teacher.id}:${Math.floor(now/60000)}`,120,now+120000);
  const token=await accessToken(env,row,requester,now);
+ if(url.pathname==='/api/drive/sync/receipt'&&request.method==='GET')return Response.json({success:true,data:await checkDesktopReceipt(db,teacher,row,token,{requester,remote,readRemoteJson,list,unchanged})});
+ if(url.pathname==='/api/drive/templates'&&request.method==='GET')return Response.json({success:true,data:await readDriveTemplates(teacher,row,token,url.searchParams.get('sessionId'),{list,remote,readRemoteJson,digest,requester,unchanged,db})});
  if(url.pathname==='/api/drive/sync'&&request.method==='POST'){const body=await readJson(request);if(Object.keys(body).length)fail('Solicitud no v\u00e1lida.');await serviceLimit(db,`drive-sync:${teacher.id}:${Math.floor(now/30000)}`,2,now+120000);return Response.json({success:true,data:await publishAutomaticChanges(env,teacher,row,token,{now,requester,remote,readRemoteJson,unchanged,digest})});}
  if(url.pathname==='/api/drive/upload'||url.pathname.startsWith('/api/drive/upload/'))return driveUploadRoute(request,env,teacher,row,token,{readJson,now,requester,remote,readRemoteJson,seal,open,within,unchanged,fileId});
  if(url.pathname==='/api/drive/picker'&&request.method==='GET'){

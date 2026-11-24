@@ -20,6 +20,7 @@ import { createInternetConnectivityMonitor } from './internetConnectivity.js';
 import { createTransferProgress } from './transferProgress.js';
 import { createResourceConflictStore, resourceChecksum } from './resourceConflicts.js';
 
+import {runWebBridge} from './webDesktopBridge.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const quoteIdentifier = (value) => `"${String(value).replace(/"/g, '""')}"`;
@@ -1205,12 +1206,14 @@ export const publishContinuousResourcesToMirror = async (mirrorPath, localResour
 };
 
 const runIncrementalMirrorSync = async (mirrorPath) => {
+  const webConfig=readConfig();
+  const webReceived=await runWebBridge({db,mirrorPath,syncUserKey:webConfig.syncUserKey,backupPath:path.join(snapshotsFolder,'before-web-receiver.db')});
   const result = await incrementalMirrorSync.run({
     mirrorPath,
     mirrorDatabaseDumpPath: mirrorPath ? getMirrorFilePath(mirrorPath, 'database/database-dump.json') : '',
   });
-  if (result.success && !result.data?.alreadyRunning && (result.data?.appliedOperations > 0 || result.data?.identityMigrationApplied)) {
-    receivedChanges = { operations: Math.max(1,result.data.appliedOperations), completedAt: new Date().toISOString() };
+  if (result.success && !result.data?.alreadyRunning && (result.data?.appliedOperations > 0 || result.data?.identityMigrationApplied || webReceived.applied)) {
+    receivedChanges = { operations: Math.max(1,(result.data.appliedOperations||0)+webReceived.applied), completedAt: new Date().toISOString() };
   }
   return result;
 };

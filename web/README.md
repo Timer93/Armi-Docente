@@ -28,7 +28,8 @@ copia el código del escritorio. La entrada de web es `frontend/entry.tsx`;
   No activa todavía subidas de evidencias ni recepción de cambios en Windows.
 - Cola automática de cambios académicos por docente, con envío agrupado a Drive.
   Requiere la migración 0013. Conserva pendientes ante fallos y distingue el envío
-  a Drive de la recepción en Windows, todavía pendiente. Véase
+  a Drive de su recepción por Windows actualizado. Incluye lectura del catálogo
+  de plantillas de actividades publicado por ese escritorio. Véase
   [estado de la sincronización automática](docs/sincronizacion-automatica.md).
 - Portal independiente de estudiantes, con interruptor por docente, ingreso por
   DNI, sesiones publicadas por grupo y entregas de texto. Los enlaces legibles

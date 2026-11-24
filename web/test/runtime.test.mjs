@@ -52,5 +52,8 @@ test('Drive browser transport permits implemented routes and blocks unimplemente
   assert.equal((await win.fetch('/api/drive/sync/status')).status,200);
   assert.equal((await win.fetch('/api/drive/folder',{method:'DELETE'})).status,404);
   assert.equal(calls.length,12);
+  assert.equal((await win.fetch('/api/drive/templates?sessionId=owned-session')).status,200);
+  assert.equal((await win.fetch('/api/drive/sync/receipt')).status,200);
+  assert.equal(calls.length,14);
  }finally{reset();}
 });

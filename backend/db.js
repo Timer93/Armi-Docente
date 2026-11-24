@@ -89,6 +89,7 @@ const GENERAL_DATA_COLUMN_DEFINITIONS = {
 };
 
 const SYNC_EXCLUDED_TABLES = new Set([
+    'web_work_ids','web_work_receipts','web_work_versions',
     'armi_sync_identity_map',
     'armi_sync_migration_archive',
     'armi_sync_migration_log',

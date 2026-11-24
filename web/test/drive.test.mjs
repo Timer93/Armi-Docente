@@ -81,6 +81,20 @@ function fixture(t,{automatic=false}={}){
  return{env,sqlite,teachers,calls,call,profile,start,finish,connect,link,documents,provider,advance:ms=>{now+=ms;}};
 }
 
+test('Session templates are read from the verified owned mirror with integrity and account checks',async t=>{
+ const f=fixture(t),[a,b]=f.teachers;await f.connect(a);await f.link(a);
+ const url='/api/drive/templates?sessionId=lesson-1';
+ assert.equal((await (await f.call(a,url)).json()).data.pending,true);
+ const data={format:'armi-session-templates',version:1,syncUserKey:'sync-a',sessionId:'lesson-1',templates:[{id:'template-1',evidence_id:'e1',html:'<article>Student worksheet</article>'}],evidences:[{id:'e1',text:'Worksheet'}]},body=JSON.stringify(data),hash=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body))).toString('hex');
+ const add=(id,name,parent,mimeType,body='')=>f.documents.set(id,{id,name,parents:[parent],mimeType,body,size:String(Buffer.byteLength(body))});
+ add('websync-folder','ARMI Web Sync',ROOT_A,'application/vnd.google-apps.folder');add('template-folder','templates','websync-folder','application/vnd.google-apps.folder');
+ add('template-index','index.json','template-folder','application/json',JSON.stringify({format:'armi-template-index',version:1,syncUserKey:'sync-a',entries:[{sessionId:'lesson-1',file:hash+'.json',sha256:hash}]}));
+ add('template-content',hash+'.json','template-folder','application/json',body);
+ const loaded=await f.call(a,url);assert.equal(loaded.status,200);assert.equal((await loaded.json()).data.templates[0].html,data.templates[0].html);
+ f.documents.get('template-content').body=body.replace('worksheet','tampered');assert.equal((await f.call(a,url)).status,409);
+ await f.connect(b,'B');await f.link(b,ROOT_B);assert.equal((await f.call(b,url)).status,409);
+});
+
 test('OAuth failures identify credential, consent and identity stages without leaking provider responses',async t=>{
  const f=fixture(t),[a]=f.teachers;
  for(const [error,reference] of [['invalid_client','DRIVE-CREDENCIALES'],['unauthorized_client','DRIVE-CREDENCIALES'],['invalid_grant','DRIVE-AUTORIZACION'],['arbitrary-secret-value','DRIVE-TOKEN']]){
@@ -332,4 +346,19 @@ test('Automatic sync captures transactionally and refuses changed roots or incom
  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM web_sync_outbox').get().n,1);
  f.sqlite.exec('DROP TRIGGER sync_academic_edits_update');
  assert.equal((await(await f.call(a,'/api/drive/sync/status')).json()).data.ready,false);
+});
+
+test('Desktop-created exchange folder is reused and only the exact latest receipt confirms Windows',async t=>{
+ const f=fixture(t,{automatic:true}),[a]=f.teachers;await f.connect(a);await f.link(a);
+ f.documents.set('desktop-exchange',{id:'desktop-exchange',name:'ARMI Web Sync',mimeType:'application/vnd.google-apps.folder',parents:[ROOT_A]});
+ f.sqlite.prepare("INSERT INTO academic_edits(teacher_id,dataset,record_id,payload_json,revision,deleted,operation_id,operation_hash,updated_at) VALUES('A','general','general',?,1,0,?,?,1000)").run(JSON.stringify({institution:'New school'}),crypto.randomUUID(),'hash');
+ const sent=await f.call(a,'/api/drive/sync',{method:'POST',body:{}});assert.equal(sent.status,200,await sent.clone().text());
+ assert.equal([...f.documents.values()].filter(file=>file.name==='ARMI Web Sync').length,1);
+ const state=f.sqlite.prepare("SELECT * FROM web_sync_deliveries WHERE teacher_id='A'").get();assert.equal(state.folder_id,'desktop-exchange');assert.ok(state.packet_id);
+ const check=()=>f.call(a,'/api/drive/sync/receipt');assert.equal((await (await check()).json()).data.desktopConfirmed,false);
+ f.documents.set('desktop-receipts',{id:'desktop-receipts',name:'receipts',mimeType:'application/vnd.google-apps.folder',parents:[state.folder_id]});
+ const receipt={format:'armi-desktop-receipt',version:1,packetId:state.packet_id,syncUserKey:'sync-a',outcomes:[{sequence:1,status:'applied'}]},body=JSON.stringify(receipt);
+ f.documents.set('desktop-confirmation',{id:'desktop-confirmation',name:state.packet_id+'.json',mimeType:'application/json',parents:['desktop-receipts'],size:String(body.length),body});
+ assert.equal((await (await check()).json()).data.desktopConfirmed,true);
+ f.documents.get('desktop-confirmation').body=JSON.stringify({...receipt,syncUserKey:'sync-b'});assert.equal((await check()).status,409);
 });

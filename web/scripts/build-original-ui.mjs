@@ -23,6 +23,8 @@ alias.xlsx = webFile('excel-disabled.js');
 const originalSource = {
   name: 'armi-web-runtime-adapters',
   setup(bundler) {
+    bundler.onResolve({filter:/[\\/]sessions-view[\\/]SessionInteractiveHtml(?:\.tsx)?$/},()=>({path:webFile('desktop-only.tsx')}));
+    bundler.onResolve({filter:/[\\/]sessions-view[\\/]SessionEvidenceTemplates(?:\.tsx)?$/},()=>({path:webFile('SessionEvidenceTemplates.tsx')}));
     bundler.onResolve({filter:/^armi-web-student-login$/},()=>({path:'student-login',namespace:'armi-student-login'}));
     bundler.onLoad({filter:/.*/,namespace:'armi-student-login'},()=>({contents:`export const desktopLoginHtml=${JSON.stringify(studentLogin.html)};`,loader:'js'}));
     bundler.onResolve({filter:/^armi-web-student-desktop\.css$/},()=>({path:'desktop-login.css',namespace:'armi-student-css'}));
