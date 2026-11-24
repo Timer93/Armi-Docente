@@ -21,7 +21,9 @@ async function seal(env,aad,value){const iv=crypto.getRandomValues(new Uint8Arra
 async function open(env,aad,cipher,iv){try{return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unhex(iv),additionalData:new TextEncoder().encode(aad)},await cryptKey(env),unhex(cipher))));}catch{fail('No se pudo abrir la conexión guardada. Conecta nuevamente tu cuenta de Google.',503);}}
 async function remote(requester,url,options={},oauthToken=false){
  try{
-  const response=await requester(url,{...options,redirect:'error',signal:AbortSignal.timeout(20000)});
+  // Workers supports manual/follow only. Manual preserves rejection of redirects
+  // without forwarding authorization headers or OAuth secrets to another host.
+  const response=await requester(url,{...options,redirect:'manual',signal:AbortSignal.timeout(20000)});
   if(!response.ok){
    if(oauthToken){
     // Only interpret known error identifiers; never expose descriptions or bodies.

@@ -57,6 +57,8 @@ Hasta completar esta prueba con Google real, la conexión está preparada y prob
 
 ## Seguridad y consumo
 
+- Las solicitudes de Google usan `redirect: 'manual'` y rechazan respuestas que no sean exitosas. No utilizar `redirect: 'error'`: Workers no implementa ese modo y falla antes de enviar la solicitud. `test/drive-runtime.test.mjs` ejecuta el flujo de autorización y lectura en workerd con Google simulado y comprueba que no se sigan redirecciones con credenciales. La misma comprobación cubre las llamadas de IA; no consume claves reales ni reemplaza la prueba de Drive con una cuenta real.
+
 - OAuth usa PKCE, estado de un solo uso con caducidad y vínculo a la sesión y al docente. Los tokens persistentes se cifran con AES-GCM y datos asociados de la cuenta. Se comprueba la revisión al reconectar o desvincular.
 - El selector vive en `/api/drive/picker`, separado de la interfaz principal. Solo esa página permite cargar los scripts/iframes de Google. Recibe un token de acceso breve en memoria para Picker, nunca el token de renovación. La ventana principal verifica origen, ventana y nonce antes de aceptar la selección, y el servidor vuelve a comprobar la carpeta.
 - Solo docentes autenticados acceden a estas rutas; no se entregan tokens de Google a estudiantes. Esta conexión no cambia la contraseña de ARMI ni la de Google.

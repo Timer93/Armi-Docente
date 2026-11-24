@@ -26,6 +26,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "4.2.1",
     "esbuild": "0.28.2",
+    "miniflare": "5.20261119.0-beta",
     "postcss": "8.5.33",
     "tailwindcss": "4.2.1",
     "wrangler": "4.166.0"

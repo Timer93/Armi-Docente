@@ -29,7 +29,7 @@ async function apiKey(env,teacherId,provider) {
 async function upstream(requester,url,options) {
  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),90_000);
  try {
-  const response=await requester(url,{...options,signal:controller.signal,redirect:'error'});
+  const response=await requester(url,{...options,signal:controller.signal,redirect:'manual'});
   if(!response.ok)fail(response.status===429?'Tu proveedor de IA alcanzó su cuota. Revisa tu cuenta o espera antes de reintentar.':response.status===401||response.status===403?'La clave de IA no es válida o no tiene permiso para este modelo.':'El proveedor de IA no pudo completar la solicitud. Revisa el modelo y vuelve a intentar.',response.status===429?429:502);
   const reader=response.body.getReader();const chunks=[];let size=0;
   while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>2_000_000){await reader.cancel();fail('La respuesta de IA supera el tamaño permitido.',502);}chunks.push(value);}

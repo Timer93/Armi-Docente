@@ -1,0 +1,67 @@
+import assert from 'node:assert/strict';
+import {test} from 'node:test';
+import fs from 'node:fs';
+import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
+import {build} from 'esbuild';
+import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+
+test('workerd: real outbound fetch completes Drive OAuth and blocks redirects for tokens, files and AI', {timeout:60000}, async t=>{
+ const bundle=await build({entryPoints:[fileURLToPath(new URL('../src/worker.js',import.meta.url))],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+ const calls=[];let challenge='',redirectToken=false,redirectFile=false,redirectAI=false;
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-11-21',d1Databases:{DB:'armi-drive-runtime'},bindings:{
+  ARMI_AUTH_APPS_SCRIPT_URL:'https://script.google.com/macros/s/runtime-fixture/exec',
+  ARMI_GOOGLE_CLIENT_ID:'runtime.apps.googleusercontent.com',ARMI_GOOGLE_CLIENT_SECRET:'runtime-fixture-secret-only',
+  ARMI_DRIVE_ENCRYPTION_KEY:'ab'.repeat(32),ARMI_AI_ENCRYPTION_KEY:'cd'.repeat(32),
+  ARMI_DRIVE_REDIRECT_URI:'https://web.armi.test/api/drive/oauth/callback',
+ },outboundService:async request=>{
+  const url=new URL(request.url);calls.push(url.origin+url.pathname);
+  if(url.hostname==='script.google.com')return Response.json({success:true,data:{username:'runtime-teacher',displayName:'Runtime teacher',active:true,estado:'Habilitad@'}});
+  if(url.href==='https://oauth2.googleapis.com/token'){
+   if(redirectToken)return Response.redirect('https://untrusted.example/credentials',302);
+   const form=new URLSearchParams(await request.text());
+   assert.equal(form.get('grant_type'),'authorization_code');
+   assert.equal(createHash('sha256').update(form.get('code_verifier')).digest('base64url'),challenge);
+   return Response.json({access_token:'runtime-access-token',refresh_token:'runtime-refresh-token',expires_in:3600,scope:'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/drive.file'});
+  }
+  if(url.href==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'runtime-google-account',email:'runtime@example.test',email_verified:true});
+  if(url.pathname==='/drive/v3/files/runtime-folder-root')return Response.json({id:'runtime-folder-root',name:'My Drive folder',mimeType:'application/vnd.google-apps.folder',parents:[]});
+  if(url.pathname==='/drive/v3/files')return Response.json({files:[]});
+  if(url.pathname==='/drive/v3/files/runtime-image-file'){
+   if(url.searchParams.get('alt')==='media')return redirectFile?Response.redirect('https://untrusted.example/content',302):new Response('fixture-image');
+   return Response.json({id:'runtime-image-file',name:'Evidence.png',mimeType:'image/png',parents:['runtime-folder-root'],size:'13'});
+  }
+  if(url.hostname==='generativelanguage.googleapis.com')return redirectAI?Response.redirect('https://untrusted.example/ai',307):Response.json({models:[{name:'models/gemini-runtime',displayName:'Runtime fixture',supportedGenerationMethods:['generateContent']}]});
+  assert.fail('Unexpected outbound destination: '+url.origin+url.pathname);
+ }}));
+ t.after(()=>mf.dispose());
+ const db=await mf.getD1Database('DB');
+ for(const file of ['0001_identity.sql','0007_ai_student_portal.sql','0012_drive_connection.sql']){
+  const sql=fs.readFileSync(new URL('../migrations/'+file,import.meta.url),'utf8').replace(/^\s*--.*$/gm,'');
+  for(const statement of sql.split(';').map(value=>value.trim()).filter(Boolean))await db.prepare(statement).run();
+ }
+ let cookie='';
+ const call=(path,method='GET',body)=>mf.dispatchFetch('https://web.armi.test'+path,{method,redirect:'manual',headers:{origin:'https://web.armi.test',cookie,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+ const login=await call('/api/auth/login','POST',{username:'runtime-teacher',password:'fixture-password'});
+ assert.equal(login.status,200,await login.clone().text());cookie=login.headers.get('set-cookie').split(';')[0];
+ const start=async()=>{
+  const response=await call('/api/drive/connect','POST',{});assert.equal(response.status,200,await response.clone().text());
+  const authorization=new URL((await response.json()).data.authorizationUrl);challenge=authorization.searchParams.get('code_challenge');
+  return '/api/drive/oauth/callback?code=runtime-code&state='+authorization.searchParams.get('state');
+ };
+ const completed=await call(await start());
+ assert.equal(completed.status,302,await completed.clone().text());
+ assert.equal(completed.headers.get('location'),'/?armi-drive=connected');
+ const profile=async()=>(await(await call('/api/drive/profile')).json()).data;
+ assert.equal((await profile()).email,'runtime@example.test');
+ assert.equal((await call('/api/drive/folder','PUT',{folder:'runtime-folder-root',revision:1})).status,200);
+ const download=await call('/api/drive/content?file=runtime-image-file');assert.equal(download.status,200);assert.equal(await download.text(),'fixture-image');
+ redirectFile=true;assert.equal((await call('/api/drive/content?file=runtime-image-file')).status,502);
+ await call('/api/ai/credentials','PUT',{provider:'gemini',key:'runtime-own-ai-key-not-real'});
+ const models=await call('/api/ai/models?provider=gemini');assert.equal(models.status,200,await models.clone().text());
+ redirectAI=true;assert.equal((await call('/api/ai/models?provider=gemini')).status,502);
+ redirectToken=true;const refused=await call(await start());assert.equal(refused.status,502);
+ assert.ok((await refused.text()).includes('DRIVE-TOKEN'));assert.equal((await profile()).connected,true);
+ assert.ok(calls.includes('https://oauth2.googleapis.com/token'));
+ assert.ok(!calls.some(value=>value.startsWith('https://untrusted.example')));
+});
