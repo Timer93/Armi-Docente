@@ -71,3 +71,12 @@ Hasta completar esta prueba con Google real, la conexión está preparada y prob
 - En modo OAuth **Testing**, Google puede caducar el token de renovación a los 7 días para estos permisos. No prometer una conexión permanente hasta configurar la publicación y verificación necesarias para producción. No se habilita facturación para esa prueba.
 
 Referencias: [Permisos de Drive](https://developers.google.com/workspace/drive/api/guides/api-specific-auth), [Google Picker](https://developers.google.com/workspace/drive/picker/guides/web-picker), [OAuth y caducidad de tokens](https://developers.google.com/identity/protocols/oauth2), [Cuotas de Drive](https://developers.google.com/workspace/drive/api/guides/limits).
+# Continuación de conexión y carpeta por docente
+
+Al conectar Google, ARMI vuelve al panel y continúa al selector en la misma pestaña si falta vincular una carpeta. Una carpeta ya vinculada se conserva al reconectar la misma cuenta de Google; cambiar de cuenta la desvincula. Cancelar el selector conserva la carpeta anterior. Para cambiar carpetas o autorizar archivos durante el trabajo, se conserva el selector en ventana aparte: no se recarga una pantalla con ediciones en curso.
+
+La continuación usa únicamente un identificador de selección, cuenta ARMI, revisión, correo y los IDs elegidos en el sessionStorage nativo de esa pestaña (15 minutos, un solo uso). Se captura antes del almacenamiento en memoria de compatibilidad del escritorio. No contiene tokens de Google. Al regresar se comprueban docente, correo y revisión; el servidor vuelve a verificar los permisos y pertenencia de la carpeta.
+
+El enlace y nombre sugeridos se reciben del acceso de Apps Script (`driveFolderUrl` / `driveFolderName`, o `syncFolderInfo.folderUrl` / `folderName`). No son permisos de Google. Si Apps Script no devuelve nombre, se indica pendiente hasta seleccionar y comprobar la carpeta. La carpeta vinculada muestra el nombre confirmado y su URL canónica, sin consultas periódicas adicionales a Drive. Un nombre guardado puede quedar desactualizado si se renombra desde Google; volver a seleccionar actualiza el nombre.
+
+Google puede requerir sesión y autorización de cookies/almacenamiento en cada navegador, especialmente en móviles. El flujo no acepta permisos por el usuario ni garantiza suprimir las pantallas de Google. La sesión de la aplicación móvil de Drive no reemplaza la sesión del navegador.

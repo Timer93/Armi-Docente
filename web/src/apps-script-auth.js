@@ -73,6 +73,7 @@ export async function authenticateWithAppsScript(env, credentials, requester = f
       status,
       syncUserKey:text(data.syncUserKey,160)||canonicalUsername,
       driveFolderUrl:driveFolder(data.driveFolderUrl||data.syncFolderInfo?.folderUrl),
+      driveFolderName:text(data.driveFolderName||data.syncFolderInfo?.folderName,300),
       plan: text(data.subscriptionPlan || data.subscription_plan || data.plan, 80),
       expiresAt,
     },

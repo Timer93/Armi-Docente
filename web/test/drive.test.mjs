@@ -153,13 +153,16 @@ test('limited Drive consent does not silently include old files, and Picker sele
 
 test('folder suggestions belong to each teacher; Picker config trims pasted whitespace and reports missing fields without secrets',async t=>{
  const f=fixture(t),[a,b]=f.teachers;
- a.membership_json=JSON.stringify({syncUserKey:'sync-a',driveFolderUrl:'https://drive.google.com/drive/folders/'+ROOT_A});
+ a.membership_json=JSON.stringify({syncUserKey:'sync-a',driveFolderUrl:'https://drive.google.com/drive/folders/'+ROOT_A,driveFolderName:'My mirror A'});
  b.membership_json=JSON.stringify({syncUserKey:'sync-b'});
  assert.equal((await f.profile(a)).suggestedFolder,'https://drive.google.com/drive/folders/'+ROOT_A);
+ assert.equal((await f.profile(a)).suggestedFolderName,'My mirror A');assert.equal((await f.profile(b)).suggestedFolderName,'');
  assert.equal((await f.profile(a)).folder,null);assert.equal((await f.profile(b)).suggestedFolder,'');
  assert.equal(f.calls.length,0,'A saved folder is only a suggestion, not an automatic Google grant');
  assert.deepEqual((await f.profile(a)).pickerSetup,{apiKeyReady:false,projectNumberReady:false,projectMatchesClient:true});
  await f.connect(a);
+ await f.link(a);const linked=(await f.profile(a)).folder;
+ assert.equal(linked.name,'Mirror A');assert.equal(linked.url,'https://drive.google.com/drive/folders/'+ROOT_A);
  const key='AIza'+'a'.repeat(35);f.env.ARMI_GOOGLE_PICKER_API_KEY=' '+key+'\r\n';
  f.env.ARMI_GOOGLE_PROJECT_NUMBER=' 938978696413\n';f.env.ARMI_GOOGLE_CLIENT_ID='938978696413-fixture.apps.googleusercontent.com';
  assert.equal((await f.profile(a)).pickerConfigured,true);

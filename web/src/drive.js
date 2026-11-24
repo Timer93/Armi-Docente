@@ -95,7 +95,8 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  const url=new URL(request.url),db=env.DB,ready=await driveReady(db),settings=config(env),picker=pickerConfig(env);
  if(url.pathname==='/api/drive/profile'&&request.method==='GET'){
   const row=ready?await db.prepare('SELECT google_email,folder_id,folder_name,mirror_verified,revision FROM drive_connections WHERE teacher_id=?').bind(teacher.id).first():null;
-  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:JSON.parse(teacher.membership_json||'{}').driveFolderUrl||'',folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:true}});
+  const membership=JSON.parse(teacher.membership_json||'{}');
+  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:membership.driveFolderUrl||'',suggestedFolderName:membership.driveFolderName||'',folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,url:'https://drive.google.com/drive/folders/'+row.folder_id,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:true}});
  }
  if(!ready)fail('Falta activar 0012_drive_connection.sql en D1.',503,'DRIVE-DATOS');
  if(!settings)fail('El administrador debe configurar la conexión de Google Drive para ARMI Web.',503,'DRIVE-CONFIG');

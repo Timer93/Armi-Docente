@@ -902,8 +902,9 @@ test('password changes recheck the portal gate at final save; missing schema dis
 
 test('Drive routes require the teacher session and same-origin writes; Google remains the source of login and mirror identity',async t=>{
  const f=fixture(t);assert.equal((await f.call('/api/drive/profile')).status,401);
- f.users.docenteA.syncUserKey='original-mirror-identity';f.users.docenteA.driveFolderUrl='https://drive.google.com/drive/folders/fixtureFolder12345';
+ f.users.docenteA.syncUserKey='original-mirror-identity';f.users.docenteA.driveFolderUrl='https://drive.google.com/drive/folders/fixtureFolder12345';f.users.docenteA.syncFolderInfo={folderName:'Mirror teacher A'};
  const a=await f.login();assert.equal(a.data.membership.syncUserKey,'original-mirror-identity');
+ assert.equal(a.data.membership.driveFolderName,'Mirror teacher A');
  const profile=await f.call('/api/drive/profile',{cookie:a.cookie});assert.equal(profile.status,200);const data=(await profile.json()).data;
  assert.equal(data.suggestedFolder,'https://drive.google.com/drive/folders/fixtureFolder12345');assert.equal(data.configured,false);assert.equal(data.connected,false);
  assert.equal((await f.call('/api/drive/connect',{method:'POST',cookie:a.cookie,origin:'https://other.test',body:{}})).status,403);

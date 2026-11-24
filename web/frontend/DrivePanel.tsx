@@ -2,6 +2,8 @@ import React,{useEffect,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
 import {Check,ChevronRight,Download,ExternalLink,FileText,FolderOpen,Image as ImageIcon,Link2,LoaderCircle,RefreshCw,ShieldCheck,X} from 'lucide-react';
 import {academicApi} from './academic-client';
+import {getWebIdentity} from './runtime';
+import {driveFlowStorage,clearDriveFlow,readDriveFlow,saveDriveFlow,takeDriveSelection} from './drive-flow';
 import './drive-panel.css';
 
 const folderType='application/vnd.google-apps.folder';
@@ -11,14 +13,34 @@ function sizeLabel(value:string){const size=Number(value);return !Number.isFinit
 
 export function DrivePanel({compact=false}:{compact?:boolean}){
  const [open,setOpen]=useState(false),[profile,setProfile]=useState<any>(null),[folder,setFolder]=useState(''),[files,setFiles]=useState<any[]>([]),[path,setPath]=useState<any[]>([]),[page,setPage]=useState<string|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState(''),[preview,setPreview]=useState<any>(null);
- const picker=useRef<{window:Window|null;requestId:string;mode:'folder'|'files'}|null>(null),panel=useRef<HTMLElement|null>(null);
+ const panel=useRef<HTMLElement|null>(null),picker=useRef<{window:Window|null;requestId:string;mode:'folder'|'files'}|null>(null);
+ const teacherId=()=>getWebIdentity()?.user.id||'';
  const resetFiles=()=>{setFiles([]);setPath([]);setPage(null);setPreview(null);};
  const action=async(fn:()=>Promise<unknown>)=>{setBusy(true);setMessage('');setError('');try{await fn();}catch(error){setError((error as Error).message);}finally{setBusy(false);}};
  const load=async()=>{const value=await academicApi('/api/drive/profile');setProfile(value);setFolder(value.folder?'https://drive.google.com/drive/folders/'+value.folder.id:value.suggestedFolder||'');return value;};
  const show=()=>{setOpen(true);setProfile(null);resetFiles();void action(load);};
+ const copyFolder=(url:string)=>void action(async()=>{await navigator.clipboard.writeText(url);setMessage('Enlace de la carpeta copiado.');});
  const close=()=>{setOpen(false);setPreview(null);picker.current=null;};
- const connect=()=>void action(async()=>{const result=await academicApi('/api/drive/connect','POST',{});window.location.assign(result.authorizationUrl);});
- useEffect(()=>{const url=new URL(window.location.href);if(!compact&&url.searchParams.get('armi-drive')==='connected'){url.searchParams.delete('armi-drive');history.replaceState(null,'',url.pathname+url.search+url.hash);show();}},[]);
+ const connect=()=>void action(async()=>{const result=await academicApi('/api/drive/connect','POST',{});saveDriveFlow(driveFlowStorage(),{kind:'connect',teacherId:teacherId()});window.location.assign(result.authorizationUrl);});
+ useEffect(()=>{
+  const url=new URL(window.location.href),result=url.searchParams.get('armi-drive');
+  if(compact||!['connected','selected','cancelled'].includes(result||''))return;
+  url.searchParams.delete('armi-drive');history.replaceState(null,'',url.pathname+url.search+url.hash);
+  setOpen(true);resetFiles();
+  void action(async()=>{
+   const current=await load();
+   if(result==='selected'){
+    const selection=takeDriveSelection(driveFlowStorage(),teacherId(),current);
+    if(!selection)throw new Error('La cuenta o la conexión cambió. Elige la carpeta nuevamente.');
+    await applySelection(selection.mode!,selection.ids!,current);return;
+   }
+   const pending=readDriveFlow(driveFlowStorage());clearDriveFlow(driveFlowStorage());
+   if(result==='connected'){
+    if(pending?.kind==='connect'&&pending.teacherId===teacherId()&&current.connected&&!current.folder&&current.pickerConfigured){select('folder',current,true);return;}
+    setMessage(current.folder?'Google conectado. Reconocimos tu carpeta de trabajo.':'Google conectado. Ahora elige tu carpeta de trabajo.');
+   }else setMessage('No cambiaste la carpeta. Puedes continuar cuando quieras.');
+  });
+ },[]);
  useEffect(()=>{
   if(!open)return;
   const previous=document.activeElement as HTMLElement,overflow=document.body.style.overflow;document.body.style.overflow='hidden';
@@ -40,25 +62,36 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
   if(!more)setPath(old=>{const index=old.findIndex(item=>item.id===id);return index>=0?old.slice(0,index+1):[...old,{id,name}];});
  };
  const fileUrl=(file:any,inline=false)=>'/api/drive/content?file='+encodeURIComponent(file.id)+(inline?'&preview=1':'');
- const select=(mode:'folder'|'files')=>{
-  setError('');setMessage('');const requestId=crypto.randomUUID(),popup=window.open('/api/drive/picker?mode='+mode+'&requestId='+requestId,'armi-google-drive-picker','popup,width=1000,height=720');
-  picker.current={window:popup,requestId,mode};if(!popup)setError('Permite la ventana emergente para abrir el selector de Google.');
+ const select=(mode:'folder'|'files',current=profile,sameTab=false)=>{
+  setError('');setMessage('');
+  try{
+   const requestId=crypto.randomUUID();
+   if(!sameTab){
+    const popup=window.open('/api/drive/picker?mode='+mode+'&requestId='+requestId,'armi-google-drive-picker','popup,width=1000,height=720');
+    picker.current={window:popup,requestId,mode};
+    if(!popup)setError('Permite abrir el selector de Google en una ventana nueva para conservar tu trabajo de ARMI.');
+    return;
+   }
+   saveDriveFlow(driveFlowStorage(),{kind:'picker',teacherId:teacherId(),requestId,mode,revision:current.revision,email:current.email});
+   window.location.assign('/api/drive/picker?mode='+mode+'&requestId='+requestId+'&flow=tab');
+  }catch{setError('El navegador no permitió continuar. Habilita el almacenamiento de este sitio e intenta de nuevo.');}
  };
  useEffect(()=>{
   const selected=(event:MessageEvent)=>{
    const pending=picker.current,data=event.data;
-   if(!open||event.origin!==window.location.origin||!pending||event.source!==pending.window||data?.type!=='armi-drive-selected'||data.requestId!==pending.requestId||data.mode!==pending.mode||!Array.isArray(data.ids)||!data.ids.length)return;
+   if(!open||event.origin!==window.location.origin||!pending||event.source!==pending.window||data?.type!=='armi-drive-selected'||data.requestId!==pending.requestId||data.mode!==pending.mode||!Array.isArray(data.ids)||!data.ids.length||data.ids.length>20||data.ids.some((id:unknown)=>typeof id!=='string'||!/^[a-zA-Z0-9_-]{10,200}$/.test(id)))return;
    picker.current=null;
-   void action(async()=>{
-    if(data.mode==='folder')await academicApi('/api/drive/folder','PUT',{folder:data.ids[0],revision:profile.revision});
-    else if(data.mode==='files'&&profile.folder){await academicApi('/api/drive/selection','POST',{ids:data.ids});await academicApi('/api/drive/folder','PUT',{folder:profile.folder.id,revision:profile.revision});}
-    else throw new Error('Vincula primero la carpeta de este docente.');
-    resetFiles();const current=await load();if(current.folder)await browse(current.folder.id,current.folder.name);
-    setMessage('Selección comprobada. Se muestran únicamente archivos que Google autorizó para ARMI.');
-   });
+   void action(()=>applySelection(data.mode,data.ids,profile));
   };
   window.addEventListener('message',selected);return()=>window.removeEventListener('message',selected);
  },[profile,open]);
+ const applySelection=async(mode:'folder'|'files',ids:string[],current:any)=>{
+    if(mode==='folder')await academicApi('/api/drive/folder','PUT',{folder:ids[0],revision:current.revision});
+    else if(mode==='files'&&current.folder){await academicApi('/api/drive/selection','POST',{ids});await academicApi('/api/drive/folder','PUT',{folder:current.folder.id,revision:current.revision});}
+    else throw new Error('Vincula primero la carpeta de este docente.');
+    resetFiles();const updated=await load();if(updated.folder)await browse(updated.folder.id,updated.folder.name);
+    setMessage('Selección comprobada. Se muestran únicamente archivos que Google autorizó para ARMI.');
+ };
  const connected=Boolean(profile?.connected),linked=Boolean(profile?.folder),available=profile?.ready&&profile?.configured;
  return <><button type="button" className={compact?'text-[9px] text-slate-500':''} onClick={show}>Google Drive</button>
  {open&&createPortal(<div className="drive-overlay"><section ref={panel} className="drive-panel" role="dialog" aria-modal="true" aria-labelledby="drive-heading" aria-describedby="drive-description" aria-busy={busy}>
@@ -67,12 +100,12 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
   <ol className="drive-steps" aria-label="Configuración de Google Drive">{[['Cuenta',connected],['Carpeta',linked],['Archivos',false]].map(([name,done],index)=><li key={String(name)} className={done?'is-complete':(index===0&&!connected||index===1&&connected&&!linked||index===2&&linked)?'is-current':''}><span>{done?<Check size={15}/>:index+1}</span>{String(name)}</li>)}</ol>
   <div className="drive-content">
   {!profile?<div className="drive-empty"><LoaderCircle className="drive-spinner" size={26}/><p>Cargando conexión…</p>{!busy&&error&&<button type="button" onClick={()=>void action(load)}>Reintentar</button>}</div>:!available?<div className="drive-callout" role="status"><ShieldCheck size={22}/><div><strong>La conexión necesita preparación</strong><p>{!profile.ready?'El administrador debe activar la conexión de Drive en la base de datos.':'Falta configurar el acceso de Google para ARMI Web. Tus datos actuales siguen guardados en la web.'}</p><button type="button" disabled={busy} onClick={()=>void action(load)}><RefreshCw size={15}/>Comprobar de nuevo</button></div></div>:<>
-   <section className={'drive-account '+(connected?'is-connected':'')} aria-label="Cuenta de Google"><span className="drive-account-icon"><DriveMark/></span><div><span className="drive-label">{connected?'CUENTA CONECTADA':'PRIMER PASO'}</span><strong>{connected?profile.email:'Conecta tu Google Drive'}</strong><p>{connected?'Esta cuenta autoriza el acceso a tus archivos.':'Usa la cuenta donde guardas tus materiales o tu carpeta espejo.'}</p></div>{connected?<span className="drive-badge"><Check size={14}/>Conectada</span>:<button type="button" className="drive-primary" disabled={busy} onClick={connect}>Conectar mi Google Drive<ChevronRight size={17}/></button>}</section>
+   <section className={'drive-account '+(connected?'is-connected':'')} aria-label="Cuenta de Google"><span className="drive-account-icon"><DriveMark/></span><div><span className="drive-label">{connected?'CUENTA CONECTADA':'PRIMER PASO'}</span><strong>{connected?profile.email:'Conecta tu Google Drive'}</strong><p>{connected?'Esta cuenta autoriza el acceso a tus archivos. Si Google pide cookies, acepta también el permiso del navegador.':'Inicia sesión en Google, acepta los permisos y continúa para elegir tu carpeta. Usa la cuenta de tu carpeta espejo.'}</p></div>{connected?<span className="drive-badge"><Check size={14}/>Conectada</span>:<button type="button" className="drive-primary" disabled={busy} onClick={connect}>Conectar mi Google Drive<ChevronRight size={17}/></button>}</section>
    {connected&&<>
     <section className="drive-folder-card" aria-labelledby="drive-folder-heading"><div className="drive-section-heading"><span className="drive-folder-icon"><FolderOpen size={24}/></span><div><span className="drive-label">{linked?'CARPETA VINCULADA':'SIGUIENTE PASO'}</span><h3 id="drive-folder-heading">{linked?profile.folder.name:'Elige tu carpeta de trabajo'}</h3></div></div>
-     {linked?<><p>{profile.folder.mirrorVerified?'La identidad de la carpeta espejo coincide con este docente.':'Carpeta vinculada. La identidad del espejo de Windows aún no está confirmada.'}</p><div className="drive-actions"><button type="button" className="drive-primary" disabled={busy} onClick={()=>void action(async()=>{setPath([]);await browse(profile.folder.id,profile.folder.name);})}><FolderOpen size={17}/>Ver archivos de Drive</button>{profile.pickerConfigured&&<button type="button" disabled={busy} onClick={()=>select('folder')}>Cambiar carpeta</button>}</div></>:<>
+     {linked?<><div className="drive-root-location"><span className="drive-label">CARPETA RAÍZ DE ESTE DOCENTE</span><strong>{profile.folder.name}</strong><a href={profile.folder.url} target="_blank" rel="noreferrer">{profile.folder.url}<ExternalLink size={13}/></a><button type="button" disabled={busy} onClick={()=>copyFolder(profile.folder.url)}>Copiar enlace</button></div><p>{profile.folder.mirrorVerified?'La identidad de la carpeta espejo coincide con este docente.':'Carpeta vinculada. La identidad del espejo de Windows aún no está confirmada.'}</p><div className="drive-actions"><button type="button" className="drive-primary" disabled={busy} onClick={()=>void action(async()=>{setPath([]);await browse(profile.folder.id,profile.folder.name);})}><FolderOpen size={17}/>Ver archivos de Drive</button>{profile.pickerConfigured&&<button type="button" disabled={busy} onClick={()=>select('folder')}>Cambiar carpeta</button>}</div></>:<>
       <p>{profile.suggestedFolder?'Encontramos un enlace de carpeta en tu cuenta de ARMI. Es una sugerencia: Google debe autorizarla antes de vincularla.':'Todavía no hay una carpeta vinculada. Puedes elegir una carpeta existente de tu Google Drive.'}</p>
-      {profile.suggestedFolder&&<div className="drive-suggestion"><Link2 size={19}/><div><strong>Carpeta sugerida por tu cuenta</strong><div className="drive-suggestion-links"><a href={profile.suggestedFolder} target="_blank" rel="noreferrer">Ver en Google Drive<ExternalLink size={13}/></a><button type="button" disabled={busy} onClick={()=>void action(async()=>{try{await navigator.clipboard.writeText(profile.suggestedFolder);}catch{throw new Error('El navegador no permitió copiar el enlace. Puedes abrir la carpeta desde Google Drive.');}setMessage('Enlace copiado. Ábrelo con la cuenta de Google conectada a ARMI.');})}>Copiar enlace</button></div><small>Si Drive no encuentra la carpeta, comprueba la cuenta que abrió la aplicación de Google o elige tu carpeta actual con el selector. El enlace registrado puede estar desactualizado.</small></div></div>}
+      {profile.suggestedFolder&&<div className="drive-suggestion"><Link2 size={19}/><div><strong>{profile.suggestedFolderName||'Carpeta registrada en tu cuenta'}</strong><small>Carpeta raíz sugerida · pendiente de autorización</small><a className="drive-root-url" href={profile.suggestedFolder} target="_blank" rel="noreferrer">{profile.suggestedFolder}</a>{!profile.suggestedFolderName&&<small>El nombre se mostrará cuando autorices la carpeta con Google.</small>}<div className="drive-suggestion-links"><a href={profile.suggestedFolder} target="_blank" rel="noreferrer">Ver en Google Drive<ExternalLink size={13}/></a><button type="button" disabled={busy} onClick={()=>void action(async()=>{try{await navigator.clipboard.writeText(profile.suggestedFolder);}catch{throw new Error('El navegador no permitió copiar el enlace. Puedes abrir la carpeta desde Google Drive.');}setMessage('Enlace copiado. Ábrelo con la cuenta de Google conectada a ARMI.');})}>Copiar enlace</button></div><small>Si Drive no encuentra la carpeta, comprueba la cuenta que abrió la aplicación de Google o elige tu carpeta actual con el selector. El enlace registrado puede estar desactualizado.</small></div></div>}
       {profile.pickerConfigured&&<button type="button" className="drive-primary" disabled={busy} onClick={()=>select('folder')}><FolderOpen size={18}/>Elegir carpeta con Google<ChevronRight size={17}/></button>}
      </>}
      {!profile.pickerConfigured&&<div className="drive-setup-notice"><strong>El selector de carpetas aún no está listo</strong><p>Tu cuenta ya está conectada. Falta completar una configuración de ARMI para que puedas elegir una carpeta con Google.</p><button type="button" disabled={busy} onClick={()=>void action(load)}><RefreshCw size={15}/>Comprobar de nuevo</button><details><summary>Detalle para el administrador</summary><ul>{profile.pickerSetup&&!profile.pickerSetup.apiKeyReady&&<li>Revisar el valor de ARMI_GOOGLE_PICKER_API_KEY: falta o no tiene el formato esperado.</li>}{profile.pickerSetup&&!profile.pickerSetup.projectNumberReady&&<li>Revisar ARMI_GOOGLE_PROJECT_NUMBER: debe contener el número del proyecto, solo dígitos.</li>}{profile.pickerSetup&&profile.pickerSetup.projectNumberReady&&!profile.pickerSetup.projectMatchesClient&&<li>El número de proyecto no coincide con el cliente OAuth configurado.</li>}{!profile.pickerSetup&&<li>Revisar la clave de Google Picker y el número del proyecto en Cloudflare.</li>}</ul></details></div>}
