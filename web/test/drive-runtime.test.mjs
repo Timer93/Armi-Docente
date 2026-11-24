@@ -28,7 +28,7 @@ test('workerd: real outbound fetch completes Drive OAuth and blocks redirects fo
    const form=new URLSearchParams(await request.text());
    assert.equal(form.get('grant_type'),'authorization_code');
    assert.equal(createHash('sha256').update(form.get('code_verifier')).digest('base64url'),challenge);
-   return Response.json({access_token:'runtime-access-token',refresh_token:'runtime-refresh-token',expires_in:3600,scope:'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/drive.file'});
+   return Response.json({access_token:'runtime-access-token',refresh_token:'runtime-refresh-token',expires_in:3600,scope:'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/drive'});
   }
   if(url.href==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'runtime-google-account',email:'runtime@example.test',email_verified:true});
   if(url.pathname==='/drive/v3/files/runtime-folder-root')return Response.json({id:'runtime-folder-root',name:'My Drive folder',mimeType:'application/vnd.google-apps.folder',parents:[]});

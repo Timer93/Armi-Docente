@@ -30,7 +30,7 @@ function fixture(t){
    const body=new URLSearchParams(options.body);let identity;
    if(body.get('grant_type')==='refresh_token'){identity=body.get('refresh_token').slice(8);provider.refreshCalls++;}
    else{identity=body.get('code');const actual=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body.get('code_verifier')))).toString('base64url');assert.equal(actual,challenges.get(identity));}
-   return Response.json({access_token:'access-'+identity,refresh_token:'refresh-'+identity,expires_in:3600,scope:provider.tokenScope||'https://www.googleapis.com/auth/drive.file'});
+   return Response.json({access_token:'access-'+identity,refresh_token:'refresh-'+identity,expires_in:3600,scope:provider.tokenScope||'https://www.googleapis.com/auth/drive'});
   }
   const token=options.headers.authorization.replace('Bearer access-','');
   if(url.href==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'google-'+token,email:token+'@example.test',email_verified:provider.emailVerified!==false});
@@ -82,7 +82,7 @@ test('OAuth failures identify credential, consent and identity stages without le
 
 test('Drive OAuth is tied to one teacher/session, uses PKCE and never exposes stored Google tokens',async t=>{
  const f=fixture(t),[a,b]=f.teachers,auth=await f.start(a);
- assert.equal(auth.origin,'https://accounts.google.com');assert.equal(auth.searchParams.get('scope'),'https://www.googleapis.com/auth/drive.file openid email');
+ assert.equal(auth.origin,'https://accounts.google.com');assert.equal(auth.searchParams.get('scope'),'https://www.googleapis.com/auth/drive openid email');
  assert.equal((await f.finish(b,auth,'A')).status,400);assert.equal(f.calls.length,0);
  assert.equal((await f.finish({...a,token_hash:'f'.repeat(64)},auth,'A')).status,400);
  assert.equal((await f.finish(a,auth,'A')).status,302);
@@ -133,16 +133,16 @@ test('Drive setup reports missing schema/configuration; reconnect races and dupl
  f.sqlite.exec('DROP TABLE drive_oauth_states');assert.equal((await f.profile(a)).ready,false);
 });
 
-test('limited Drive consent does not silently include old files, and Picker selection is checked against the linked folder',async t=>{
- const f=fixture(t),[a]=f.teachers;await f.connect(a);f.provider.authorized=new Set([ROOT_A]);
- assert.equal((await f.link(a)).status,200);assert.equal((await f.profile(a)).folder.mirrorVerified,false);
- const read=async()=>(await(await f.call(a,'/api/drive/files')).json()).data;
- assert.equal((await read()).limitedAccess,true);assert.deepEqual((await read()).files,[]);
- assert.equal((await f.call(a,'/api/drive/content?file='+FILE_A)).status,502,'An unselected file is not authorized by assuming its parent is selected');
- f.provider.authorized.add(FILE_A);
- assert.equal((await f.call(a,'/api/drive/selection',{method:'POST',body:{ids:[FILE_A]}})).status,200);
- assert.equal((await read()).files[0].id,FILE_A);
- f.provider.authorized.add(OUTSIDE);f.provider.authorized.add(ROOT_B);
+test('Broad consent reads existing descendants without individual grants and rejects files outside the selected root',async t=>{
+ const f=fixture(t),[a]=f.teachers;await f.connect(a);await f.link(a);
+ const child='nested-folder-A',nested='nested-file-AAA';
+ f.documents.set(child,{id:child,name:'Nested',mimeType:'application/vnd.google-apps.folder',parents:[ROOT_A]});
+ f.documents.set(nested,{id:nested,name:'Old.pdf',mimeType:'application/pdf',parents:[child],size:'3',body:'old'});
+ const read=async parent=>(await(await f.call(a,'/api/drive/files'+(parent?'?parent='+parent:''))).json()).data;
+ assert.equal((await read()).limitedAccess,false);assert.ok((await read()).files.some(file=>file.id===FILE_A));
+ assert.equal((await read(child)).files[0].id,nested);
+ assert.equal(await(await f.call(a,'/api/drive/content?file='+nested)).text(),'old');
+ assert.equal((await f.call(a,'/api/drive/files?parent='+ROOT_B)).status,403);
  assert.equal((await f.call(a,'/api/drive/selection',{method:'POST',body:{ids:[OUTSIDE]}})).status,403);
  assert.equal((await f.call(a,'/api/drive/picker-config')).status,503);
  f.env.ARMI_GOOGLE_PICKER_API_KEY='AIza'+'a'.repeat(35);f.env.ARMI_GOOGLE_PROJECT_NUMBER='123456789012';
@@ -193,7 +193,7 @@ test('legacy Apps Script folders are never preselected as mirrors and require a 
  assert.equal((await f.link(a,ROOT_A)).status,200,'An actual mirror marker may verify an old registered URL');
 });
 
-test('Drive never upgrades a limited authorization to broad Drive read access',async t=>{
+test('Drive rejects a new consent missing the requested full Drive permission',async t=>{
  const f=fixture(t),[a]=f.teachers;f.provider.tokenScope='https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly';
  const result=await f.finish(a,await f.start(a));assert.equal(result.status,502);
  assert.equal((await f.profile(a)).connected,false);
@@ -209,4 +209,20 @@ test('Drive file selections reuse parent metadata and cap each selection instead
  const after=f.calls.length;
  assert.equal((await f.call(a,'/api/drive/selection',{method:'POST',body:{ids:[...ids,'one-more-file']}})).status,400);
  assert.equal(f.calls.length,after);
+});
+
+test('Legacy encrypted tokens require explicit reauthorization; reconnect keeps the folder and refresh keeps its granted scope',async t=>{
+ const f=fixture(t),[a]=f.teachers;await f.connect(a);await f.link(a);
+ const row=f.sqlite.prepare('SELECT * FROM drive_connections WHERE teacher_id=?').get(a.id);
+ const key=await crypto.subtle.importKey('raw',Buffer.from(f.env.ARMI_DRIVE_ENCRYPTION_KEY,'hex'),'AES-GCM',false,['encrypt','decrypt']);
+ const aad=new TextEncoder().encode(a.id+':drive');
+ const original=JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:Buffer.from(row.token_iv,'hex'),additionalData:aad},key,Buffer.from(row.token_cipher,'hex'))));
+ delete original.scope;
+ const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv:Buffer.from(row.token_iv,'hex'),additionalData:aad},key,new TextEncoder().encode(JSON.stringify(original)));
+ f.sqlite.prepare('UPDATE drive_connections SET token_cipher=? WHERE teacher_id=?').run(Buffer.from(cipher).toString('hex'),a.id);
+ const count=f.calls.length;assert.equal((await f.profile(a)).requiresReauthorization,true);
+ assert.equal((await f.call(a,'/api/drive/files')).status,409);assert.equal(f.calls.length,count,'Legacy token is never silently upgraded or sent to Google');
+ await f.connect(a);const profile=await f.profile(a);assert.equal(profile.requiresReauthorization,false);assert.equal(profile.folder.id,ROOT_A);
+ f.advance(3600000);assert.equal((await f.call(a,'/api/drive/files')).status,200);
+ assert.equal((await f.profile(a)).requiresReauthorization,false);
 });

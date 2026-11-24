@@ -1,7 +1,8 @@
 import {AuthError} from './apps-script-auth.js';
 import {serviceLimit} from './ai.js';
 const fail=(message,status=400,diagnostic)=>{const error=new AuthError(message,status);if(diagnostic)error.driveDiagnostic=diagnostic;throw error;};
-const SCOPE='https://www.googleapis.com/auth/drive.file';
+const SCOPE='https://www.googleapis.com/auth/drive';
+const hasDriveScope=value=>typeof value==='string'&&value.split(/\s+/).includes(SCOPE);
 const API='https://www.googleapis.com/drive/v3/';
 const FOLDER='application/vnd.google-apps.folder';
 const fileId=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{10,200}$/.test(value);
@@ -51,14 +52,15 @@ async function readRemoteJson(response,limit=1000000){
 async function tokenRequest(env,requester,values){
  const response=await remote(requester,'https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:env.ARMI_GOOGLE_CLIENT_ID,client_secret:env.ARMI_GOOGLE_CLIENT_SECRET,...values}).toString()},true);
  const payload=await readRemoteJson(response);
- if(typeof payload.access_token!=='string'||!payload.access_token||payload.access_token.length>4096||!Number.isFinite(Number(payload.expires_in))||Number(payload.expires_in)<=0||(payload.scope&&(!payload.scope.split(' ').includes(SCOPE)||payload.scope.split(' ').some(scope=>scope==='https://www.googleapis.com/auth/drive'||scope==='https://www.googleapis.com/auth/drive.readonly'))))fail('Google no concedió únicamente los permisos limitados solicitados. Revisa la configuración del cliente OAuth.',502);
+ if(typeof payload.access_token!=='string'||!payload.access_token||payload.access_token.length>4096||!Number.isFinite(Number(payload.expires_in))||Number(payload.expires_in)<=0||(payload.scope&&!hasDriveScope(payload.scope)))fail('Google no concedió el permiso necesario para acceder al contenido de tu carpeta. Vuelve a conectar y acepta los permisos solicitados.',502);
  return payload;
 }
 async function accessToken(env,row,requester,now){
  const value=await open(env,`${row.teacher_id}:drive`,row.token_cipher,row.token_iv);
+ if(!hasDriveScope(value.scope))fail('Actualiza los permisos de Google para consultar tu carpeta y sus subcarpetas.',409,'DRIVE-REAUTORIZAR');
  if(value.expiresAt>now+60000)return value.access;
  const payload=await tokenRequest(env,requester,{grant_type:'refresh_token',refresh_token:value.refresh});
- const saved=await seal(env,`${row.teacher_id}:drive`,{access:payload.access_token,refresh:payload.refresh_token||value.refresh,expiresAt:now+Number(payload.expires_in)*1000});
+ const saved=await seal(env,`${row.teacher_id}:drive`,{access:payload.access_token,refresh:payload.refresh_token||value.refresh,scope:payload.scope||value.scope,expiresAt:now+Number(payload.expires_in)*1000});
  const result=await env.DB.prepare('UPDATE drive_connections SET token_cipher=?,token_iv=? WHERE teacher_id=? AND revision=?').bind(saved.cipher,saved.iv,row.teacher_id,row.revision).run();
  if(!result.meta.changes)fail('La conexión cambió en otra pestaña. Abre nuevamente el panel.',409);
  return payload.access_token;
@@ -98,12 +100,14 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  const url=new URL(request.url),db=env.DB,ready=await driveReady(db),settings=config(env),picker=pickerConfig(env);
  if(request.headers.has('x-armi-teacher-id')&&request.headers.get('x-armi-teacher-id')!==teacher.id)fail('La cuenta cambió. Regresa a ARMI y vuelve a elegir la carpeta.',409);
  if(url.pathname==='/api/drive/profile'&&request.method==='GET'){
-  const row=ready?await db.prepare('SELECT google_email,folder_id,folder_name,mirror_verified,revision FROM drive_connections WHERE teacher_id=?').bind(teacher.id).first():null;
+  const row=ready?await db.prepare('SELECT google_email,folder_id,folder_name,mirror_verified,revision,token_cipher,token_iv FROM drive_connections WHERE teacher_id=?').bind(teacher.id).first():null;
+  let requiresReauthorization=Boolean(row);
+  if(row&&settings){try{const saved=await open(env,`${teacher.id}:drive`,row.token_cipher,row.token_iv);requiresReauthorization=!hasDriveScope(saved.scope);}catch{requiresReauthorization=true;}}
   const membership=JSON.parse(teacher.membership_json||'{}');
   const legacy=legacyFolder(membership),mirrorUser=scopeKey(membership.syncUserKey||teacher.provider_username);
   // The legacy Apps Script archive URL is not the Drive Desktop mirror. Never
   // prefill or suggest it as the active synchronization root.
-  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:'',suggestedFolderName:'',legacyFolder:legacy,expectedMirrorPath:'ARMI Sync/users/'+mirrorUser,expectedMirrorName:mirrorUser,legacyLocationLinked:Boolean(row?.folder_id&&legacy?.id===row.folder_id&&!row.mirror_verified),folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,url:'https://drive.google.com/drive/folders/'+row.folder_id,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:true}});
+  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:'',suggestedFolderName:'',legacyFolder:legacy,expectedMirrorPath:'ARMI Sync/users/'+mirrorUser,expectedMirrorName:mirrorUser,legacyLocationLinked:Boolean(row?.folder_id&&legacy?.id===row.folder_id&&!row.mirror_verified),folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,url:'https://drive.google.com/drive/folders/'+row.folder_id,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:requiresReauthorization,requiresReauthorization}});
  }
  if(!ready)fail('Falta activar 0012_drive_connection.sql en D1.',503,'DRIVE-DATOS');
  if(!settings)fail('El administrador debe configurar la conexión de Google Drive para ARMI Web.',503,'DRIVE-CONFIG');
@@ -134,14 +138,14 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
   stage='DRIVE-TOKEN';
   const tokens=await tokenRequest(env,requester,{grant_type:'authorization_code',code,redirect_uri:settings.redirect,code_verifier:verifier});
   stage='DRIVE-PERMISOS';
-  if(!tokens.scope?.split(' ').includes(SCOPE))fail('Google no confirmó el permiso limitado para archivos seleccionados.',502);
+  if(!hasDriveScope(tokens.scope))fail('Google no confirmó el permiso para acceder al contenido de tu carpeta.',502);
   if(typeof tokens.refresh_token!=='string'||!tokens.refresh_token||tokens.refresh_token.length>4096)fail('Google no concedió acceso persistente. Vuelve a conectar y autoriza el acceso.',502);
   stage='DRIVE-IDENTIDAD';
   const account=await readRemoteJson(await remote(requester,'https://openidconnect.googleapis.com/v1/userinfo',{headers:{authorization:`Bearer ${tokens.access_token}`}}));
   if(typeof account.sub!=='string'||typeof account.email!=='string'||account.email_verified!==true)fail('Google no devolvió la identidad verificada de la cuenta.',502);
   const info={user:{permissionId:account.sub,emailAddress:account.email}};
   stage='DRIVE-CIFRADO';
-  const sealed=await seal(env,`${teacher.id}:drive`,{access:tokens.access_token,refresh:tokens.refresh_token,expiresAt:now+Number(tokens.expires_in)*1000});
+  const sealed=await seal(env,`${teacher.id}:drive`,{access:tokens.access_token,refresh:tokens.refresh_token,scope:tokens.scope,expiresAt:now+Number(tokens.expires_in)*1000});
   stage='DRIVE-GUARDADO';
   const saved=await db.prepare(`INSERT INTO drive_connections(teacher_id,google_account_id,google_email,token_cipher,token_iv,updated_at) SELECT ?,?,?,?,?,? WHERE ?=0
    ON CONFLICT(teacher_id) DO UPDATE SET google_account_id=excluded.google_account_id,google_email=excluded.google_email,token_cipher=excluded.token_cipher,token_iv=excluded.token_iv,folder_id=CASE WHEN drive_connections.google_account_id=excluded.google_account_id THEN drive_connections.folder_id ELSE NULL END,folder_name=CASE WHEN drive_connections.google_account_id=excluded.google_account_id THEN drive_connections.folder_name ELSE '' END,mirror_verified=CASE WHEN drive_connections.google_account_id=excluded.google_account_id THEN drive_connections.mirror_verified ELSE 0 END,revision=drive_connections.revision+1,updated_at=excluded.updated_at WHERE drive_connections.revision=?`).bind(teacher.id,info.user.permissionId,info.user.emailAddress,sealed.cipher,sealed.iv,now,row?.revision||0,row?.revision||0).run();
@@ -169,7 +173,7 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  }
  if(url.pathname==='/api/drive/picker-config'&&request.method==='GET'){
   if(!picker.configured)fail('El administrador debe completar la configuración del selector de Google.',503);
-  // Only the teacher's isolated Picker page receives a short-lived, per-file
+  // Only the teacher's isolated Picker page receives a short-lived, teacher-specific
   // access token. Never return refresh tokens or pass tokens to the parent page.
   return Response.json({success:true,data:{accessToken:token,developerKey:picker.developerKey,appId:picker.appId,folderId:row.folder_id||null,revision:row.revision,teacherId:teacher.id}});
  }
@@ -202,7 +206,7 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
   const parent=url.searchParams.get('parent')||row.folder_id,page=url.searchParams.get('pageToken')||'';if(page.length>2048)fail('Página no válida.');
   const directory=await within(requester,token,parent,row.folder_id);if(directory.mimeType!==FOLDER)fail('La ruta no es una carpeta.');
   const result=await list(requester,token,parent,page);await unchanged(db,row);
-  return Response.json({success:true,data:{folder:{id:parent,name:directory.name},limitedAccess:true,files:(result.files||[]).map(file=>({id:file.id,name:file.name,mimeType:file.mimeType,size:file.size||null,modifiedTime:file.modifiedTime||null})),nextPageToken:result.nextPageToken||null}});
+  return Response.json({success:true,data:{folder:{id:parent,name:directory.name},limitedAccess:false,files:(result.files||[]).map(file=>({id:file.id,name:file.name,mimeType:file.mimeType,size:file.size||null,modifiedTime:file.modifiedTime||null})),nextPageToken:result.nextPageToken||null}});
  }
  if(url.pathname==='/api/drive/content'&&request.method==='GET'){
   const id=url.searchParams.get('file'),file=await within(requester,token,id,row.folder_id);

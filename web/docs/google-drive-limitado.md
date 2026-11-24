@@ -1,98 +1,50 @@
-# Google Drive por docente: conexión limitada
+﻿# Google Drive por docente: carpeta y subcarpetas
+
+Actualizado el 24 de noviembre de 2026. Sustituye el flujo anterior de autorización archivo por archivo.
 
 ## Estado real
 
-Esta entrega conecta la cuenta del docente con Google OAuth, permite elegir una carpeta con Google Picker, autorizar archivos existentes y consultarlos, descargar binarios o previsualizar imágenes y PDF. No reemplaza el login de Google Sheets / Apps Script, no modifica Windows ni habilita todavía subida de evidencias o sincronización académica bidireccional.
+Se solicita `https://www.googleapis.com/auth/drive openid email`. Google concede acceso general de gestión a Drive: no limita este permiso a una carpeta. ARMI aplica el límite en el servidor: comprueba la raíz vinculada y la ascendencia de los archivos antes de listarlos, descargarlos, previsualizarlos o aceptar selecciones. Elegir otra raíz es una acción explícita del docente. Una raíz no puede compartirse entre cuentas ARMI.
 
-El código solicita `drive.file openid email`. Rechaza autorizaciones que incluyan los permisos amplios `drive` o `drive.readonly`; no amplía el permiso automáticamente. El alcance limitado permite gestionar archivos autorizados por el usuario, pero esta entrega de ARMI solo realiza lecturas de Drive. La web continúa guardando datos académicos en D1 hasta desarrollar y validar la reconciliación de cambios.
+Esto permite consultar los archivos existentes y nuevos accesibles para esa cuenta dentro de la raíz y sus subcarpetas sin autorizarlos uno por uno. Se navega por niveles, con paginación de 50 elementos y actualización manual, sin sondeo ni descarga automática de todo el árbol.
 
-Elegir una carpeta **no demuestra que todos sus archivos estén autorizados**. La lista solo muestra los archivos que Google devuelve para ARMI. El docente puede pulsar **Autorizar archivos o carpetas existentes**. Una lista vacía no se interpreta como eliminación, no se escribe en Windows y no permite activar una importación automática. Los archivos nuevos creados fuera de ARMI también deben comprobarse; no anunciar sincronización completa por seleccionar la carpeta.
+Esta versión solo lee Drive. No habilita subida, edición, eliminación, creación automática de carpetas ni sincronización académica con Windows. Los binarios descargables están limitados a 100 MB; los documentos nativos de Google aún no tienen exportación. Los datos académicos web siguen en D1 y el login sigue en Sheets/Apps Script. El escritorio permanece intacto.
 
-El panel separa **Cuenta → Carpeta → Archivos**. Si Apps Script devuelve un enlace válido de carpeta para la cuenta autenticada, aparece como sugerencia; no hay un enlace fijo para un docente concreto, ni se escanea todo su Drive por nombre. La carpeta solo queda vinculada al seleccionarla y pasar las comprobaciones del servidor. Si no existe sugerencia, el usuario puede elegir una carpeta con Google Picker. Si falta su configuración, **Detalle para el administrador** identifica la clave o el número de proyecto que hay que revisar, sin mostrar valores secretos. Se eliminan espacios al principio o final de estos dos valores y se comprueba que el número de proyecto corresponda al prefijo numérico del cliente OAuth.
+## Configuración pendiente en Google Cloud
 
-## Configuración administrativa, una vez para ARMI
+1. Abrir el proyecto **Armi Docente Cloud** (`armi-docente-cloud`).
+2. En **Google Auth Platform → Acceso a los datos → Agregar o quitar permisos**, declarar `https://www.googleapis.com/auth/drive`, además de identidad y correo. `drive.file` ya no es suficiente.
+3. Revisar **Centro de verificación**. `drive` es restringido: la verificación de la marca no aprueba este alcance. Completar la justificación y los requisitos de Google, indicando que el Worker transmite contenido para descarga/vista previa.
+4. Google indica que almacenar o transmitir datos de permisos restringidos en servidores requiere una evaluación de seguridad. Este diseño transmite archivos por el Worker. No prometer aprobación inmediata o gratuita: la evaluación puede implicar costos externos. No contratarla ni activar facturación sin autorización del propietario. Una app sin aprobación puede mostrar avisos, límites o bloqueos; ponerla En producción no los elimina.
+5. Conservar el cliente **ARMI Web**, origen `https://web.armiapp.com`, y redirección `https://web.armiapp.com/api/drive/oauth/callback`. No cambiar secretos ni generar otro EXE.
+6. Publicado el código, cada conexión anterior debe volver a autorizar desde **Google Drive → Actualizar permisos de Google**. Con la misma cuenta Google se conserva la carpeta elegida; otra cuenta la desvincula. Los tokens antiguos no se amplían silenciosamente.
 
-1. Crear un proyecto llamado **ARMI Docente** en [Google Cloud](https://console.cloud.google.com/projectcreate), sin vincular cuenta de facturación ni contratar la prueba de pago. La facturación no es un paso de este procedimiento.
-2. En el mismo proyecto habilitar **Google Drive API** y **Google Picker API**.
-3. En **Google Auth Platform**, configurar la marca ARMI, correo de soporte y audiencia **External**. Privacidad pública: `https://web.armiapp.com/privacidad`; condiciones: `https://web.armiapp.com/condiciones`. Comprobar que ambos enlaces carguen sin sesión antes de guardarlos en Google. Para la prueba inicial, añadir la cuenta Google del docente como usuario de prueba. Añadir únicamente `drive.file` y los permisos básicos de identidad `openid`, `email`. Para el acceso de docentes externos, completar la marca y publicar la aplicación desde **Público**; atender los requisitos de verificación que indique Google. Publicar OAuth no habilita funciones pendientes de ARMI ni activa facturación por sí mismo.
-4. Crear un cliente OAuth de tipo **Aplicación web**, con nombre **ARMI Web**. Origen autorizado: `https://web.armiapp.com`. URI de redirección exacta:
+El alcance se guarda dentro del token cifrado. Tokens antiguos sin alcance registrado se tratan como pendientes de autorización. No se necesita otra migración SQL. Hasta renovar el consentimiento, se bloquean las consultas a Drive y se muestra la acción necesaria; el resto de ARMI sigue disponible.
 
-   ```text
-   https://web.armiapp.com/api/drive/oauth/callback
-   ```
+Referencias oficiales: [Permisos y evaluación de seguridad](https://developers.google.com/workspace/drive/api/guides/api-specific-auth), [Verificación restringida](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
 
-5. Crear la clave de API para Google Picker. Restringirla a sitios web `https://web.armiapp.com/*` y `https://docs.google.com/*`, y a **Google Picker API**. El número de proyecto usado en Picker debe ser del mismo proyecto del cliente OAuth. El navegador no hace llamadas directas a Drive API fuera de Picker.
-6. En **Cloudflare → D1 → armi-docente-web → Consola**, ejecutar `migrations/0012_drive_connection.sql`. Es aditivo y repetible; no borra las tablas existentes ni modifica la base local.
-7. En las variables y secretos de runtime de **armi-docente-web / Producción**, guardar estos valores como **Secretos** para conservarlos entre publicaciones de Wrangler. No subir valores reales a GitHub ni pegarlos en una conversación:
+## Configuración existente y controles
 
-   | Nombre | Valor |
-   |---|---|
-   | `ARMI_GOOGLE_CLIENT_ID` | ID del cliente web, terminado en `.apps.googleusercontent.com` |
-   | `ARMI_GOOGLE_CLIENT_SECRET` | Secreto del cliente OAuth web |
-   | `ARMI_GOOGLE_PROJECT_NUMBER` | Número del proyecto, solo dígitos; no su nombre ni ID alfanumérico |
-   | `ARMI_GOOGLE_PICKER_API_KEY` | Clave de Google Picker con restricciones |
-   | `ARMI_DRIVE_ENCRYPTION_KEY` | Clave aleatoria de cifrado de 32 bytes, representada con 64 caracteres hexadecimales |
+Mantener Drive API y Picker API habilitadas. Mantener los secretos `ARMI_GOOGLE_CLIENT_ID`, `ARMI_GOOGLE_CLIENT_SECRET`, `ARMI_GOOGLE_PROJECT_NUMBER`, `ARMI_GOOGLE_PICKER_API_KEY` y `ARMI_DRIVE_ENCRYPTION_KEY` fuera del repositorio. La clave de Picker debe restringirse a Picker API y a `https://web.armiapp.com/*` y `https://docs.google.com/*`. No reemplazar la clave de cifrado: impediría abrir las conexiones guardadas. Se conservan las tablas de `0012_drive_connection.sql`.
 
-   La clave de Picker y el ID de cliente son identificadores que Google utiliza en el navegador, no contraseñas de la cuenta. Se almacenan aquí para mantener la configuración fuera de GitHub. La clave de Picker se entrega únicamente al selector del docente autenticado. El secreto OAuth y la clave de cifrado nunca se envían al navegador.
+OAuth mantiene PKCE, estado de un solo uso asociado a sesión/docente y caducidad. Tokens cifrados con AES-GCM y datos asociados al docente; guardados con control de revisión. Desvincular no elimina archivos de Drive. El secreto OAuth y el token de renovación nunca salen del servidor.
 
-   Para crear la clave de cifrado en PowerShell desde la carpeta del proyecto:
+El selector aislado recibe el token breve del docente en memoria; con este cambio también tiene permiso general. Conservar su política de scripts, aislamiento y prohibición de registrar o persistir el token. La ventana principal y los estudiantes no lo reciben. El servidor comprueba la raíz aunque Google permita consultar el resto del Drive.
 
-   ```powershell
-   node web/scripts/create-drive-encryption-key.mjs | Set-Clipboard
-   ```
+## Carpeta por usuario
 
-   Pegar en Cloudflare sin imprimirla ni compartirla. Conservarla: reemplazarla impedirá abrir conexiones ya guardadas y exigirá reconectar las cuentas.
-8. Guardar/implementar los secretos, entrar a ARMI Web y abrir **Google Drive**. Conectar la cuenta personal del docente y elegir su carpeta real del espejo con el selector de Google. Si Apps Script informa una carpeta, se ofrece como sugerencia; no se confía en una ruta `G:\...` o en el nombre del docente para elegirla.
+Para Windows se elige la carpeta del usuario dentro de `ARMI Sync/users/<syncUserKey>` en Drive. Un usuario nuevo puede elegir una carpeta propia o crearla manualmente antes. La web todavía no crea el espejo. La ruta local no permite deducir el ID de Drive. Los campos antiguos de Apps Script `driveFolderUrl`, `driveFolderName` y `syncFolderInfo` pertenecen al servicio anterior: no son sugerencias de espejo ni se vinculan automáticamente; solo aparecen como detalle administrativo. Si existe `.armi-sync-root.json`, debe corresponder al docente autenticado.
 
-Si falta configuración, el panel lo indica y mantiene disponible el resto de ARMI. No hace falta modificar la URL de Apps Script. Windows continúa usando su espejo actual.
+Login mantiene `skipDrivePreparation=true` y no crea carpetas. Subir a GitHub no actualiza Apps Script: conservar su despliegue y URL `/exec` al actualizarlo.
 
-## Prueba de aceptación con una carpeta real
+Picker inicia en Mi unidad con LIST y `setParent('root')`; la búsqueda puede mostrar otras ubicaciones. Esto no sustituye los controles del servidor. La selección se guarda desde la ventana aislada antes de cerrarla; se comprueban docente, revisión, origen, ventana y nonce. El retorno guarda IDs y metadatos en sessionStorage nativo temporal de un solo uso, sin tokens. No repetir escrituras automáticamente ante respuestas perdidas.
 
-- Confirmar que el correo conectado es la cuenta que contiene o puede acceder a la carpeta.
-- Seleccionar esa carpeta y autorizar una imagen, un PDF y, si existe, `.armi-sync-root.json` de su raíz. El servidor compara `syncUserKey` del marcador con la identidad confiable recibida de Apps Script. Una identidad de otro docente se rechaza.
-- Abrir la lista y descargar los mismos archivos; comparar sus contenidos con Windows. Verificar que los archivos no autorizados no se describen como borrados.
-- Comprobar un archivo creado desde Windows después de la selección inicial: medir si Google lo concede o exige seleccionarlo de nuevo. Este resultado determina qué adaptación será necesaria para la sincronización automática.
-- Intentar abrir desde ARMI un archivo externo a la carpeta: se debe rechazar aunque esa cuenta Google pueda leerlo.
-- Desvincular y comprobar que cesa el acceso desde ARMI sin borrar archivos de Drive.
+## Incidencias y pruebas
 
-Hasta completar esta prueba con Google real, la conexión está preparada y probada con proveedor simulado, pero no se considera validada para el espejo del usuario. Los documentos nativos de Google no tienen exportación conectada en esta entrega; los binarios descargables están limitados a 100 MB.
+- Workers usa `redirect:'manual'` para rechazar redirecciones sin reenviar secretos. No usar `redirect:'error'`.
+- ASSETS redirige `.html` con 307. Servir internamente `/drive-picker` con respuesta 200, manteniendo `/api/drive/picker?...` y su política de seguridad.
+- OAuth y las cookies de Google del navegador son distintos: ARMI no puede iniciar sesión ni aceptar almacenamiento por el usuario. Edge móvil fue probado por el usuario; Brave móvil llegó a navegar solo a docs.google.com y requiere otra prueba real. No considerarlo resuelto sin esa prueba.
+- Una lista vacía nunca significa borrado ni dispara cambios en Windows.
+- Pruebas con proveedor simulado cubren alcance explícito, tokens antiguos, reconexión, descendientes, archivos externos, aislamiento, cifrado y revisión. Workerd valida el runtime, sin sustituir la prueba real ni la aprobación de Google.
 
-## Seguridad y consumo
-
-- Las solicitudes de Google usan `redirect: 'manual'` y rechazan respuestas que no sean exitosas. No utilizar `redirect: 'error'`: Workers no implementa ese modo y falla antes de enviar la solicitud. `test/drive-runtime.test.mjs` ejecuta el flujo de autorización y lectura en workerd con Google simulado y comprueba que no se sigan redirecciones con credenciales. La misma comprobación cubre las llamadas de IA; no consume claves reales ni reemplaza la prueba de Drive con una cuenta real.
-- El HTML del selector se sirve internamente desde el recurso canónico `/drive-picker`, con una respuesta 200 en `/api/drive/picker?mode=…&requestId=…`. No pedir `/drive-picker.html` al binding ASSETS: genera una redirección 307 que puede sacar la ventana de la ruta autenticada, perder los parámetros y aplicar la política de scripts de la página principal. La prueba de workerd incluye el binding real de recursos estáticos y comprueba que la ruta protegida no redirige y conserva su política de seguridad específica. No quitar la comprobación de ventana de origen y nonce para ocultar ese error.
-- La ventana solo muestra un indicador de carga, que se oculta cuando se abre el selector de Google. Si falla la preparación, detiene el indicador y ofrece reintentar o consultar ayuda; no vuelve a iniciar OAuth automáticamente. La interfaz de Google se solicita en español. Sus avisos de sesión y cookies pertenecen al contenido de Google: la autorización guardada en ARMI no demuestra que el navegador permita esa sesión incrustada. El panel ofrece instrucciones para abrir Drive en el mismo navegador, permitir las cookies solicitadas para ese contexto y consultar la ayuda oficial de Edge; no se fuerza una aceptación ni se solicita acceso general a todo Drive. La prueba del cliente comprueba la transición de carga, errores/tiempos de espera y la devolución segura de IDs, pero no simula una aceptación real de cookies del usuario.
-
-- OAuth usa PKCE, estado de un solo uso con caducidad y vínculo a la sesión y al docente. Los tokens persistentes se cifran con AES-GCM y datos asociados de la cuenta. Se comprueba la revisión al reconectar o desvincular.
-- El selector vive en `/api/drive/picker`, separado de la interfaz principal. Solo esa página permite cargar los scripts/iframes de Google. Recibe un token de acceso breve en memoria para Picker, nunca el token de renovación. La ventana principal verifica origen, ventana y nonce antes de aceptar la selección, y el servidor vuelve a comprobar la carpeta.
-- Solo docentes autenticados acceden a estas rutas; no se entregan tokens de Google a estudiantes. Esta conexión no cambia la contraseña de ARMI ni la de Google.
-- Las listas se paginan a 50 archivos, y el selector autoriza hasta 20 archivos por vez. Se reutilizan las comprobaciones de carpetas dentro del mismo lote y se limita a 40 llamadas de Drive por petición para conservar margen en Workers Free. No hay sondeo periódico ni reintentos automáticos. Se renueva el token únicamente cuando hace falta.
-- El contador de administrador registra `driveCalls` y `driveUnitsEstimated` por docente en Analytics Engine, sin escribir un contador D1 por cada consulta. Son estimaciones de llamadas desde este Worker, no una factura: 5 unidades para metadatos, 100 para listas y 200 para descargas, según las referencias consultadas. No incluye uso externo del proyecto ni transferencias en bytes.
-- En modo OAuth **Testing**, Google puede caducar el token de renovación a los 7 días para estos permisos. No prometer una conexión permanente hasta configurar la publicación y verificación necesarias para producción. No se habilita facturación para esa prueba.
-
-Referencias: [Permisos de Drive](https://developers.google.com/workspace/drive/api/guides/api-specific-auth), [Google Picker](https://developers.google.com/workspace/drive/picker/guides/web-picker), [OAuth y caducidad de tokens](https://developers.google.com/identity/protocols/oauth2), [Cuotas de Drive](https://developers.google.com/workspace/drive/api/guides/limits).
-# Continuación de conexión y carpeta por docente
-
-Al conectar Google, ARMI vuelve al panel y continúa al selector en la misma pestaña si falta vincular una carpeta. Una carpeta ya vinculada se conserva al reconectar la misma cuenta de Google; cambiar de cuenta la desvincula. Cancelar el selector conserva la carpeta anterior. Para cambiar carpetas o autorizar archivos durante el trabajo, se conserva el selector en ventana aparte: no se recarga una pantalla con ediciones en curso.
-
-La continuación usa únicamente un identificador de selección, cuenta ARMI, revisión, correo y los IDs elegidos en el sessionStorage nativo de esa pestaña (15 minutos, un solo uso). Se captura antes del almacenamiento en memoria de compatibilidad del escritorio. No contiene tokens de Google. Al regresar se comprueban docente, correo y revisión; el servidor vuelve a verificar los permisos y pertenencia de la carpeta.
-
-Los campos de Apps Script `driveFolderUrl` / `driveFolderName` y `syncFolderInfo` describen la ubicación del servicio anterior, no el espejo de Drive para escritorio. Se muestran solo como «Ubicación anterior de Apps Script», nunca como sugerencia de sincronización ni como valor inicial para vincular. El panel guía a `ARMI Sync/users/<syncUserKey>` dentro de la carpeta que haya elegido el docente. La web no puede deducir el ID de Drive a partir de una ruta local ni verificar un espejo al que Google no dio acceso.
-
-La carpeta vinculada muestra el nombre confirmado y su URL canónica, sin consultas periódicas adicionales a Drive. Un nombre guardado puede quedar desactualizado si se renombra desde Google; volver a seleccionar actualiza el nombre. Un enlace anterior solo puede vincularse como espejo cuando un marcador autorizado confirma la misma identidad; las vinculaciones previas sin verificar se advierten sin borrarlas.
-
-El Worker solicita `skipDrivePreparation=true` en Login. El script `scripts/ArmiAuthWebApp.gs` debe actualizarse en su implementación existente para respetarlo: Login solo consulta carpetas existentes, no ejecuta `ensureSyncUserFolder_`. No se han retirado operaciones explícitas del proveedor anterior ni se ha cambiado la carpeta espejo de Windows. Subir código a GitHub no actualiza por sí solo una implementación de Apps Script.
-
-Google puede requerir sesión y autorización de cookies/almacenamiento en cada navegador, especialmente en móviles. El flujo no acepta permisos por el usuario ni garantiza suprimir las pantallas de Google. La sesión de la aplicación móvil de Drive no reemplaza la sesión del navegador.
-
-El panel distingue «Ya uso ARMI en mi computadora» y «Empiezo en la web». La ruta habitual de Windows es una ayuda para encontrar una carpeta, no prueba de que ya exista. Un usuario nuevo puede crear una carpeta vacía en su propio Drive y seleccionarla. La web todavía no crea la estructura de sincronización ni sube archivos; no ofrecer botones que prometan esa función. Las referencias del servicio anterior y claves de configuración se muestran únicamente cuando la sesión tiene `admin.canViewUsage`; esto es presentación, no sustituye autorización de servidor.
-
-## Navegación y confirmación en móviles
-
-La vista de carpetas inicia con `setParent('root')` y `DocsViewMode.LIST`, para navegar desde Mi unidad por niveles; la búsqueda de Google puede mostrar resultados de otras ubicaciones. La vista para autorizar archivos inicia dentro de la carpeta ya vinculada. Este selector muestra Google Drive, no las carpetas locales del teléfono que no se hayan subido.
-
-Al seleccionar, la página aislada del selector confirma directamente la operación con el Worker, comprueba docente y revisión y muestra «Confirmando tu selección». No depende de que el navegador ejecute JavaScript en la pestaña de ARMI en segundo plano. Solo después del guardado envía `armi-drive-saved` a la pestaña principal y cierra. Hay una opción para volver a ARMI si el navegador impide el cierre; al recuperar el foco tras cerrar el selector, el panel consulta la vinculación. No hay sondeo periódico ni reintentos automáticos de escrituras.
-
-La vuelta en la misma pestaña registra la revisión confirmada y solo recarga el perfil: no repite el guardado. El Worker contrasta `x-armi-teacher-id` con la sesión actual para rechazar un cambio de cuenta durante la elección. El encabezado es una comprobación de consistencia, no un mecanismo de autenticación adicional. Las pruebas automatizadas cubren pérdida del opener, errores al guardar, cambio de revisión y doble selección. Falta confirmar en Brave móvil real: si el navegador abre directamente docs.google.com fuera de la página de ARMI, Google puede perder su canal de retorno y esta prueba no lo reproduce.
-
-Referencias: [Carpeta inicial](https://developers.google.com/workspace/drive/picker/reference/picker.docsview.setparent), [Vista de lista para permisos limitados](https://developers.google.com/workspace/drive/picker/reference/picker.docsview.setmode).
+Aceptación pendiente: configurar/aprobar el alcance en Google, reconectar, abrir subcarpetas, descargar una muestra y comprobar que un archivo añadido desde Windows aparece al actualizar. La subida y la sincronización de cambios se desarrollan después; vincular una carpeta no las termina.

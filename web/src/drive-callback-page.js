@@ -2,9 +2,9 @@
 const diagnostics={
  'DRIVE-CREDENCIALES':'Google no aceptó las credenciales de ARMI. El administrador debe comprobar que el ID de cliente y el secreto guardados en Cloudflare pertenecen al mismo cliente OAuth ARMI Web.',
  'DRIVE-AUTORIZACION':'Esta autorización venció, ya fue utilizada o pertenece a otra sesión. Vuelve a ARMI y comienza otra conexión desde Google Drive; no recargues este enlace.',
- 'DRIVE-CANCELADO':'Google no devolvió una autorización completa. Vuelve a ARMI y autoriza el acceso a los archivos seleccionados desde Google Drive.',
+ 'DRIVE-CANCELADO':'Google no devolvió una autorización completa. Vuelve a ARMI y conecta Google Drive aceptando los permisos solicitados.',
  'DRIVE-TOKEN':'No se pudo completar el intercambio de autorización con Google. Vuelve a iniciar la conexión desde ARMI. Si se repite, comparte únicamente la referencia de este aviso con el administrador.',
- 'DRIVE-PERMISOS':'Google no devolvió todos los permisos necesarios para mantener la conexión. Vuelve a ARMI y autoriza el acceso a los archivos seleccionados.',
+ 'DRIVE-PERMISOS':'Google no devolvió todos los permisos necesarios para consultar tu carpeta y sus subcarpetas. Vuelve a ARMI y actualiza los permisos de Google.',
  'DRIVE-IDENTIDAD':'No se pudo confirmar el correo verificado de tu cuenta de Google. Vuelve a conectar desde ARMI y permite el acceso a la identidad básica y a los archivos seleccionados.',
  'DRIVE-CIFRADO':'No se pudo proteger la conexión. El administrador debe revisar la clave de cifrado configurada en Cloudflare sin reemplazarla si ya hay conexiones guardadas.',
  'DRIVE-GUARDADO':'No se pudo guardar la conexión de forma segura. Vuelve a ARMI y comprueba el estado de Google Drive antes de iniciar otro intento.',
