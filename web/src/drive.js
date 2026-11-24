@@ -185,7 +185,7 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
    verified=true;
   }
   const legacy=legacyFolder(JSON.parse(teacher.membership_json||'{}'));
-  if(legacy?.id===id&&!verified)fail('Ese enlace pertenece a la ubicación anterior de Apps Script. Elige la carpeta de tu usuario dentro de ARMI Sync → users. Si ese enlace corresponde al espejo actual, autoriza también su archivo .armi-sync-root.json para comprobarlo.',409);
+  if(legacy?.id===id&&!verified)fail('No pudimos confirmar que esta sea tu carpeta de trabajo. Elige la carpeta que utilizas con ARMI en tu computadora o contacta al soporte.',409);
   const collision=await db.prepare('SELECT 1 FROM drive_connections WHERE folder_id=? AND teacher_id<>?').bind(id,teacher.id).first();if(collision)fail('Esta carpeta ya está vinculada a otra cuenta de ARMI.',409);
   const changed=await db.prepare('UPDATE drive_connections SET folder_id=?,folder_name=?,mirror_verified=?,revision=revision+1,updated_at=? WHERE teacher_id=? AND revision=?').bind(id,String(folder.name||'Carpeta').slice(0,300),Number(verified),now,teacher.id,row.revision).run();
   if(!changed.meta.changes)fail('La conexión cambió en otra pestaña. Recarga su estado.',409);
