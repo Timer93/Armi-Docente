@@ -3,6 +3,7 @@ import {test} from 'node:test';
 import {DatabaseSync} from 'node:sqlite';
 import fs from 'node:fs';
 import {driveRoute} from '../src/drive.js';
+import {driveCallbackPage} from '../src/drive-callback-page.js';
 
 const ROOT_A='folder-AAAAAA',ROOT_B='folder-BBBBBB',FILE_A='image-AAAAAAA',OUTSIDE='image-OUTSIDE',MARKER='marker-AAAAAA';
 function fixture(t){
@@ -25,13 +26,14 @@ function fixture(t){
   const url=new URL(value);calls.push({url:url.href,options});
   if(provider.status!==200)return new Response('',{status:provider.status});
   if(url.href==='https://oauth2.googleapis.com/token'){
+   if(provider.tokenError)return Response.json({error:provider.tokenError,error_description:'private-provider-description <script> secret=do-not-display'},{status:400});
    const body=new URLSearchParams(options.body);let identity;
    if(body.get('grant_type')==='refresh_token'){identity=body.get('refresh_token').slice(8);provider.refreshCalls++;}
    else{identity=body.get('code');const actual=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body.get('code_verifier')))).toString('base64url');assert.equal(actual,challenges.get(identity));}
    return Response.json({access_token:'access-'+identity,refresh_token:'refresh-'+identity,expires_in:3600,scope:provider.tokenScope||'https://www.googleapis.com/auth/drive.file'});
   }
   const token=options.headers.authorization.replace('Bearer access-','');
-  if(url.href==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'google-'+token,email:token+'@example.test',email_verified:true});
+  if(url.href==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'google-'+token,email:token+'@example.test',email_verified:provider.emailVerified!==false});
   assert.equal(url.hostname,'www.googleapis.com');
   if(url.pathname.endsWith('/about'))return Response.json({user:{permissionId:'google-'+token,emailAddress:token+'@example.test'}});
   if(url.pathname==='/drive/v3/files'){
@@ -45,7 +47,7 @@ function fixture(t){
  const call=async(teacher,path,{method='GET',body}={})=>{
   const request=new Request('https://web.armi.test'+path,{method,headers:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
   try{return await driveRoute(request,env,teacher,{requester,digest,randomToken:()=>crypto.randomUUID().replaceAll('-','')+crypto.randomUUID().replaceAll('-',''),now,readJson:r=>r.json()});}
-  catch(error){if(!error.status)throw error;return Response.json({message:error.message},{status:error.status});}
+  catch(error){if(!error.status)throw error;return Response.json({message:error.message,diagnostic:error.driveDiagnostic},{status:error.status});}
  };
  const profile=async teacher=>(await(await call(teacher,'/api/drive/profile')).json()).data;
  const start=async(teacher,identity=teacher.id)=>{
@@ -58,6 +60,25 @@ function fixture(t){
  const link=async(teacher,id=ROOT_A)=>call(teacher,'/api/drive/folder',{method:'PUT',body:{folder:'https://drive.google.com/drive/folders/'+id,revision:(await profile(teacher)).revision}});
  return{env,sqlite,teachers,calls,call,profile,start,finish,connect,link,documents,provider,advance:ms=>{now+=ms;}};
 }
+
+test('OAuth failures identify credential, consent and identity stages without leaking provider responses',async t=>{
+ const f=fixture(t),[a]=f.teachers;
+ for(const [error,reference] of [['invalid_client','DRIVE-CREDENCIALES'],['unauthorized_client','DRIVE-CREDENCIALES'],['invalid_grant','DRIVE-AUTORIZACION'],['arbitrary-secret-value','DRIVE-TOKEN']]){
+  f.provider.tokenError=error;
+  const result=await f.finish(a,await f.start(a));
+  const data=await result.json();assert.equal(data.diagnostic,reference);
+  const html=await driveCallbackPage(result.status,data.diagnostic).text();
+  assert.ok(html.includes(reference));assert.ok(!html.includes('private-provider-description')&&!html.includes('<script>')&&!html.includes('arbitrary-secret-value'));
+  assert.equal((await f.profile(a)).connected,false);
+  f.advance(60000);
+ }
+ delete f.provider.tokenError;f.provider.emailVerified=false;
+ const failed=await f.finish(a,await f.start(a));
+ assert.equal((await failed.json()).diagnostic,'DRIVE-IDENTIDAD');assert.equal((await f.profile(a)).connected,false);
+ f.advance(60000);f.provider.emailVerified=true;
+ await f.connect(a);assert.equal((await f.profile(a)).connected,true);
+ const untrusted=await driveCallbackPage(400,'<script>private</script>').text();assert.ok(!untrusted.includes('<script>'));
+});
 
 test('Drive OAuth is tied to one teacher/session, uses PKCE and never exposes stored Google tokens',async t=>{
  const f=fixture(t),[a,b]=f.teachers,auth=await f.start(a);

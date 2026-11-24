@@ -114,7 +114,7 @@ export function createWorker({ requester = fetch, clock = Date.now } = {}) {
       } catch (error) {
         response = json({ success: false, message: error instanceof AuthError ? error.message : 'No se pudo completar la operación. Intenta nuevamente.' },
           error instanceof AuthError ? error.status : 503, error?.status === 429 ? { 'retry-after': '60' } : {});
-        if(request.method==='GET'&&new URL(request.url).pathname==='/api/drive/oauth/callback')response=driveCallbackPage(response.status);
+        if(request.method==='GET'&&new URL(request.url).pathname==='/api/drive/oauth/callback')response=driveCallbackPage(response.status,error.driveDiagnostic);
       }
       recordUsage(env, request, response, measurement, performance.now() - startedAt);
       const headers = new Headers(response.headers);

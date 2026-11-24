@@ -1,6 +1,6 @@
 import {AuthError} from './apps-script-auth.js';
 import {serviceLimit} from './ai.js';
-const fail=(message,status=400)=>{throw new AuthError(message,status);};
+const fail=(message,status=400,diagnostic)=>{const error=new AuthError(message,status);if(diagnostic)error.driveDiagnostic=diagnostic;throw error;};
 const SCOPE='https://www.googleapis.com/auth/drive.file';
 const API='https://www.googleapis.com/drive/v3/';
 const FOLDER='application/vnd.google-apps.folder';
@@ -19,10 +19,18 @@ function config(env){
 async function cryptKey(env){return crypto.subtle.importKey('raw',unhex(env.ARMI_DRIVE_ENCRYPTION_KEY),'AES-GCM',false,['encrypt','decrypt']);}
 async function seal(env,aad,value){const iv=crypto.getRandomValues(new Uint8Array(12));return {cipher:hex(new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:new TextEncoder().encode(aad)},await cryptKey(env),new TextEncoder().encode(JSON.stringify(value))))),iv:hex(iv)};}
 async function open(env,aad,cipher,iv){try{return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unhex(iv),additionalData:new TextEncoder().encode(aad)},await cryptKey(env),unhex(cipher))));}catch{fail('No se pudo abrir la conexión guardada. Conecta nuevamente tu cuenta de Google.',503);}}
-async function remote(requester,url,options={}){
+async function remote(requester,url,options={},oauthToken=false){
  try{
   const response=await requester(url,{...options,redirect:'error',signal:AbortSignal.timeout(20000)});
-  if(!response.ok){await response.body?.cancel();fail(response.status===429?'Google Drive alcanzó su cuota. Intenta más tarde.':response.status===401?'Vuelve a conectar tu cuenta de Google.':'Google Drive no permitió completar la operación. Revisa los permisos de la cuenta.',response.status===429?429:502);}
+  if(!response.ok){
+   if(oauthToken){
+    // Only interpret known error identifiers; never expose descriptions or bodies.
+    let payload;try{payload=await readRemoteJson(response,16384);}catch{}
+    if(['invalid_client','unauthorized_client'].includes(payload?.error))fail('Google no aceptó las credenciales OAuth de ARMI.',502,'DRIVE-CREDENCIALES');
+    if(payload?.error==='invalid_grant')fail('La autorización de Google ya no es válida. Conecta de nuevo.',400,'DRIVE-AUTORIZACION');
+   }else await response.body?.cancel();
+   fail(response.status===429?'Google Drive alcanzó su cuota. Intenta más tarde.':response.status===401?'Vuelve a conectar tu cuenta de Google.':'Google Drive no permitió completar la operación. Revisa los permisos de la cuenta.',response.status===429?429:502);
+  }
   return response;
  }catch(error){if(error instanceof AuthError)throw error;fail('Google Drive no respondió. Tus datos guardados no se modificaron.',502);}
 }
@@ -33,7 +41,7 @@ async function readRemoteJson(response,limit=1000000){
  try{return JSON.parse(new TextDecoder().decode(data));}catch{fail('Google Drive no devolvió una respuesta válida.',502);}
 }
 async function tokenRequest(env,requester,values){
- const response=await remote(requester,'https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:env.ARMI_GOOGLE_CLIENT_ID,client_secret:env.ARMI_GOOGLE_CLIENT_SECRET,...values}).toString()});
+ const response=await remote(requester,'https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:env.ARMI_GOOGLE_CLIENT_ID,client_secret:env.ARMI_GOOGLE_CLIENT_SECRET,...values}).toString()},true);
  const payload=await readRemoteJson(response);
  if(typeof payload.access_token!=='string'||!payload.access_token||payload.access_token.length>4096||!Number.isFinite(Number(payload.expires_in))||Number(payload.expires_in)<=0||(payload.scope&&(!payload.scope.split(' ').includes(SCOPE)||payload.scope.split(' ').some(scope=>scope==='https://www.googleapis.com/auth/drive'||scope==='https://www.googleapis.com/auth/drive.readonly'))))fail('Google no concedió únicamente los permisos limitados solicitados. Revisa la configuración del cliente OAuth.',502);
  return payload;
@@ -81,8 +89,8 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
   const row=ready?await db.prepare('SELECT google_email,folder_id,folder_name,mirror_verified,revision FROM drive_connections WHERE teacher_id=?').bind(teacher.id).first():null;
   return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:/^AIza[a-zA-Z0-9_-]{20,100}$/.test(env.ARMI_GOOGLE_PICKER_API_KEY||'')&&/^\d{6,30}$/.test(env.ARMI_GOOGLE_PROJECT_NUMBER||''),connected:Boolean(row),email:row?.google_email||'',suggestedFolder:JSON.parse(teacher.membership_json||'{}').driveFolderUrl||'',folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:true}});
  }
- if(!ready)fail('Falta activar 0012_drive_connection.sql en D1.',503);
- if(!settings)fail('El administrador debe configurar la conexión de Google Drive para ARMI Web.',503);
+ if(!ready)fail('Falta activar 0012_drive_connection.sql en D1.',503,'DRIVE-DATOS');
+ if(!settings)fail('El administrador debe configurar la conexión de Google Drive para ARMI Web.',503,'DRIVE-CONFIG');
  if(url.origin!==settings.origin)fail('Abre ARMI desde el dominio configurado para conectar Google Drive.',400);
  const row=await db.prepare('SELECT * FROM drive_connections WHERE teacher_id=?').bind(teacher.id).first();
  if(url.pathname==='/api/drive/connect'&&request.method==='POST'){
@@ -96,27 +104,36 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
   return Response.json({success:true,data:{authorizationUrl:auth.href}});
  }
  if(url.pathname==='/api/drive/oauth/callback'&&request.method==='GET'){
+  let stage='DRIVE-AUTORIZACION';
+  try{
   const state=url.searchParams.get('state'),code=url.searchParams.get('code');
   if(!/^[a-f0-9]{64}$/.test(state||''))fail('La autorización de Google no es válida. Vuelve a conectar tu cuenta.');
   const stateHash=await digest(state);
   const pending=await db.prepare('DELETE FROM drive_oauth_states WHERE state_hash=? AND teacher_id=? AND session_hash=? AND expires_at>? RETURNING *').bind(stateHash,teacher.id,teacher.token_hash,now).first();
   if(!pending)fail('La autorización venció o pertenece a otra sesión. Vuelve a conectar tu cuenta.');
-  if(url.searchParams.has('error')||!code||code.length>4096)fail('La autorización de Google fue cancelada. Puedes volver a intentarlo.');
+  if(url.searchParams.has('error')||!code||code.length>4096)fail('La autorización de Google fue cancelada. Puedes volver a intentarlo.',400,'DRIVE-CANCELADO');
   if(pending.connection_revision!==(row?.revision||0))fail('La conexión cambió en otra pestaña. Vuelve a abrir el panel.',409);
+  stage='DRIVE-CIFRADO';
   const verifier=await open(env,`${teacher.id}:drive-state:${stateHash}`,pending.verifier_cipher,pending.verifier_iv);
+  stage='DRIVE-TOKEN';
   const tokens=await tokenRequest(env,requester,{grant_type:'authorization_code',code,redirect_uri:settings.redirect,code_verifier:verifier});
+  stage='DRIVE-PERMISOS';
   if(!tokens.scope?.split(' ').includes(SCOPE))fail('Google no confirmó el permiso limitado para archivos seleccionados.',502);
   if(typeof tokens.refresh_token!=='string'||!tokens.refresh_token||tokens.refresh_token.length>4096)fail('Google no concedió acceso persistente. Vuelve a conectar y autoriza el acceso.',502);
+  stage='DRIVE-IDENTIDAD';
   const account=await readRemoteJson(await remote(requester,'https://openidconnect.googleapis.com/v1/userinfo',{headers:{authorization:`Bearer ${tokens.access_token}`}}));
   if(typeof account.sub!=='string'||typeof account.email!=='string'||account.email_verified!==true)fail('Google no devolvió la identidad verificada de la cuenta.',502);
   const info={user:{permissionId:account.sub,emailAddress:account.email}};
+  stage='DRIVE-CIFRADO';
   const sealed=await seal(env,`${teacher.id}:drive`,{access:tokens.access_token,refresh:tokens.refresh_token,expiresAt:now+Number(tokens.expires_in)*1000});
+  stage='DRIVE-GUARDADO';
   const saved=await db.prepare(`INSERT INTO drive_connections(teacher_id,google_account_id,google_email,token_cipher,token_iv,updated_at) SELECT ?,?,?,?,?,? WHERE ?=0
    ON CONFLICT(teacher_id) DO UPDATE SET google_account_id=excluded.google_account_id,google_email=excluded.google_email,token_cipher=excluded.token_cipher,token_iv=excluded.token_iv,folder_id=CASE WHEN drive_connections.google_account_id=excluded.google_account_id THEN drive_connections.folder_id ELSE NULL END,folder_name=CASE WHEN drive_connections.google_account_id=excluded.google_account_id THEN drive_connections.folder_name ELSE '' END,mirror_verified=CASE WHEN drive_connections.google_account_id=excluded.google_account_id THEN drive_connections.mirror_verified ELSE 0 END,revision=drive_connections.revision+1,updated_at=excluded.updated_at WHERE drive_connections.revision=?`).bind(teacher.id,info.user.permissionId,info.user.emailAddress,sealed.cipher,sealed.iv,now,row?.revision||0,row?.revision||0).run();
   // Updating an existing connection needs a real row in the guarded INSERT.
   if(!saved.meta.changes&&row){const updated=await db.prepare('UPDATE drive_connections SET google_account_id=?,google_email=?,token_cipher=?,token_iv=?,folder_id=CASE WHEN google_account_id=? THEN folder_id ELSE NULL END,folder_name=CASE WHEN google_account_id=? THEN folder_name ELSE \'\' END,mirror_verified=CASE WHEN google_account_id=? THEN mirror_verified ELSE 0 END,revision=revision+1,updated_at=? WHERE teacher_id=? AND revision=?').bind(info.user.permissionId,info.user.emailAddress,sealed.cipher,sealed.iv,info.user.permissionId,info.user.permissionId,info.user.permissionId,now,teacher.id,row.revision).run();if(!updated.meta.changes)fail('La conexión cambió en otra pestaña. Intenta nuevamente.',409);}
   else if(!saved.meta.changes)fail('La conexión cambió en otra pestaña. Intenta nuevamente.',409);
   return new Response(null,{status:302,headers:{location:'/?armi-drive=connected'}});
+  }catch(error){if(!error.driveDiagnostic)error.driveDiagnostic=stage;throw error;}
  }
  if(!row)fail('Conecta tu cuenta de Google antes de continuar.');
  if(url.pathname==='/api/drive/connection'&&request.method==='DELETE'){
