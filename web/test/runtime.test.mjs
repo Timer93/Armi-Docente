@@ -46,8 +46,10 @@ test('Drive browser transport permits implemented routes and blocks unimplemente
  try{
   for(const [path,method] of [['/api/drive/profile','GET'],['/api/drive/connect','POST'],['/api/drive/folder','PUT'],['/api/drive/selection','POST'],['/api/drive/files?parent=fixtureFolder','GET'],['/api/drive/content?file=fixtureFile','GET'],['/api/drive/connection','DELETE']])assert.equal((await win.fetch(path,{method})).status,200);
   assert.equal(calls.length,7);
+  for(const [path,method] of [['/api/drive/upload/prepare','POST'],['/api/drive/upload','POST'],['/api/drive/upload/status','GET']])assert.equal((await win.fetch(path,{method})).status,200);
+  assert.equal(calls.length,10);
   assert.equal((await win.fetch('/api/drive/sync',{method:'POST'})).status,404);
   assert.equal((await win.fetch('/api/drive/folder',{method:'DELETE'})).status,404);
-  assert.equal(calls.length,7);
+  assert.equal(calls.length,10);
  }finally{reset();}
 });
