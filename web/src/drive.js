@@ -89,6 +89,9 @@ function folderInput(value){
  try{const url=new URL(value);if(url.protocol==='https:'&&url.hostname==='drive.google.com'&&!url.username&&!url.password){const id=url.pathname.match(/\/folders\/([a-zA-Z0-9_-]+)/)?.[1];if(fileId(id))return id;}}catch{}
  fail('Pega el enlace de la carpeta de Google Drive que usa este docente.');
 }
+function legacyFolder(membership){
+ try{const id=folderInput(membership.driveFolderUrl);return {id,name:String(membership.driveFolderName||'Ubicación anterior de Apps Script').slice(0,300),url:'https://drive.google.com/drive/folders/'+id};}catch{return null;}
+}
 async function unchanged(db,row){if(!await db.prepare('SELECT 1 FROM drive_connections WHERE teacher_id=? AND revision=?').bind(row.teacher_id,row.revision).first())fail('La conexión cambió en otra pestaña. Abre nuevamente el panel.',409);}
 
 export async function driveRoute(request,env,teacher,{readJson,digest,randomToken,now,requester}){
@@ -96,7 +99,10 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  if(url.pathname==='/api/drive/profile'&&request.method==='GET'){
   const row=ready?await db.prepare('SELECT google_email,folder_id,folder_name,mirror_verified,revision FROM drive_connections WHERE teacher_id=?').bind(teacher.id).first():null;
   const membership=JSON.parse(teacher.membership_json||'{}');
-  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:membership.driveFolderUrl||'',suggestedFolderName:membership.driveFolderName||'',folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,url:'https://drive.google.com/drive/folders/'+row.folder_id,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:true}});
+  const legacy=legacyFolder(membership),mirrorUser=scopeKey(membership.syncUserKey||teacher.provider_username);
+  // The legacy Apps Script archive URL is not the Drive Desktop mirror. Never
+  // prefill or suggest it as the active synchronization root.
+  return Response.json({success:true,data:{ready,configured:Boolean(settings),pickerConfigured:picker.configured,pickerSetup:picker.setup,connected:Boolean(row),email:row?.google_email||'',suggestedFolder:'',suggestedFolderName:'',legacyFolder:legacy,expectedMirrorPath:'ARMI Sync/users/'+mirrorUser,expectedMirrorName:mirrorUser,legacyLocationLinked:Boolean(row?.folder_id&&legacy?.id===row.folder_id&&!row.mirror_verified),folder:row?.folder_id?{id:row.folder_id,name:row.folder_name,url:'https://drive.google.com/drive/folders/'+row.folder_id,mirrorVerified:Boolean(row.mirror_verified)}:null,revision:row?.revision||0,readOnly:true,limitedAccess:true}});
  }
  if(!ready)fail('Falta activar 0012_drive_connection.sql en D1.',503,'DRIVE-DATOS');
  if(!settings)fail('El administrador debe configurar la conexión de Google Drive para ARMI Web.',503,'DRIVE-CONFIG');
@@ -178,6 +184,8 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
    if(!marker.syncUserKey||scopeKey(marker.syncUserKey)!==scopeKey(expected))fail('Esta carpeta espejo pertenece a otro usuario de ARMI.',403);
    verified=true;
   }
+  const legacy=legacyFolder(JSON.parse(teacher.membership_json||'{}'));
+  if(legacy?.id===id&&!verified)fail('Ese enlace pertenece a la ubicación anterior de Apps Script. Elige la carpeta de tu usuario dentro de ARMI Sync → users. Si ese enlace corresponde al espejo actual, autoriza también su archivo .armi-sync-root.json para comprobarlo.',409);
   const collision=await db.prepare('SELECT 1 FROM drive_connections WHERE folder_id=? AND teacher_id<>?').bind(id,teacher.id).first();if(collision)fail('Esta carpeta ya está vinculada a otra cuenta de ARMI.',409);
   const changed=await db.prepare('UPDATE drive_connections SET folder_id=?,folder_name=?,mirror_verified=?,revision=revision+1,updated_at=? WHERE teacher_id=? AND revision=?').bind(id,String(folder.name||'Carpeta').slice(0,300),Number(verified),now,teacher.id,row.revision).run();
   if(!changed.meta.changes)fail('La conexión cambió en otra pestaña. Recarga su estado.',409);

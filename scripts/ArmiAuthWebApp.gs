@@ -923,11 +923,15 @@ function Login_(params) {
 
     var refreshedPlates = deviceCheck.placaCell || placaCell;
     var emailFinal = gmail || emailExtra;
-    if (normalizeText_(config.syncRootFolderId)) {
+    // Login only reads existing legacy metadata. Folder creation belongs to the
+    // explicit sync_prepare_user/sync_push operations, never to authentication.
+    if (params.skipDrivePreparation !== true && String(params.skipDrivePreparation).toLowerCase() !== 'true' && normalizeText_(config.syncRootFolderId)) {
       try {
-        syncFolderInfo = ensureSyncUserFolder_(syncUserKey || rowUsername, syncUserLabel || displayName);
-        driveFolderName = driveFolderName || syncFolderInfo.folderName;
-        driveFolderUrl = driveFolderUrl || syncFolderInfo.folderUrl;
+        syncFolderInfo = getExistingSyncUserFolder_(syncUserKey || rowUsername, syncUserLabel || displayName);
+        if (syncFolderInfo) {
+          driveFolderName = driveFolderName || syncFolderInfo.folderName;
+          driveFolderUrl = driveFolderUrl || syncFolderInfo.folderUrl;
+        }
       } catch (syncError) {}
     }
 

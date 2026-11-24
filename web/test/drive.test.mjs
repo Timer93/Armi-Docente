@@ -155,8 +155,9 @@ test('folder suggestions belong to each teacher; Picker config trims pasted whit
  const f=fixture(t),[a,b]=f.teachers;
  a.membership_json=JSON.stringify({syncUserKey:'sync-a',driveFolderUrl:'https://drive.google.com/drive/folders/'+ROOT_A,driveFolderName:'My mirror A'});
  b.membership_json=JSON.stringify({syncUserKey:'sync-b'});
- assert.equal((await f.profile(a)).suggestedFolder,'https://drive.google.com/drive/folders/'+ROOT_A);
- assert.equal((await f.profile(a)).suggestedFolderName,'My mirror A');assert.equal((await f.profile(b)).suggestedFolderName,'');
+ assert.equal((await f.profile(a)).suggestedFolder,'');
+ assert.equal((await f.profile(a)).legacyFolder.name,'My mirror A');assert.equal((await f.profile(b)).legacyFolder,null);
+ assert.equal((await f.profile(a)).expectedMirrorPath,'ARMI Sync/users/sync-a');
  assert.equal((await f.profile(a)).folder,null);assert.equal((await f.profile(b)).suggestedFolder,'');
  assert.equal(f.calls.length,0,'A saved folder is only a suggestion, not an automatic Google grant');
  assert.deepEqual((await f.profile(a)).pickerSetup,{apiKeyReady:false,projectNumberReady:false,projectMatchesClient:true});
@@ -175,6 +176,19 @@ test('folder suggestions belong to each teacher; Picker config trims pasted whit
  assert.equal((await f.profile(a)).pickerSetup.projectMatchesClient,false);assert.equal((await f.call(a,'/api/drive/picker-config')).status,503);
  f.env.ARMI_GOOGLE_PROJECT_NUMBER='938978696413';f.env.ARMI_GOOGLE_PICKER_API_KEY='not-a-google-key';
  assert.equal((await f.profile(a)).pickerSetup.apiKeyReady,false);assert.equal((await f.profile(a)).pickerConfigured,false);
+});
+
+test('legacy Apps Script folders are never preselected as mirrors and require a matching marker to link',async t=>{
+ const f=fixture(t),[a,b]=f.teachers;
+ a.membership_json=JSON.stringify({syncUserKey:'sync-a',driveFolderUrl:'https://drive.google.com/drive/folders/'+ROOT_B,driveFolderName:'ARMI_legacy'});
+ await f.connect(a);assert.equal((await f.link(a,ROOT_B)).status,409);assert.equal((await f.profile(a)).folder,null);
+ assert.equal((await f.link(a,ROOT_A)).status,200);assert.equal((await f.profile(a)).folder.mirrorVerified,true);
+ await f.connect(b);await f.link(b,ROOT_B);
+ b.membership_json=JSON.stringify({syncUserKey:'sync-b',driveFolderUrl:'https://drive.google.com/drive/folders/'+ROOT_B});
+ assert.equal((await f.profile(b)).legacyLocationLinked,true,'Existing unverified links are flagged without deleting data');
+ b.membership_json=JSON.stringify({driveFolderUrl:'javascript:private-value'});assert.equal((await f.profile(b)).legacyFolder,null);
+ a.membership_json=JSON.stringify({syncUserKey:'sync-a',driveFolderUrl:'https://drive.google.com/drive/folders/'+ROOT_A});
+ assert.equal((await f.link(a,ROOT_A)).status,200,'An actual mirror marker may verify an old registered URL');
 });
 
 test('Drive never upgrades a limited authorization to broad Drive read access',async t=>{

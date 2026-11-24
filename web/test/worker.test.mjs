@@ -906,7 +906,8 @@ test('Drive routes require the teacher session and same-origin writes; Google re
  const a=await f.login();assert.equal(a.data.membership.syncUserKey,'original-mirror-identity');
  assert.equal(a.data.membership.driveFolderName,'Mirror teacher A');
  const profile=await f.call('/api/drive/profile',{cookie:a.cookie});assert.equal(profile.status,200);const data=(await profile.json()).data;
- assert.equal(data.suggestedFolder,'https://drive.google.com/drive/folders/fixtureFolder12345');assert.equal(data.configured,false);assert.equal(data.connected,false);
+ assert.equal(data.suggestedFolder,'');assert.equal(data.legacyFolder.url,'https://drive.google.com/drive/folders/fixtureFolder12345');assert.equal(data.expectedMirrorPath,'ARMI Sync/users/original-mirror-identity');assert.equal(data.configured,false);assert.equal(data.connected,false);
+ assert.equal(f.calls[0].body.skipDrivePreparation,true);
  assert.equal((await f.call('/api/drive/connect',{method:'POST',cookie:a.cookie,origin:'https://other.test',body:{}})).status,403);
  assert.equal(f.calls.length,1,'Opening the Drive panel does not query Apps Script again');
  const normal=await f.call('/');assert.ok(!normal.headers.get('content-security-policy').includes('apis.google.com'));

@@ -39,7 +39,7 @@ export async function authenticateWithAppsScript(env, credentials, requester = f
       signal: AbortSignal.timeout(15_000),
       // El navegador no representa una PC nueva. Login_ ya admite placa vacía.
       body: JSON.stringify({ action: 'Login', Usuario: username, 'Contraseña': password,
-        username, password, Placa: '', placa: '', devicePlate: '', InfoUsuario: '' }),
+        username, password, Placa: '', placa: '', devicePlate: '', InfoUsuario: '',skipDrivePreparation:true }),
     });
     if (!response.ok) throw new Error('upstream');
     raw = await response.json();
