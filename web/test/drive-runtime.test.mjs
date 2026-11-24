@@ -3,17 +3,23 @@ import {test} from 'node:test';
 import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 
 test('workerd: real outbound fetch completes Drive OAuth and blocks redirects for tokens, files and AI', {timeout:60000}, async t=>{
  const bundle=await build({entryPoints:[fileURLToPath(new URL('../src/worker.js',import.meta.url))],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
  const calls=[];let challenge='',redirectToken=false,redirectFile=false,redirectAI=false;
- const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-11-21',d1Databases:{DB:'armi-drive-runtime'},bindings:{
+ const assets=fs.mkdtempSync(path.join(os.tmpdir(),'armi-picker-runtime-'));
+ fs.copyFileSync(new URL('../public/drive-picker.html',import.meta.url),path.join(assets,'drive-picker.html'));
+ t.after(()=>{fs.unlinkSync(path.join(assets,'drive-picker.html'));fs.rmdirSync(assets);});
+ const mf=new Miniflare(convertV4MiniflareOptions({name:'armi-picker-runtime',modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-11-21',d1Databases:{DB:'armi-drive-runtime'},assets:{directory:assets,binding:'ASSETS',routerConfig:{has_user_worker:true},run_worker_first:['/api/*']},bindings:{
   ARMI_AUTH_APPS_SCRIPT_URL:'https://script.google.com/macros/s/runtime-fixture/exec',
   ARMI_GOOGLE_CLIENT_ID:'runtime.apps.googleusercontent.com',ARMI_GOOGLE_CLIENT_SECRET:'runtime-fixture-secret-only',
   ARMI_DRIVE_ENCRYPTION_KEY:'ab'.repeat(32),ARMI_AI_ENCRYPTION_KEY:'cd'.repeat(32),
   ARMI_DRIVE_REDIRECT_URI:'https://web.armi.test/api/drive/oauth/callback',
+  ARMI_GOOGLE_PICKER_API_KEY:'AIza'+'a'.repeat(35),ARMI_GOOGLE_PROJECT_NUMBER:'123456789012',
  },outboundService:async request=>{
   const url=new URL(request.url);calls.push(url.origin+url.pathname);
   if(url.hostname==='script.google.com')return Response.json({success:true,data:{username:'runtime-teacher',displayName:'Runtime teacher',active:true,estado:'Habilitad@'}});
@@ -42,6 +48,8 @@ test('workerd: real outbound fetch completes Drive OAuth and blocks redirects fo
  }
  let cookie='';
  const call=(path,method='GET',body)=>mf.dispatchFetch('https://web.armi.test'+path,{method,redirect:'manual',headers:{origin:'https://web.armi.test',cookie,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+ const anonymousPicker=await call('/api/drive/picker?mode=folder&requestId=00000000-0000-4000-8000-000000000000');
+ assert.equal(anonymousPicker.status,401,await anonymousPicker.text());
  const login=await call('/api/auth/login','POST',{username:'runtime-teacher',password:'fixture-password'});
  assert.equal(login.status,200,await login.clone().text());cookie=login.headers.get('set-cookie').split(';')[0];
  const start=async()=>{
@@ -54,6 +62,16 @@ test('workerd: real outbound fetch completes Drive OAuth and blocks redirects fo
  assert.equal(completed.headers.get('location'),'/?armi-drive=connected');
  const profile=async()=>(await(await call('/api/drive/profile')).json()).data;
  assert.equal((await profile()).email,'runtime@example.test');
+ const query='?mode=folder&requestId=00000000-0000-4000-8000-000000000000';
+ const fileRedirect=await call('/drive-picker.html'+query);
+ assert.equal(fileRedirect.status,307,'Actual asset routing canonicalizes .html filenames');
+ assert.equal(fileRedirect.headers.get('location'),'/drive-picker'+query);
+ const pickerPage=await call('/api/drive/picker'+query);
+ assert.equal(pickerPage.status,200,'The authenticated picker must return HTML without redirecting away and losing mode or requestId');
+ assert.equal(pickerPage.headers.get('location'),null);
+ assert.ok((await pickerPage.text()).includes('id="picker-status"'));
+ assert.ok(pickerPage.headers.get('content-security-policy').includes('https://apis.google.com'));
+ assert.equal(pickerPage.headers.get('referrer-policy'),'strict-origin-when-cross-origin');
  assert.equal((await call('/api/drive/folder','PUT',{folder:'runtime-folder-root',revision:1})).status,200);
  const download=await call('/api/drive/content?file=runtime-image-file');assert.equal(download.status,200);assert.equal(await download.text(),'fixture-image');
  redirectFile=true;assert.equal((await call('/api/drive/content?file=runtime-image-file')).status,502);

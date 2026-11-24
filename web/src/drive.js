@@ -151,7 +151,14 @@ export async function driveRoute(request,env,teacher,{readJson,digest,randomToke
  }
  await serviceLimit(db,`drive-read:${teacher.id}:${Math.floor(now/60000)}`,120,now+120000);
  const token=await accessToken(env,row,requester,now);
- if(url.pathname==='/api/drive/picker'&&request.method==='GET')return env.ASSETS.fetch(new Request(new URL('/drive-picker.html',url),request));
+ if(url.pathname==='/api/drive/picker'&&request.method==='GET'){
+  // ASSETS canonicalizes .html with a 307. Serve the canonical asset internally
+  // so the browser stays on the authenticated URL with mode/requestId intact.
+  const assetUrl=new URL(request.url);assetUrl.pathname='/drive-picker';
+  const page=await env.ASSETS.fetch(new Request(assetUrl,request));
+  if(page.status!==200)fail('No se pudo preparar el selector. Vuelve a abrirlo desde Google Drive.',503);
+  return page;
+ }
  if(url.pathname==='/api/drive/picker-config'&&request.method==='GET'){
   if(!picker.configured)fail('El administrador debe completar la configuración del selector de Google.',503);
   // Only the teacher's isolated Picker page receives a short-lived, per-file
