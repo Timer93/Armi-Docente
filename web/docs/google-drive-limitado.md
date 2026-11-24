@@ -12,7 +12,7 @@ Elegir una carpeta **no demuestra que todos sus archivos estén autorizados**. L
 
 1. Crear un proyecto llamado **ARMI Docente** en [Google Cloud](https://console.cloud.google.com/projectcreate), sin vincular cuenta de facturación ni contratar la prueba de pago. La facturación no es un paso de este procedimiento.
 2. En el mismo proyecto habilitar **Google Drive API** y **Google Picker API**.
-3. En **Google Auth Platform**, configurar la marca ARMI, correo de soporte y audiencia **External**. Para la prueba inicial, añadir la cuenta Google del docente como usuario de prueba. Añadir únicamente `drive.file` y los permisos básicos de identidad `openid`, `email`.
+3. En **Google Auth Platform**, configurar la marca ARMI, correo de soporte y audiencia **External**. Privacidad pública: `https://web.armiapp.com/privacidad`; condiciones: `https://web.armiapp.com/condiciones`. Comprobar que ambos enlaces carguen sin sesión antes de guardarlos en Google. Para la prueba inicial, añadir la cuenta Google del docente como usuario de prueba. Añadir únicamente `drive.file` y los permisos básicos de identidad `openid`, `email`. Para el acceso de docentes externos, completar la marca y publicar la aplicación desde **Público**; atender los requisitos de verificación que indique Google. Publicar OAuth no habilita funciones pendientes de ARMI ni activa facturación por sí mismo.
 4. Crear un cliente OAuth de tipo **Aplicación web**, con nombre **ARMI Web**. Origen autorizado: `https://web.armiapp.com`. URI de redirección exacta:
 
    ```text

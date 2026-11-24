@@ -65,7 +65,7 @@ export function DrivePanel({compact=false}:{compact?:boolean}){
     <details><summary>Opciones de conexión</summary><button type="button" disabled={busy} onClick={()=>void action(async()=>{const result=await academicApi('/api/drive/connect','POST',{});window.location.assign(result.authorizationUrl);})}>Volver a conectar Google</button><button type="button" disabled={busy} onClick={()=>void action(async()=>{await academicApi('/api/drive/connection','DELETE',{revision:profile.revision});setFiles([]);setPath([]);setPreview(null);setPage(null);await load();})}>Desvincular de ARMI Web</button></details>
    </>}
   </>}
-  <p className="drive-stage-note">Puedes consultar y descargar archivos. La subida y la sincronización con Windows siguen pendientes.</p>
+  <p className="drive-stage-note">Puedes consultar y descargar archivos. La subida y la sincronización con Windows siguen pendientes. <a href="/privacidad" target="_blank" rel="noreferrer">Privacidad y uso de datos</a> · <a href="/condiciones" target="_blank" rel="noreferrer">Condiciones del Servicio</a>.</p>
   {message&&<p role="status">{message}</p>}
   <footer><button type="button" disabled={busy} onClick={()=>{setOpen(false);setPreview(null);}}>Cerrar</button></footer>
  </section></div>,document.body)}

@@ -76,6 +76,25 @@ function fixture(t) {
   return { sqlite, env, worker, call, login, calls, users, requester, analyticsQueries, analyticsResponse, ai, advance: ms => { now += ms; } };
 }
 
+test('public privacy and terms work without sessions, database or Google configuration', async t => {
+  const f=fixture(t);
+  for(const [path,title] of [['/privacidad','Política de Privacidad'],['/condiciones','Condiciones del Servicio']]){
+    const response=await f.worker.fetch(new Request('https://app.armi.test'+path),{});
+    assert.equal(response.status,200);
+    assert.match(response.headers.get('content-type'),/text\/html; charset=utf-8/);
+    const html=await response.text();
+    assert.ok(html.includes(title)&&html.includes('djtimer.2016@gmail.com'));
+    assert.ok(html.includes('href="/privacidad"')&&html.includes('href="/condiciones"'));
+    assert.ok(!html.includes('<script'));
+    assert.equal(response.headers.get('x-frame-options'),'DENY');
+    const head=await f.worker.fetch(new Request('https://app.armi.test'+path,{method:'HEAD'}),{});
+    assert.equal(head.status,200);assert.equal(await head.text(),'');
+  }
+  assert.equal((await f.call('/privacidad-extra')).status,404);
+  assert.equal((await f.call('/api/drive/profile')).status,401);
+  assert.equal(f.calls.length,0);
+});
+
 test('Drive callback displays safe recovery pages without bypassing authentication', async t => {
   const f=fixture(t);
   const direct=await f.call('/api/drive/oauth/callback');
