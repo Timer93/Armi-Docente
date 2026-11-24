@@ -1,4 +1,4 @@
--- Automatic capture of committed work. Google credentials are never recorded here.
+/* Automatic capture of committed work. Google credentials are never recorded here. */
 CREATE TABLE IF NOT EXISTS web_sync_setup (version INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS web_sync_outbox (
  id INTEGER PRIMARY KEY AUTOINCREMENT,

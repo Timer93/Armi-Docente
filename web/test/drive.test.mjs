@@ -9,7 +9,10 @@ const ROOT_A='folder-AAAAAA',ROOT_B='folder-BBBBBB',FILE_A='image-AAAAAAA',OUTSI
 function fixture(t,{automatic=false}={}){
  const sqlite=new DatabaseSync(':memory:');
  for(const name of ['0001_identity.sql','0007_ai_student_portal.sql','0012_drive_connection.sql'])sqlite.exec(fs.readFileSync(new URL('../migrations/'+name,import.meta.url),'utf8'));
- if(automatic)for(const name of ['0003_academic_snapshots.sql','0004_academic_edits.sql','0005_planning_edits.sql','0006_web_configuration.sql','0008_web_instruments.sql','0009_web_evaluation.sql','0013_automatic_sync_outbox.sql'])sqlite.exec(fs.readFileSync(new URL('../migrations/'+name,import.meta.url),'utf8'));
+ if(automatic)for(const name of ['0003_academic_snapshots.sql','0004_academic_edits.sql','0005_planning_edits.sql','0006_web_configuration.sql','0008_web_instruments.sql','0009_web_evaluation.sql','0013_automatic_sync_outbox.sql']){
+  const sql=fs.readFileSync(new URL('../migrations/'+name,import.meta.url),'utf8');
+  sqlite.exec(name==='0013_automatic_sync_outbox.sql'?sql.replace(/\r?\n/g,' '):sql);
+ }
  t.after(()=>sqlite.close());
  function prepare(sql,args=[]){return{bind(...values){return prepare(sql,values);},async first(){return sqlite.prepare(sql).get(...args)||null;},async all(){return{results:sqlite.prepare(sql).all(...args)};},async run(){return{meta:{changes:Number(sqlite.prepare(sql).run(...args).changes)}};}};}
  const env={ARMI_GOOGLE_CLIENT_ID:'fixture.apps.googleusercontent.com',ARMI_GOOGLE_CLIENT_SECRET:'fixture-secret-not-real',ARMI_DRIVE_ENCRYPTION_KEY:'ab'.repeat(32),ARMI_DRIVE_REDIRECT_URI:'https://web.armi.test/api/drive/oauth/callback',DB:{prepare,async batch(statements){sqlite.exec('BEGIN');try{const result=[];for(const statement of statements)result.push(await statement.run());sqlite.exec('COMMIT');return result;}catch(error){sqlite.exec('ROLLBACK');throw error;}}}};
@@ -302,7 +305,8 @@ test('Automatic sync captures committed work, groups edits, preserves pending wo
  status=(await(await f.call(a,'/api/drive/sync/status')).json()).data;assert.ok(status.lastSentAt);assert.equal(status.desktopConfirmed,false);
  assert.equal(f.calls.filter(call=>new URL(call.url).pathname==='/upload/drive/v3/files').length,1,'Retry checks the same immutable Google file rather than creating a duplicate');
  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM web_sync_outbox WHERE teacher_id='B'").get().n,1);
- f.sqlite.exec(fs.readFileSync(new URL('../migrations/0013_automatic_sync_outbox.sql',import.meta.url),'utf8'));
+ // D1's dashboard can flatten pasted SQL to one line; comments must not hide it.
+ f.sqlite.exec(fs.readFileSync(new URL('../migrations/0013_automatic_sync_outbox.sql',import.meta.url),'utf8').replace(/\r?\n/g,' '));
  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM web_sync_outbox WHERE teacher_id='A'").get().n,0,'Repeated setup does not enqueue already sent work again');
 });
 
